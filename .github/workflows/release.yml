@@ -25,7 +25,7 @@ jobs:
         with:
           global-json-file: global.json
       - run: make -C tools dotnet
-      - run: dotnet test tools/tests/Trureturing.Truth.Tests --configuration Release --no-build
+      - run: python3 .github/scripts/test-suites.py standalone
       - name: Build the source archive
         run: python3 package_release.py
       - id: upload
@@ -36,9 +36,44 @@ jobs:
           path: build/trureturing-tools.tar.gz
           if-no-files-found: error
 
+  contract:
+    name: Consumer fixture ${{ matrix.shard }}
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: the-omega-institute/trureturing
+          ref: 0eef94604888fa53d0b2807270597027f20c5968
+          path: fixture
+          persist-credentials: false
+      - name: Install candidate sources into the pinned test fixture
+        run: |
+          set -euo pipefail
+          git -C fixture rm --quiet -r -- tools
+          git -C candidate archive HEAD tools | tar -xf - -C fixture
+          git -C fixture add --force -- tools
+          git -C fixture -c user.name=fixture -c user.email=fixture@invalid commit --allow-empty -qm 'Test candidate tools'
+          test "$(git -C fixture rev-parse HEAD:tools)" = "$(git -C candidate rev-parse HEAD:tools)"
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: fixture/global.json
+      - name: Exercise candidate tools against the consumer fixture
+        working-directory: fixture
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: python3 ../candidate/.github/scripts/test-suites.py contract "$SHARD" 4
+
   publish:
     if: github.event_name == 'push'
-    needs: verify
+    needs: [verify, contract]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

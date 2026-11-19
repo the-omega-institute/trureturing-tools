@@ -8,10 +8,21 @@ Use Git, Python 3.12 or newer, and the .NET SDK selected by `global.json`.
 
 ```sh
 make -C tools dotnet
-dotnet test tools/tests/Trureturing.Truth.Tests --configuration Release --no-build
+python3 .github/scripts/test-suites.py standalone
 ```
 
 The solution builds independently. Repository integration checks read the consumer's `Meta/`, `Blueprint/`, Git history and Lean inputs. Run them in the trureturing checkout with the candidate release installed.
+
+CI runs the standalone suites on the tool checkout. For suites that read the
+consumer's Makefile, FILEMAP, CI contract or Lean inputs, CI overlays the
+candidate tools on the pinned consumer commit in its workflow. It checks the
+resulting Git tree identity and runs the fixture's registered units. Additional
+candidate test projects run directly in the fixture.
+
+The consuming repository checks its own current source, FILEMAP and compiled
+Lean evidence against the actual PR or push. Its FIB unit acknowledges the
+corresponding current job. These checks establish acceptance of that consumer
+revision.
 
 ## Package and release
 
@@ -21,6 +32,6 @@ python3 package_release.py --revision HEAD
 
 The command writes `build/trureturing-tools.tar.gz` and prints its SHA-256. It reads regular files and executable bits from the selected Git tree in sorted path order, with archive timestamps and ownership set to zero. It includes the repository license as `tools/LICENSE`.
 
-Each push to `dev` builds the solution, runs the standalone truth tests and publishes a GitHub prerelease named `v0.1.0-dev.<run_number>` for the checked commit. Re-running the same workflow run uses the same tag and compares the published archive with the verified build. Pull requests run the build and tests.
+Each push to `dev` builds the solution, runs the tool and consumer fixture suites, and publishes a GitHub prerelease named `v0.1.0-dev.<run_number>` for the checked commit. Re-running the same workflow run uses the same tag and compares the published archive with the verified build. Pull requests run the build and tests.
 
 To publish a stable release, push a version tag such as `v1.0.0` at the commit verified by the consumer. Each release includes the archive and its SHA-256 checksum in the release notes. Update the consumer's tag and digest together to adopt it.
