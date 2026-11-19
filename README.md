@@ -32,12 +32,15 @@ python3 package_release.py --revision HEAD
 
 The command writes `build/trureturing-tools.tar.gz` and prints its SHA-256. It reads regular files and executable bits from the selected Git tree in sorted path order, with archive timestamps and ownership set to zero. It includes the repository license as `tools/LICENSE`.
 
-Pull requests and pushes to `dev` and `main` build and test the tools, with a downloadable Actions artifact retained for 14 days. To publish a preview, dispatch the release workflow from `dev` and choose `dev`, a feature branch, or a pull request. Run these commands in the tools checkout.
+Every branch push and pull request tests its head commit and packages it after all suites pass. Actions retains the archive for 14 days. To publish a preview, dispatch the release workflow from `dev` and select `dev`, a feature branch, or a pull request. The workflow rebuilds the archive from the selected Git objects using the packager on `dev` and compares it byte for byte with the successful CI artifact. Run these commands in the tools checkout.
 
 ```sh
 gh workflow run release.yml --ref dev -f source=dev
+gh workflow run release.yml --ref dev -f source=my-feature
 gh workflow run release.yml --ref dev -f source=pr/123
 ```
+
+To refresh an expired artifact, rerun the pull request CI or use `gh workflow run ci.yml --ref my-feature` for a branch.
 
 The preview tag contains the channel, run number and source commit. Set the repository variable `TOOLS_RELEASE_SERIES` to choose the version under development (default `0.1.0`). In the downstream trial PR, pin the preview's exact tag and the SHA-256 of `trureturing-tools.tar.gz`. The release notes and the GitHub asset metadata carry that digest.
 
