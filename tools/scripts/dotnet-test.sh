@@ -3,6 +3,12 @@ set -euo pipefail
 
 SCRIPT_DIRECTORY="$(dirname "${BASH_SOURCE[0]}")"
 ROOT="$(cd "$SCRIPT_DIRECTORY/../.." && pwd -P)"
+project_identity=false
+if [[ "${1:-}" == "--project-assembly" ]]; then
+  shift
+  [[ "${1:-}" == *.csproj ]] || { echo "--project-assembly requires a test project" >&2; exit 2; }
+  project_identity=true
+fi
 restore_args=()
 [[ "${CI_DOTNET_PREPARED:-0}" != 1 ]] || restore_args=(--no-restore)
 # Only this CI entry's projects were restored. Test-created projects retain
@@ -42,19 +48,25 @@ for argument in "$@"; do
   fi
 done
 
-# The evidence tool uses only registered identities and the shared process runtime.
-# Build it here when the selected test project does not.
+# The selected test project may not build the evidence validator.
 dotnet build "$ROOT/tools/StrataLint.TestEvidence/StrataLint.TestEvidence.csproj" --configuration Release \
   ${restore_args[@]+"${restore_args[@]}"} -p:RestoreLockedMode=true -nr:false -nologo --verbosity quiet
 
-owner_assemblies="$(dotnet run \
-  --project "$ROOT/tools/StrataLint.TestEvidence/StrataLint.TestEvidence.csproj" \
-  --configuration Release --no-build --no-launch-profile -- \
-  list-test-owner-assemblies --repository "$ROOT" --target "$test_target" --filtered "$filtered")"
-while IFS= read -r owner_assembly; do
-  [[ -n "$owner_assembly" ]] || continue
-  OWNER_ASSEMBLY_ARGS+=(--required-assembly "$owner_assembly")
-done <<< "$owner_assemblies"
+if [[ "$project_identity" == true ]]; then
+  # The standalone producer has no consumer engineering-project registry.
+  owner_assembly="$(dotnet msbuild "$test_target" -nologo -p:Configuration=Release -getProperty:AssemblyName)"
+  [[ -n "$owner_assembly" ]] || { echo "test project has no assembly identity" >&2; exit 2; }
+  OWNER_ASSEMBLY_ARGS=(--required-assembly "$owner_assembly")
+else
+  owner_assemblies="$(dotnet run \
+    --project "$ROOT/tools/StrataLint.TestEvidence/StrataLint.TestEvidence.csproj" \
+    --configuration Release --no-build --no-launch-profile -- \
+    list-test-owner-assemblies --repository "$ROOT" --target "$test_target" --filtered "$filtered")"
+  while IFS= read -r owner_assembly; do
+    [[ -n "$owner_assembly" ]] || continue
+    OWNER_ASSEMBLY_ARGS+=(--required-assembly "$owner_assembly")
+  done <<< "$owner_assemblies"
+fi
 
 dotnet run \
   --project "$ROOT/tools/StrataLint.TestEvidence/StrataLint.TestEvidence.csproj" \
