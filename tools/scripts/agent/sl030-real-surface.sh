@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
-# Scan every tracked judge-surface file of a tree with the SL-030 scanner built in that tree,
+# Scan every judge-surface file in the candidate inventory with the SL-030 scanner built in that tree,
 # exactly as the admission judge would when the rule implementation is in the candidate delta
 # (every judge-surface file is re-judged then). Prints each finding; exit 1 if there is any.
 #
 # Usage: tools/scripts/agent/sl030-real-surface.sh <tree-root>
 #
-# Run this after any change to the invocation-discovery or option rules and before pushing:
-# review round 15 found 13 false positives on the real surface that the synthetic matrix could
-# not see (CLAUDE.md 器律⑦′ forbids tests over real workflow content, so this is a tracked
-# run-local probe (器律⑨), not a test). It needs `make -C tools dotnet` to have built the Engine.
+# Build the CLI with `make -C tools dotnet` before checking the real surface.
 set -euo pipefail
 
 root=$(cd "${1:?usage: sl030-real-surface.sh <tree-root>}" && pwd)
@@ -42,9 +39,13 @@ var isSurface = scanner.GetMethod("IsJudgeSurfacePath", BindingFlags.NonPublic |
     ?? throw new InvalidOperationException("IsJudgeSurfacePath not found");
 var scan = scanner.GetMethod("Scan", BindingFlags.NonPublic | BindingFlags.Static)
     ?? throw new InvalidOperationException("Scan not found");
+var inventory = assembly.GetType("StrataLint.Engine.GitIndexRepositoryFiles", throwOnError: true)!
+    .GetMethod("EnumerateTracked", BindingFlags.NonPublic | BindingFlags.Static)
+    ?? throw new InvalidOperationException("EnumerateTracked not found");
+var entries = (IReadOnlyList<(string RelativePath, string Mode)>)inventory.Invoke(null, [root])!;
 var files = 0;
 var findings = 0;
-foreach (var path in Console.In.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries))
+foreach (var (path, _) in entries)
 {
     if (!(bool)isSurface.Invoke(null, new object[] { path })!)
     {
@@ -64,4 +65,4 @@ Console.WriteLine($"REAL_SURFACE_RESULT files={files} findings={findings}");
 return findings == 0 ? 0 : 1;
 EOF
 (cd "$probe" && dotnet build -c Release --nologo -v q >/dev/null)
-git -C "$root" ls-files | dotnet "$probe/bin/Release/net10.0/Probe.dll" "$dll" "$root"
+dotnet "$probe/bin/Release/net10.0/Probe.dll" "$dll" "$root"
