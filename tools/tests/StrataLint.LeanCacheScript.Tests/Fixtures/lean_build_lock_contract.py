@@ -57,7 +57,7 @@ class LeanBuildLockTests(unittest.TestCase):
 
     def start(self, root, targets="D5.Probe", wrapper=False, skip_lock=None):
         command = (["bash", WRAPPER, "--build", *targets.split()] if wrapper else
-                   ["make", "--no-print-directory", "-s", "lean", "LEAN_TARGETS=" + targets])
+                   ["make", "--no-print-directory", "-s", "-o", "install-tools", "lean", "LEAN_TARGETS=" + targets])
         env = dict(self.env)
         if skip_lock is not None:
             if wrapper:

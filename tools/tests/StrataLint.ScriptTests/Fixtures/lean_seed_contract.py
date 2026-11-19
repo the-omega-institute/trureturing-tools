@@ -320,7 +320,7 @@ ctypes.CDLL = cdll
                     **{**clone_probe, **assembly_probe}, LEAN_CACHE_REPOSITORY=str(self.root),
                     LEAN_CACHE_APPROVED_TAG=snapshot.name, LEAN_CACHE_APPROVED_PRODUCER=self.producer_commit,
                     LEAN_CACHE_LOCAL_ASSETS=str(local))
-                result = subprocess.run([shutil.which("make"), "-C", str(self.root),
+                result = subprocess.run([shutil.which("make"), "-o", "install-tools", "-C", str(self.root),
                     "lean-cache-from-github-without-mathlib", "REFRESH_STALE=1"],
                     cwd=str(self.root.parent), env=environment, text=True, capture_output=True)
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
@@ -511,7 +511,7 @@ ctypes.CDLL = cdll
     def test_local_make_publication_and_restore_use_current_protected_head(self):
         # Local make callers publish clean protected-dev snapshots with UTC suffixes.
         before = datetime.datetime.now(datetime.timezone.utc)
-        result = subprocess.run([shutil.which("make"), "-C", str(self.root), "lean-cache-to-github-without-mathlib"],
+        result = subprocess.run([shutil.which("make"), "-o", "install-tools", "-C", str(self.root), "lean-cache-to-github-without-mathlib"],
             text=True, capture_output=True, env=self.transport_environment(**self.local_environment(),
                 FAKE_GH_LOG=str(self.root / "local-gh-calls")))
         after = datetime.datetime.now(datetime.timezone.utc)

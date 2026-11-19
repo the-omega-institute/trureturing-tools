@@ -797,7 +797,7 @@ subprocess.run = transfer_run
                 if entry == "script":
                     result = self.transport("fetch", **environment)
                 else:
-                    result = subprocess.run([shutil.which("make"), "-C", str(self.root),
+                    result = subprocess.run([shutil.which("make"), "-o", "install-tools", "-C", str(self.root),
                         "lean-cache-from-github-without-mathlib", "LEAN_CACHE_REPOSITORY=" + str(self.root)],
                         text=True, capture_output=True,
                         env=self.transport_environment(GITHUB_ACTIONS="false", **environment))

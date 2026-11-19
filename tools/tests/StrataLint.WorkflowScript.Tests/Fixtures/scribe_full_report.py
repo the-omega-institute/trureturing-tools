@@ -95,7 +95,7 @@ elif args[1] != 'emit-values':
         report = self.report.relative_to(self.root) if relative else self.report
         environment = dict(os.environ, PATH=str(self.root / 'bin') + os.pathsep + os.environ['PATH'],
             FIXTURE_ROOT=str(self.root), MUTATE_BUNDLE=str(int(mutate)))
-        result = subprocess.run(['/usr/bin/make', 'emit', 'PATHS=' + str(self.paths),
+        result = subprocess.run(['/usr/bin/make', '-o', 'install-tools', 'emit', 'PATHS=' + str(self.paths),
             'EMIT_FULL_REPORT=' + str(report)], cwd=self.root, env=environment,
             capture_output=True, text=True, timeout=60)
         self.calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []

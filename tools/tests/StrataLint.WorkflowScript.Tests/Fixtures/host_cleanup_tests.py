@@ -356,7 +356,7 @@ class HostCleanupTests(unittest.TestCase):
         python.chmod(0o700)
         dotnet.chmod(0o700)
         env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], TEST_DISK_FREE="4")
-        arguments = ["make", "-C", str(repository), "worktree", "KIND=governance", "NAME=test", "DEST=../new tree"]
+        arguments = ["make", "-o", "install-tools", "-C", str(repository), "worktree", "KIND=governance", "NAME=test", "DEST=../new tree"]
         blocked = subprocess.run(arguments, cwd=self.root, env=env, capture_output=True, text=True)
         self.assertNotEqual(0, blocked.returncode)
         self.assertIn("WORKTREE_LOW_DISK", blocked.stderr)

@@ -596,7 +596,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
 
     def test_verification_make_parameters_reach_the_same_program(self):
         self.verification_fixture()
-        result = subprocess.run([shutil.which("make"), "-C", str(self.root), "lean-cache-to-github-without-mathlib",
+        result = subprocess.run([shutil.which("make"), "-o", "install-tools", "-C", str(self.root), "lean-cache-to-github-without-mathlib",
             "LEAN_CACHE_MODE=verification", "LEAN_CACHE_SOURCE_REF=" + self.verification_ref,
             "LEAN_CACHE_SOURCE_COMMIT=" + self.verification_commit], text=True, capture_output=True,
             env=self.transport_environment(**self.verification_environment))
@@ -742,7 +742,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.candidate_fixture()
         environment = self.transport_environment(**{**self.verification_environment,
             "GITHUB_ACTIONS": "false", "FAKE_BUILD_EXIT": "91"})
-        publish = subprocess.run([shutil.which("make"), "-C", str(self.root),
+        publish = subprocess.run([shutil.which("make"), "-o", "install-tools", "-C", str(self.root),
             "lean-cache-to-github-without-mathlib", "LEAN_CACHE_REPOSITORY=" + str(self.root),
             "LEAN_CACHE_MODE=candidate", "LEAN_CACHE_SOURCE_COMMIT=" + self.verification_commit,
             "LEAN_CACHE_PUBLISH_ONLY=1"], text=True, capture_output=True, env=environment)
@@ -751,7 +751,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         tag = json.loads(next(line.partition(" ")[2] for line in publish.stdout.splitlines()
                              if line.startswith("LEAN_CACHE_PUBLISH ")))["tag"]
         shutil.rmtree(self.root / ".lake/build")
-        fetch = subprocess.run([shutil.which("make"), "-C", str(self.root),
+        fetch = subprocess.run([shutil.which("make"), "-o", "install-tools", "-C", str(self.root),
             "lean-cache-from-github-without-mathlib", "LEAN_CACHE_REPOSITORY=" + str(self.root),
             "LEAN_CACHE_MODE=candidate", "LEAN_CACHE_SOURCE_COMMIT=" + self.verification_commit,
             "LEAN_CACHE_TAG=" + tag], text=True, capture_output=True,

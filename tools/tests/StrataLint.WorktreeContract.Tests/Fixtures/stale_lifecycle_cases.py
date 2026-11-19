@@ -118,7 +118,7 @@ class LifecycleTests(unittest.TestCase):
         (self.root / "tmp").mkdir()
 
     def make(self, *args, cwd=None, check=True):
-        result = subprocess.run(["make", "--no-print-directory", *map(str, args)],
+        result = subprocess.run(["make", "-o", "install-tools", "--no-print-directory", *map(str, args)],
                                 cwd=cwd or self.main, env=self.env,
                                 text=True, capture_output=True, timeout=90)
         if check:
