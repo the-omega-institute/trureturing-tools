@@ -38,7 +38,6 @@ public sealed partial class MakeWorkflowTests
     private static readonly string[] RootTargets =
     [
         "help",
-        "install-tools",
         "test",
         "lean-cache-ensure",
         "lean-cache-to-github-without-mathlib",

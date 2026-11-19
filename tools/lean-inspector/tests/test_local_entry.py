@@ -101,6 +101,7 @@ class LocalEntryFixture:
         self.fixture.write('.gitignore', '.lake/\nbin/\nseed/\ndev-seed/\nlogs/\ncalls\n'
                            'producer.dll\nrelease-manifest.json\nreleases/\nlake-manifest.json\ncustom-output/\n'
                            '__pycache__/\nbuild/\n')
+        self.fixture.write('.github/scripts/install-tools.py', '# The fixture supplies its own tools.\n')
         tracked = ['Makefile', '.github/scripts/install-tools.py', 'tools', 'D5', 'Audit.lean', 'Inspector.lean', 'producer.py',
                    'lean-toolchain', 'lakefile.toml', 'lean-report-inputs.json', '.gitignore']
         files = sorted(path for name in tracked for path in (
