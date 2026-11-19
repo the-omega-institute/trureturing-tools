@@ -438,7 +438,7 @@ internal sealed partial class TransactionFixture
                 $"PLAYBOOK_USE_CANONICAL_FROZEN_QUERY={(realCliPath is not null ? "1" : "0")}",
                 $"PLAYBOOK_REAL_CLI={(realCliPath is null ? "" : RealCliPath(realCliPath))}",
                 .. (throughMake
-                    ? new[] { "/usr/bin/make", command, $"BASE={baseRevision ?? "HEAD"}", $"GID={gid}" }
+                    ? new[] { "/usr/bin/make", "-o", "install-tools", command, $"BASE={baseRevision ?? "HEAD"}", $"GID={gid}" }
                         .Concat(atomId is null ? [] : new[] { $"ATOM_ID={atomId}" })
                     : new[] { "/bin/bash", Path.Combine(Root, ScriptPath), command }
                         .Concat(command == "cover"
