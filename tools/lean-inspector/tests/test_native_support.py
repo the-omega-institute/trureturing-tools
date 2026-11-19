@@ -540,6 +540,8 @@ defaultFacets = ["static"]
         target = self.root / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, target)
+        if name == "Makefile":
+            self.write(".github/scripts/install-tools.py", "# The fixture supplies its own tools.\n")
         if name == "tools/lean-inspector/Inspector.lean":
             target.write_text(transport_inspector(target.read_text()))
         shutil.copymode(ROOT / name, target)

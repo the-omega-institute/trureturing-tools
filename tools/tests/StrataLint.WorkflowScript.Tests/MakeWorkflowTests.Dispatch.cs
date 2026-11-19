@@ -43,10 +43,13 @@ public sealed partial class MakeWorkflowTests
         Assert.Equal(0, targets.ExitCode);
         var declared = Assert.Single(Encoding.UTF8.GetString(targets.StandardOutput).Split('\n'),
             static line => line.StartsWith(".PHONY:", StringComparison.Ordinal));
-        Assert.Equal(RootTargets.Order(StringComparer.Ordinal),
+        var expectedTargets = File.Exists(Path.Combine(root, "Meta", "tools-release.json"))
+            ? RootTargets.Append("install-tools")
+            : RootTargets;
+        Assert.Equal(expectedTargets.Order(StringComparer.Ordinal),
             declared[".PHONY:".Length..].Split(' ', StringSplitOptions.RemoveEmptyEntries)
                 .Order(StringComparer.Ordinal));
-        foreach (var target in RootTargets)
+        foreach (var target in expectedTargets)
         {
             Assert.Matches(new Regex($"(?m)^{Regex.Escape(target)}:", RegexOptions.CultureInvariant), makefile);
             Assert.InRange(RecipeCount(makefile, target), 0, 1);

@@ -1,13 +1,10 @@
-name: Build and release tools
+name: Publish a tested tools preview
 
 on:
-  pull_request:
-  push:
-    branches: [dev, main]
   workflow_dispatch:
     inputs:
       source:
-        description: 'Branch name or pr/NUMBER to preview'
+        description: 'Tested branch name or pr/NUMBER to preview'
         required: true
         default: dev
 
@@ -15,69 +12,49 @@ permissions:
   contents: read
 
 jobs:
-  source:
-    runs-on: ubuntu-latest
+  verify:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
     outputs:
       sha: ${{ steps.source.outputs.sha }}
       tag: ${{ steps.source.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-      - id: source
-        env:
-          SOURCE: ${{ inputs.source }}
-          SERIES: ${{ vars.TOOLS_RELEASE_SERIES || '0.1.0' }}
-        run: |
-          set -euo pipefail
-          sha="$GITHUB_SHA"
-          tag=""
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
-            [[ "$GITHUB_REF" == refs/heads/dev ]] || { echo 'Dispatch previews from dev'; exit 1; }
-            if [[ "$SOURCE" =~ ^pr/([1-9][0-9]*)$ ]]; then
-              ref="refs/pull/${BASH_REMATCH[1]}/head"
-              channel="pr.${BASH_REMATCH[1]}"
-            else
-              ref="refs/heads/$SOURCE"
-              git check-ref-format "$ref"
-              channel=feature
-              if [[ "$SOURCE" == dev ]]; then channel=dev; fi
-            fi
-            sha=$(git ls-remote --exit-code --refs origin "$ref" | cut -f1)
-            [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
-            [[ "$SERIES" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-            tag="v$SERIES-$channel.$GITHUB_RUN_NUMBER.g${sha:0:12}"
-          fi
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-  verify:
-    needs: source
-    runs-on: ubuntu-24.04
-    outputs:
       artifact: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.source.outputs.sha }}
           persist-credentials: false
-      - uses: actions/setup-dotnet@v5
-        with:
-          global-json-file: global.json
-      - run: make -C tools dotnet
-      - run: dotnet test tools/tests/Trureturing.Truth.Tests --configuration Release --no-build
-      - run: python3 package_release.py
+      - name: Resolve the tested source and artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ inputs.source }}
+          SERIES: ${{ vars.TOOLS_RELEASE_SERIES || '0.1.0' }}
+        run: python3 .github/scripts/preview-source.py
+      - name: Check the CI archive against the source commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          ARTIFACT: ${{ steps.source.outputs.artifact }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$SOURCE_SHA"
+          python3 package_release.py --revision "$SOURCE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT/zip" > "$RUNNER_TEMP/ci.zip"
+          unzip -p "$RUNNER_TEMP/ci.zip" trureturing-tools.tar.gz | cmp - build/trureturing-tools.tar.gz
       - id: upload
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: tools-release-${{ github.run_attempt }}
+          name: verified-preview-${{ github.run_attempt }}
           path: build/trureturing-tools.tar.gz
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   preview:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev'
-    needs: [source, verify]
+    needs: verify
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -91,6 +68,6 @@ jobs:
       - name: Publish the verified preview
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ needs.source.outputs.sha }}
-          RELEASE_TAG: ${{ needs.source.outputs.tag }}
+          SOURCE_SHA: ${{ needs.verify.outputs.sha }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
         run: bash .github/scripts/publish-release.sh preview "$RUNNER_TEMP/release/trureturing-tools.tar.gz"

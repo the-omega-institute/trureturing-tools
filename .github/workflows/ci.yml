@@ -1,0 +1,79 @@
+name: Test tools
+
+on:
+  pull_request:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - run: make -C tools dotnet
+      - run: python3 .github/scripts/test-suites.py standalone
+  contract:
+    name: Consumer fixture ${{ matrix.shard }}
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: the-omega-institute/trureturing
+          ref: 7387e886abcf4f24030fabc3028129dc8e81c5da
+          path: fixture
+          persist-credentials: false
+      - name: Install the candidate archive in the pinned consumer
+        run: |
+          set -euo pipefail
+          python3 candidate/package_release.py
+          asset="$PWD/candidate/build/trureturing-tools.tar.gz"
+          sha=$(git -C candidate rev-parse HEAD)
+          digest=$(sha256sum "$asset" | cut -d' ' -f1)
+          jq -n --arg version "v0.0.0-ci.g$sha" --arg sha256 "$digest" \
+            '{version: $version, sha256: $sha256}' > fixture/Meta/tools-release.json
+          git -C fixture add Meta/tools-release.json
+          git -C fixture -c user.name=fixture -c user.email=fixture@invalid commit -qm 'Test candidate release'
+          python3 fixture/.github/scripts/install-tools.py --archive "$asset"
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: fixture/global.json
+      - name: Exercise candidate tools against the consumer fixture
+        working-directory: fixture
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: python3 ../candidate/.github/scripts/test-suites.py contract "$SHARD" 4
+
+  package:
+    needs: [verify, contract]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - run: python3 package_release.py
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: tools-release-${{ github.run_attempt }}
+          path: build/trureturing-tools.tar.gz
+          if-no-files-found: error
+          retention-days: 14
