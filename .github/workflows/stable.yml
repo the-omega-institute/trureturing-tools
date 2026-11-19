@@ -1,0 +1,42 @@
+name: Promote a verified preview from main
+
+on:
+  workflow_dispatch:
+    inputs:
+      preview:
+        description: 'Tested prerelease tag'
+        required: true
+      version:
+        description: 'Stable tag, for example v0.1.0'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Require the stable branch
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@v5
+      - name: Compare the preview asset with main and publish it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW: ${{ inputs.preview }}
+          RELEASE_TAG: ${{ inputs.version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$PREVIEW" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(dev|feature|pr)\.[a-zA-Z0-9.]+$ ]]
+          meta=$(gh release view "$PREVIEW" --json isPrerelease,isDraft,assets)
+          digest=$(jq -er 'select(.isPrerelease and (.isDraft | not)) | .assets[] | select(.name=="trureturing-tools.tar.gz") | .digest' <<< "$meta")
+          gh release download "$PREVIEW" --pattern trureturing-tools.tar.gz --dir "$RUNNER_TEMP/preview"
+          asset="$RUNNER_TEMP/preview/trureturing-tools.tar.gz"
+          [[ "sha256:$(sha256sum "$asset" | cut -d' ' -f1)" == "$digest" ]]
+          python3 package_release.py --revision "$GITHUB_SHA"
+          cmp "$asset" build/trureturing-tools.tar.gz
+          bash .github/scripts/publish-release.sh stable "$asset"
