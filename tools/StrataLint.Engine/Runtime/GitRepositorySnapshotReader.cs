@@ -427,7 +427,7 @@ internal static class GitRepositorySnapshotReader
         string revision,
         Func<IReadOnlyList<string>, int, ReadOnlyMemory<byte>, ProcessOutput> runGit,
         GitStreamReader<GitRepositoryTreeEntry[]> readTree,
-        IReadOnlyList<string>? paths = null, string? repositoryRoot = null)
+        IReadOnlyList<string>? paths = null, string? repositoryRoot = null, bool includeInventory = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(revision);
         ArgumentNullException.ThrowIfNull(runGit);
@@ -457,9 +457,9 @@ internal static class GitRepositorySnapshotReader
         FileMapSymlinkPolicy.ValidateSnapshot(entries,
             tree.Where(static entry => entry.Mode == "120000").Select(entry => entry.Path).ToHashSet(StringComparer.Ordinal),
             all.Select(static entry => entry.Path).ToArray());
-        var inventory = tree.Select(entry => new RepositoryPathInventoryEntry(entry.Path, entry.Mode,
+        var inventory = includeInventory ? tree.Select(entry => new RepositoryPathInventoryEntry(entry.Path, entry.Mode,
             entry.Mode == "120000" ? "symlink" : "regular", entry.Mode, entry.Mode == "120000"
-                ? StrictUtf8.GetString(blobs[entry.ObjectId].AsSpan()) : null)).ToImmutableArray();
+                ? StrictUtf8.GetString(blobs[entry.ObjectId].AsSpan()) : null)).ToImmutableArray() : default;
         var snapshot = RawRepositorySnapshot.Create(entries, inventory);
         return repositoryRoot is null ? snapshot : ToolsRelease.AtRevision(repositoryRoot, snapshot, Selected, static _ => true);
     }

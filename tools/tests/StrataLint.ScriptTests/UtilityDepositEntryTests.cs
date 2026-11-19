@@ -86,7 +86,7 @@ public sealed class UtilityDepositEntryTests
             "PLAYBOOK_TEST_CALLS=" + Path.Combine(root, "calls"),
             "PLAYBOOK_TEST_FREEZE_PROBES=" + Path.Combine(root, "freeze-probes"),
             "STRATALINT_LEAN_REPORT=" + report,
-            "/usr/bin/make", "deposit", "BASE=" + baseline,
+            "/usr/bin/make", "-o", "install-tools", "deposit", "BASE=" + baseline,
             "GID=" + TransactionFixture.Gid,
         ], root, TestBudgets.LeanProcessHangGuard, 1024 * 1024);
         var output = Encoding.UTF8.GetString(result.StandardOutput) + Encoding.UTF8.GetString(result.StandardError);

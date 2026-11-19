@@ -160,7 +160,7 @@ internal sealed partial class GitRepositoryGateway : IRepositoryGateway
         // Compare the effective members across both pin updates and the migration
         // between tracked and released sources. The archive from the base is data.
         const string prefix = "tools/";
-        var previous = ReadRevision(revision, ["tools"]);
+        var previous = ReadSelectedRevision(revision, ["tools"], includeInventory: true);
         var current = GitRepositorySnapshotReader.ReadCurrent(root, pathspecs: ["tools"]);
         var oldFiles = previous.Entries.Where(entry => entry.Path.StartsWith(prefix, StringComparison.Ordinal))
             .ToDictionary(entry => entry.Path, StringComparer.Ordinal);
@@ -285,6 +285,9 @@ internal sealed partial class GitRepositoryGateway : IRepositoryGateway
     }
 
     public RawRepositorySnapshot ReadRevision(string revision, IReadOnlyList<string> paths) =>
+        ReadSelectedRevision(revision, paths, includeInventory: false);
+
+    private RawRepositorySnapshot ReadSelectedRevision(string revision, IReadOnlyList<string> paths, bool includeInventory) =>
         GitRepositorySnapshotReader.ReadRevision(
             revision,
             (arguments, maximumOutputBytes, standardInput) => GitRaw(
@@ -294,7 +297,7 @@ internal sealed partial class GitRepositoryGateway : IRepositoryGateway
                 standardInput),
             (arguments, maximumErrorBytes, standardInput, readStandardOutput) =>
                 GitStreaming(arguments, maximumErrorBytes, readStandardOutput, standardInput),
-            paths, root);
+            paths, root, includeInventory);
 
     private string GitText(params string[] arguments) => StrictUtf8.GetString(GitBytes(arguments));
 
