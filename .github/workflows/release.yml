@@ -3,8 +3,8 @@ name: Build and release tools
 on:
   pull_request:
   push:
-    branches: [main]
-    tags: ['v*']
+    branches: [dev]
+    tags: ['v*', '!v*-dev.*']
 
 permissions:
   contents: read
@@ -12,10 +12,15 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
+    outputs:
+      source: ${{ steps.revision.outputs.sha }}
+      artifact: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+      - id: revision
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
@@ -23,32 +28,54 @@ jobs:
       - run: dotnet test tools/tests/Trureturing.Truth.Tests --configuration Release --no-build
       - name: Build the source archive
         run: python3 package_release.py
-      - uses: actions/upload-artifact@v4
-        if: startsWith(github.ref, 'refs/tags/v')
+      - id: upload
+        uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
         with:
-          name: tools-release
+          name: tools-release-${{ github.run_attempt }}
           path: build/trureturing-tools.tar.gz
           if-no-files-found: error
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push'
     needs: verify
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.verify.outputs.source }}
       - uses: actions/download-artifact@v4
         with:
-          name: tools-release
+          artifact-ids: ${{ needs.verify.outputs.artifact }}
+          merge-multiple: true
       - name: Publish or verify the tag's asset
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          SOURCE: ${{ needs.verify.outputs.source }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           set -euo pipefail
           asset=trureturing-tools.tar.gz
-          if metadata=$(gh release view "$TAG" --json isDraft,assets); then
+          TAG="$REF_NAME"
+          preview=false
+          release_flags=()
+          if [[ "$REF_TYPE" == branch ]]; then
+            TAG="v0.1.0-dev.$GITHUB_RUN_NUMBER"
+            preview=true
+            release_flags=(--prerelease --latest=false)
+            existing_ref=$(git ls-remote --refs origin "refs/tags/$TAG")
+            if [[ -z "$existing_ref" ]]; then
+              git push origin "$SOURCE:refs/tags/$TAG"
+            fi
+          fi
+          git fetch --no-tags --depth=1 origin "refs/tags/$TAG"
+          [[ "$(git rev-parse 'FETCH_HEAD^{commit}')" == "$SOURCE" ]]
+          if metadata=$(gh release view "$TAG" --json isDraft,isPrerelease,assets); then
+            [[ "$(jq -r '.isPrerelease' <<< "$metadata")" == "$preview" ]]
             draft=$(jq -r '.isDraft' <<< "$metadata")
             if [[ "$draft" == true ]] && ! jq -e --arg name "$asset" 'any(.assets[]; .name == $name)' <<< "$metadata" >/dev/null; then
               gh release upload "$TAG" "$asset"
@@ -60,5 +87,5 @@ jobs:
             fi
           else
             sha256sum "$asset" > "$RUNNER_TEMP/checksum"
-            gh release create "$TAG" "$asset" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/checksum"
+            gh release create "$TAG" "$asset" "${release_flags[@]}" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/checksum"
           fi

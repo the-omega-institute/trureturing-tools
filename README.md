@@ -21,4 +21,6 @@ python3 package_release.py --revision HEAD
 
 The command writes `build/trureturing-tools.tar.gz` and prints its SHA-256. It reads regular files and executable bits from the selected Git tree in sorted path order, with archive timestamps and ownership set to zero. It includes the repository license as `tools/LICENSE`.
 
-Pushing a version tag such as `v1.0.0` starts the release workflow. After building the solution and running the standalone truth tests, the workflow publishes the tagged archive and its checksum. Update the consumer's tag and digest together to adopt the release.
+Each push to `dev` builds the solution, runs the standalone truth tests and publishes a GitHub prerelease named `v0.1.0-dev.<run_number>` for the checked commit. Re-running the same workflow run uses the same tag and compares the published archive with the verified build. Pull requests run the build and tests.
+
+To publish a stable release, push a version tag such as `v1.0.0` at the commit verified by the consumer. Each release includes the archive and its SHA-256 checksum in the release notes. Update the consumer's tag and digest together to adopt it.
