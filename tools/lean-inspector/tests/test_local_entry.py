@@ -463,6 +463,9 @@ class FullBuildConfirmationTests(unittest.TestCase):
             destination = self.root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, destination)
+        bootstrap = self.root / '.github/scripts/install-tools.py'
+        bootstrap.parent.mkdir(parents=True)
+        bootstrap.write_text('# The fixture supplies its own tools.\n')
         self.marker = self.root / 'calls'
         self.env = dict(os.environ, LEAN_SKIP_LOCK='1')
         self.env.pop('FULL_BUILD', None)
