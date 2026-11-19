@@ -30,7 +30,8 @@ def check(*arguments):
 
 def standalone():
     for name in STANDALONE:
-        check("dotnet", "test", f"tools/tests/{name}/{name}.csproj", "-c", "Release", "--no-build")
+        check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly",
+              f"tools/tests/{name}/{name}.csproj", "--no-build")
     for proof in ("banned-api-proof", "capability-proof"):
         check("make", "-C", "tools", "compile-proof", f"PROOF={proof}")
     check("bash", "tools/scripts/agent/integration-mirror-test.sh")
@@ -48,7 +49,7 @@ def contract(shard, shard_count):
                   if ET.parse(p).findtext(".//IsTestProject") == "true"}
     additional = sorted(discovered - registered)
     for project in additional[shard::shard_count]:
-        check("dotnet", "test", project, "-c", "Release", "-p:RestoreLockedMode=true")
+        check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly", project)
     downstream = {"filemap", "tests-fib"}
     producer_commands = {"banned-api-proof", "capability-proof", "tests-integration-mirror"}
     fixture = [name for name, unit in sorted(units.items()) if name not in downstream | producer_commands
