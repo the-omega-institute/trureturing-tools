@@ -480,7 +480,7 @@ public sealed partial class PrOpenScriptTests
             string[] entry = useDeadlineClock ? ["bash", Path.Combine(clock, "launch"), script] : ["bash", script];
             if (arguments[0] == "make")
             {
-                entry = ["make", "--no-print-directory", "-C", checkout];
+                entry = ["make", "--no-print-directory", "-o", "install-tools", "-C", checkout];
                 arguments = arguments[1..];
             }
             return TestProcessRunner.Run("env",

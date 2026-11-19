@@ -136,6 +136,9 @@ deposit_module() {
   LEAN_TARGETS="${DOCUMENT_GID//\//.}"
   build_scoped_report
   deposit_base_sha="$(git rev-parse --verify "${BASE}^{commit}")"
+  if [[ -f Meta/tools-release.json ]]; then
+    python3 .github/scripts/install-tools.py --cache-revision "$deposit_base_sha"
+  fi
   step deposit-header-check run_cli deposit-header-check --target "$MODULE_PATH" --protected-base "$deposit_base_sha"
   emit_target
   if freeze_exists; then

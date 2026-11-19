@@ -21,10 +21,10 @@ public sealed class GitRepositoryGatewayRevisionTests
         using var repository = new TemporaryDirectory();
         var root = repository.Path;
         InitializeRepository(root);
-        File.WriteAllText(Path.Combine(root, ".gitignore"), "/tools/\n/.lake/\n");
+        File.WriteAllText(Path.Combine(root, ".gitignore"), "/tools/\n/build/\n");
         Directory.CreateDirectory(Path.Combine(root, "Meta"));
         Directory.CreateDirectory(Path.Combine(root, "tools"));
-        var cache = Directory.CreateDirectory(Path.Combine(root, ".lake", "tools-releases")).FullName;
+        var cache = Directory.CreateDirectory(Path.Combine(root, "build", "tools-releases")).FullName;
         const string path = "tools/judge.txt";
         void Install(string text)
         {

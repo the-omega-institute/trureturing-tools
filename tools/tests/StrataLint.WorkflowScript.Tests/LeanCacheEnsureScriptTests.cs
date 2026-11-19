@@ -26,7 +26,7 @@ public sealed class LeanCacheEnsureScriptTests
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
         var result = TestProcessRunner.Run("/bin/bash",
-            ["-c", "PATH=\"$1:$PATH\" DOTNET_ARGUMENTS=\"$2\" exec make lean-cache-ensure RESTORE_DEPENDENCIES=\"$3\"",
+            ["-c", "PATH=\"$1:$PATH\" DOTNET_ARGUMENTS=\"$2\" exec make -o install-tools lean-cache-ensure RESTORE_DEPENDENCIES=\"$3\"",
                 "restore-option-test", installed.Bin, installed.ArgumentsPath, option],
             installed.Repository, TestBudgets.ScriptProcessHangGuard, 64 * 1024);
 

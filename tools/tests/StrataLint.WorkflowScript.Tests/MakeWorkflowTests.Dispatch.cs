@@ -38,10 +38,14 @@ public sealed partial class MakeWorkflowTests
         var makefile = File.ReadAllText(Path.Combine(root, "Makefile"));
 
         Assert.Contains(".DEFAULT_GOAL := help", makefile, StringComparison.Ordinal);
-        var phony = Assert.Single(
-            makefile.Split('\n'),
+        var targets = TestProcessRunner.Run("make", ["-pRn", "help"], root,
+            BoundedProcessRunner.HangDetectionBudget, 1024 * 1024);
+        Assert.Equal(0, targets.ExitCode);
+        var declared = Assert.Single(Encoding.UTF8.GetString(targets.StandardOutput).Split('\n'),
             static line => line.StartsWith(".PHONY:", StringComparison.Ordinal));
-        Assert.Equal(RootTargets, phony[".PHONY:".Length..].Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        Assert.Equal(RootTargets.Order(StringComparer.Ordinal),
+            declared[".PHONY:".Length..].Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .Order(StringComparer.Ordinal));
         foreach (var target in RootTargets)
         {
             Assert.Matches(new Regex($"(?m)^{Regex.Escape(target)}:", RegexOptions.CultureInvariant), makefile);

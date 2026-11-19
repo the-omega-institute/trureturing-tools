@@ -36,7 +36,7 @@ internal sealed class ToolsRelease
         lock (CacheLock)
         {
             if (Cache.TryGetValue(digest, out var cached)) return cached;
-            var path = Path.Combine(root, ".lake", "tools-releases", digest + ".tar.gz");
+            var path = Path.Combine(root, "build", "tools-releases", digest + ".tar.gz");
             using var archive = File.OpenRead(path);
             if (Convert.ToHexStringLower(SHA256.HashData(archive)) != digest)
                 throw new InvalidDataException($"tools release digest mismatch: {path}");
@@ -71,8 +71,11 @@ internal sealed class ToolsRelease
         if (snapshot.Entries.Any(entry => entry.Path.StartsWith("tools/", StringComparison.Ordinal)))
             throw new InvalidDataException("revision contains both tracked tools and a tools release pin");
         var release = Read(root, pin.Bytes.AsMemory());
-        var entries = snapshot.Entries.Where(entry => entry.Path != PinPath || select(entry.Path)).ToList();
-        var inventory = snapshot.PathInventory.IsDefault ? null : snapshot.PathInventory.ToList();
+        var entries = snapshot.Entries.Where(entry => entry.Path != PinPath || select(entry.Path))
+            .Select(entry => entry.Path == PinPath && !readContents(PinPath)
+                ? entry with { Bytes = [], ContentWasRead = false } : entry).ToList();
+        var inventory = snapshot.PathInventory.IsDefault ? null : snapshot.PathInventory
+            .Where(entry => entry.Path != PinPath || select(entry.Path)).ToList();
         foreach (var (path, file) in release.Files.Where(pair => select(pair.Key)))
         {
             var read = readContents(path);

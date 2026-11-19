@@ -145,7 +145,7 @@ public sealed class WorktreeMakeWorkflowTests
         var commandArguments = new List<string>
         {
             "-c",
-            "export PATH=\"$1:/usr/bin:/bin\"; export DOTNET_MARKER=\"$2\"; shift 2; exec make --no-print-directory \"$@\"",
+            "export PATH=\"$1:/usr/bin:/bin\"; export DOTNET_MARKER=\"$2\"; shift 2; exec make --no-print-directory -o install-tools \"$@\"",
             "worktree-make",
             binDirectory,
             marker,

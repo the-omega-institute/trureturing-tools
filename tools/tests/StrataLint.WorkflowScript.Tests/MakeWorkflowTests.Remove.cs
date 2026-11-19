@@ -75,7 +75,7 @@ public sealed partial class MakeWorkflowTests
         if (!OperatingSystem.IsWindows())
             File.SetUnixFileMode(dotnet, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         // An inherited FORCE must not opt the caller into unlimited deletion.
-        return TestProcessRunner.Run("/usr/bin/env", [$"PATH={path}:/usr/bin:/bin", "FORCE=1", "make", "--no-print-directory", "worktree-remove", $"NAMES={names}", .. makeArguments],
+        return TestProcessRunner.Run("/usr/bin/env", [$"PATH={path}:/usr/bin:/bin", "FORCE=1", "make", "--no-print-directory", "-o", "install-tools", "worktree-remove", $"NAMES={names}", .. makeArguments],
             path, TestBudgets.WorkflowProcessHangGuard, 1024 * 1024);
     }
 }

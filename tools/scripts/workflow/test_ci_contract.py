@@ -223,7 +223,7 @@ class ContractTests(unittest.TestCase):
         self.git("remote", "add", "persistent", "https://example.invalid/repository.git")
         for raw in (0, 1, 2, 3):
             env = dict(self.env, PROBE_EXIT=str(raw))
-            local = subprocess.run(["make", "gate", "BASE=" + base], cwd=self.root, env=env,
+            local = subprocess.run(["make", "-o", "install-tools", "gate", "BASE=" + base], cwd=self.root, env=env,
                                    capture_output=True, text=True)
             self.assertEqual(local.returncode, 0 if raw == 0 else 2, local.stderr)
             records = [json.loads(line[9:]) for line in local.stdout.splitlines() if line.startswith("CI_CHECK ")]
