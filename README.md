@@ -14,10 +14,10 @@ python3 .github/scripts/test-suites.py standalone
 The solution builds independently. Repository integration checks read the consumer's `Meta/`, `Blueprint/`, Git history and Lean inputs. Run them in the trureturing checkout with the candidate release installed.
 
 CI runs the standalone suites on the tool checkout. For suites that read the
-consumer's Makefile, FILEMAP, CI contract or Lean inputs, CI overlays the
-candidate tools on the pinned consumer commit in its workflow. It checks the
-resulting Git tree identity and runs the fixture's registered units. Additional
-candidate test projects run directly in the fixture.
+consumer's Makefile, FILEMAP, CI contract or Lean inputs, CI packages the
+exact candidate and pins its SHA-256 in a fixed consumer checkout. The real
+consumer installer verifies and installs the archive before CI runs the
+registered units and additional candidate test projects.
 
 The consuming repository checks its own current source, FILEMAP and compiled
 Lean evidence against the actual PR or push. Its FIB unit acknowledges the
