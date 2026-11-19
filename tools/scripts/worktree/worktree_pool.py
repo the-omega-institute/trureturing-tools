@@ -5,7 +5,7 @@ import time
 from types import SimpleNamespace
 
 from worktree_protocol import (GitFailure, Refused, clear_matching_stale, common as protocol_common, git, git_environment,
-                               head_committer_time, head_oid, identity, inventory,
+                               head_committer_time, head_oid, identity, install_pinned_tools, inventory,
                                mark_stale, reuse, stale_head, value)
 from worktree_preservation import qualify, registered_committer_time, remove_registered
 from worktree_agent_state import record
@@ -77,6 +77,7 @@ def _allocate(source, path, options, base, expected):
         git(path, "switch", "--no-track", "-c", branch, base, timeout=1200)
         record(source, path, created=False, branch=reference)
         _check_pins(path, expected)
+        install_pinned_tools(source, path)
         clear_matching_stale(source, branch, head_oid(path))
         _make_scaffold(path)
         if not options.skip_restore:

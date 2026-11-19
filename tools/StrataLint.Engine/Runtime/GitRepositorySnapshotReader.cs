@@ -100,7 +100,12 @@ internal static class GitRepositorySnapshotReader
         foreach (var scope in UntrackedEnumerationScopes(root, pathspecs))
             untracked.UnionWith(ParseNulStrings(Git(root,
                 ["ls-files", "--others", "--exclude-standard", "-z", .. scope])));
-        var paths = tracked.Keys
+        var release = ToolsRelease.Current(root);
+        var releasePaths = release?.Files.Keys.Where(path => pathspecs is null || pathspecs.Count == 0
+            || pathspecs.Any(selection => MatchesRevisionSelection(path, selection))).ToArray() ?? [];
+        if (releasePaths.Any(tracked.ContainsKey))
+            throw new InvalidDataException("candidate contains both tracked tools and a tools release pin");
+        var paths = tracked.Keys.Concat(releasePaths)
             .Concat(untracked)
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
@@ -159,6 +164,14 @@ internal static class GitRepositorySnapshotReader
                 probe.Failure?.Throw();
                 var path = probe.Path;
                 var indexMode = tracked.TryGetValue(path, out var indexedEntry) ? indexedEntry.Mode : null;
+                if (release is not null && release.Files.TryGetValue(path, out var member))
+                {
+                    if (probe.LinkTarget is not null || !probe.Exists || probe.Directory || probe.Irregular
+                        || (probe.Executable ? "100755" : "100644") != member.Mode
+                        || (probe.Body is not null && !probe.Body.AsSpan().SequenceEqual(member.Bytes.AsSpan()))
+                        || (probe.ContentDigest is not null && !probe.ContentDigest.AsSpan().SequenceEqual(member.Hash)))
+                        throw new InvalidDataException($"installed file differs from pinned tools release: {path}");
+                }
                 if (probe.LinkTarget is { } target)
                 {
                     var linkBytes = ReadLinkBytes(root, probe.FullPath, target);
@@ -296,14 +309,14 @@ internal static class GitRepositorySnapshotReader
             (arguments, maximumErrorBytes, standardInput, readStandardOutput) =>
                 BoundedProcessRunner.RunStreaming("git", arguments, root, TimeSpan.FromSeconds(120),
                     maximumErrorBytes, readStandardOutput, standardInput),
-            paths);
+            paths, root);
     }
 
     internal static RawRepositorySnapshot ReadRevisionProjection(string revision,
         GitStreamReader<GitRepositoryTreeEntry[]> readTree,
         GitStreamReader<IReadOnlyDictionary<string, GitRepositoryBlob>> runGitStreaming,
         Func<string, bool> readContents,
-        Action<string, ReadOnlyMemory<byte>>? observeContentDigest = null)
+        Action<string, ReadOnlyMemory<byte>>? observeContentDigest = null, string? repositoryRoot = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(revision);
         ArgumentNullException.ThrowIfNull(readContents);
@@ -313,7 +326,7 @@ internal static class GitRepositorySnapshotReader
             if (!IsSupportedMode(entry.Mode) || entry.ObjectType != "blob" || entry.Size is null)
                 throw new InvalidOperationException($"protected base has non-regular entry {entry.Path} ({entry.Mode} {entry.ObjectType})");
 
-        var retainedPaths = tree.Where(entry => readContents(entry.Path)
+        var retainedPaths = tree.Where(entry => entry.Path == ToolsRelease.PinPath || readContents(entry.Path)
             || entry.Mode == "120000" || FileMapDocuments.IsPolicyPath(entry.Path))
             .Select(static entry => entry.Path).ToHashSet(StringComparer.Ordinal);
         var retainedObjects = tree.Where(entry => retainedPaths.Contains(entry.Path))
@@ -343,7 +356,9 @@ internal static class GitRepositorySnapshotReader
         var inventory = tree.Select(entry => new RepositoryPathInventoryEntry(entry.Path, entry.Mode,
             links.Contains(entry.Path) ? "symlink" : "regular", entry.Mode,
             links.Contains(entry.Path) ? StrictUtf8.GetString(blobs[entry.ObjectId].Bytes.AsSpan()) : null)).ToImmutableArray();
-        return RawRepositorySnapshot.Create(entries, inventory);
+        var snapshot = RawRepositorySnapshot.Create(entries, inventory);
+        return repositoryRoot is null ? snapshot : ToolsRelease.AtRevision(repositoryRoot, snapshot,
+            static _ => true, readContents, observeContentDigest);
     }
 
     private static async Task<IReadOnlyDictionary<string, GitRepositoryBlob>> ParseBatchStream(
@@ -412,13 +427,13 @@ internal static class GitRepositorySnapshotReader
         string revision,
         Func<IReadOnlyList<string>, int, ReadOnlyMemory<byte>, ProcessOutput> runGit,
         GitStreamReader<GitRepositoryTreeEntry[]> readTree,
-        IReadOnlyList<string>? paths = null)
+        IReadOnlyList<string>? paths = null, string? repositoryRoot = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(revision);
         ArgumentNullException.ThrowIfNull(runGit);
         var all = GitRepositoryTreeStream.Read(revision, readTree);
-        var tree = paths is null ? all : all.Where(entry =>
-            paths.Any(selection => MatchesRevisionSelection(entry.Path, selection))).ToArray();
+        bool Selected(string path) => paths is null || paths.Any(selection => MatchesRevisionSelection(path, selection));
+        var tree = paths is null ? all : all.Where(entry => Selected(entry.Path) || entry.Path == ToolsRelease.PinPath).ToArray();
         if (paths is not null && tree.Any(static entry => entry.Mode == "120000"))
             tree = tree.Concat(all.Where(entry => FileMapDocuments.IsPolicyPath(entry.Path)))
                 .DistinctBy(static entry => entry.Path, StringComparer.Ordinal).ToArray();
@@ -442,7 +457,11 @@ internal static class GitRepositorySnapshotReader
         FileMapSymlinkPolicy.ValidateSnapshot(entries,
             tree.Where(static entry => entry.Mode == "120000").Select(entry => entry.Path).ToHashSet(StringComparer.Ordinal),
             all.Select(static entry => entry.Path).ToArray());
-        return RawRepositorySnapshot.Create(entries);
+        var inventory = tree.Select(entry => new RepositoryPathInventoryEntry(entry.Path, entry.Mode,
+            entry.Mode == "120000" ? "symlink" : "regular", entry.Mode, entry.Mode == "120000"
+                ? StrictUtf8.GetString(blobs[entry.ObjectId].AsSpan()) : null)).ToImmutableArray();
+        var snapshot = RawRepositorySnapshot.Create(entries, inventory);
+        return repositoryRoot is null ? snapshot : ToolsRelease.AtRevision(repositoryRoot, snapshot, Selected, static _ => true);
     }
 
     private static RawRepositoryEntry[] ReadRevisionEntries(IReadOnlyList<GitRepositoryTreeEntry> tree,

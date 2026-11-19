@@ -156,7 +156,29 @@ internal sealed partial class GitRepositoryGateway : IRepositoryGateway
                 .First())
             .OrderBy(static change => change.Path, StringComparer.Ordinal)
             .ToArray();
-        return changes;
+        if (!changes.Any(change => change.Path == ToolsRelease.PinPath)) return changes;
+        // Compare the effective members across both pin updates and the migration
+        // between tracked and released sources. The archive from the base is data.
+        const string prefix = "tools/";
+        var previous = ReadRevision(revision, ["tools"]);
+        var current = GitRepositorySnapshotReader.ReadCurrent(root, pathspecs: ["tools"]);
+        var oldFiles = previous.Entries.Where(entry => entry.Path.StartsWith(prefix, StringComparison.Ordinal))
+            .ToDictionary(entry => entry.Path, StringComparer.Ordinal);
+        var newFiles = current.Entries.Where(entry => entry.Path.StartsWith(prefix, StringComparison.Ordinal))
+            .ToDictionary(entry => entry.Path, StringComparer.Ordinal);
+        var oldModes = previous.PathInventory.ToDictionary(entry => entry.Path, entry => entry.EffectiveMode, StringComparer.Ordinal);
+        var newModes = current.PathInventory.ToDictionary(entry => entry.Path, entry => entry.EffectiveMode, StringComparer.Ordinal);
+        var result = changes.Where(change => !change.Path.StartsWith(prefix, StringComparison.Ordinal)).ToList();
+        foreach (var path in oldFiles.Keys.Union(newFiles.Keys, StringComparer.Ordinal))
+        {
+            if (!oldFiles.TryGetValue(path, out var oldFile))
+                result.Add((path, RawChangeKind.Added));
+            else if (!newFiles.TryGetValue(path, out var newFile))
+                result.Add((path, RawChangeKind.Deleted));
+            else if (oldModes[path] != newModes[path] || !oldFile.Bytes.AsSpan().SequenceEqual(newFile.Bytes.AsSpan()))
+                result.Add((path, RawChangeKind.Modified));
+        }
+        return result.OrderBy(change => change.Path, StringComparer.Ordinal).ToArray();
     }
 
     private byte[] ReadNameStatus(string revision)
@@ -216,7 +238,7 @@ internal sealed partial class GitRepositoryGateway : IRepositoryGateway
                 GitStreaming(arguments, maximumErrorBytes, readStandardOutput, standardInput),
             (arguments, maximumErrorBytes, standardInput, readStandardOutput) =>
                 GitStreaming(arguments, maximumErrorBytes, readStandardOutput, standardInput),
-            readContents, observeContentDigest);
+            readContents, observeContentDigest, root);
 
     public RawRepositorySnapshot ReadCurrent(IReadOnlyList<string> paths) =>
         GitRepositorySnapshotReader.ReadCurrent(
@@ -272,7 +294,7 @@ internal sealed partial class GitRepositoryGateway : IRepositoryGateway
                 standardInput),
             (arguments, maximumErrorBytes, standardInput, readStandardOutput) =>
                 GitStreaming(arguments, maximumErrorBytes, readStandardOutput, standardInput),
-            paths);
+            paths, root);
 
     private string GitText(params string[] arguments) => StrictUtf8.GetString(GitBytes(arguments));
 

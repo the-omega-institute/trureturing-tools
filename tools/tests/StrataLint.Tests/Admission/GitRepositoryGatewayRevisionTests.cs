@@ -1,5 +1,7 @@
 using StrataLint.Runtime;
 using System.Text;
+using System.Formats.Tar;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using Trureturing.Truth;
 using StrataLint.Cli;
@@ -13,6 +15,48 @@ public sealed class RepositorySnapshotAllocationCollection;
 [Collection("Repository snapshot allocation")]
 public sealed class GitRepositoryGatewayRevisionTests
 {
+    [Fact]
+    public void ReleaseChangesComparePinnedArchiveMembersAcrossRevisions()
+    {
+        using var repository = new TemporaryDirectory();
+        var root = repository.Path;
+        InitializeRepository(root);
+        File.WriteAllText(Path.Combine(root, ".gitignore"), "/tools/\n/.lake/\n");
+        Directory.CreateDirectory(Path.Combine(root, "Meta"));
+        Directory.CreateDirectory(Path.Combine(root, "tools"));
+        var cache = Directory.CreateDirectory(Path.Combine(root, ".lake", "tools-releases")).FullName;
+        const string path = "tools/judge.txt";
+        void Install(string text)
+        {
+            var bytes = Encoding.UTF8.GetBytes(text);
+            using var archive = new MemoryStream();
+            using (var gzip = new GZipStream(archive, CompressionLevel.SmallestSize, leaveOpen: true))
+            using (var tar = new TarWriter(gzip))
+            using (var source = new MemoryStream(bytes))
+                tar.WriteEntry(new UstarTarEntry(TarEntryType.RegularFile, path)
+                {
+                    DataStream = source,
+                    Mode = UnixFileMode.UserRead | UnixFileMode.UserWrite,
+                });
+            var payload = archive.ToArray();
+            var digest = Convert.ToHexStringLower(SHA256.HashData(payload));
+            File.WriteAllBytes(Path.Combine(cache, digest + ".tar.gz"), payload);
+            File.WriteAllText(Path.Combine(root, ToolsRelease.PinPath), $$"""{"version":"v1.0.0","sha256":"{{digest}}"}""");
+            File.WriteAllBytes(Path.Combine(root, path), bytes);
+        }
+        Install("old");
+        TestGit.Run(root, "add", ".");
+        TestGit.Run(root, "commit", "-m", "base release");
+        var revision = TestGit.Run(root, "rev-parse", "HEAD").Trim();
+        Install("new");
+        var gateway = new GitRepositoryGateway(root);
+        AssertEntry(Assert.Single(gateway.ReadRevision(revision, [path]).Entries), path, "old");
+        AssertEntry(Assert.Single(gateway.ReadCurrent([path]).Entries), path, "new");
+        Assert.Contains(gateway.ReadChanges(revision).Paths, item => item.Value == path);
+        File.WriteAllText(Path.Combine(root, path), "modified");
+        Assert.Throws<InvalidDataException>(() => gateway.ReadCurrent([path]));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

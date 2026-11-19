@@ -62,6 +62,7 @@ internal static partial class FileMapPolicy
             ["LeanReportSelection"] = "tools/scripts/report/lean-report-selection.py",
             ["lean-build"] = "tools/scripts/worktree/lean-cache-run.sh",
             ["lean-inspector"] = "tools/lean-inspector/inspect.sh",
+            ["ToolsRelease"] = "tools/StrataLint.Engine/Snapshot/ToolsRelease.cs",
             ["NativeArchivePaths"] = "tools/scripts/worktree/lean_actions.py",
             ["ProblemCandidateCatalog"] = ProblemCandidateCatalogPath,
             ["DomainsLoader"] = DomainsLoaderPath,

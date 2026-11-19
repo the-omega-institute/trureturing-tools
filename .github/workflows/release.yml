@@ -1,0 +1,64 @@
+name: Build and release tools
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - run: make -C tools dotnet
+      - run: dotnet test tools/tests/Trureturing.Truth.Tests --configuration Release --no-build
+      - name: Build the source archive
+        run: python3 package_release.py
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: tools-release
+          path: build/trureturing-tools.tar.gz
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tools-release
+      - name: Publish or verify the tag's asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          asset=trureturing-tools.tar.gz
+          if metadata=$(gh release view "$TAG" --json isDraft,assets); then
+            draft=$(jq -r '.isDraft' <<< "$metadata")
+            if [[ "$draft" == true ]] && ! jq -e --arg name "$asset" 'any(.assets[]; .name == $name)' <<< "$metadata" >/dev/null; then
+              gh release upload "$TAG" "$asset"
+            fi
+            gh release download "$TAG" --pattern "$asset" --dir "$RUNNER_TEMP/existing"
+            cmp "$asset" "$RUNNER_TEMP/existing/$asset"
+            if [[ "$draft" == true ]]; then
+              gh release edit "$TAG" --draft=false
+            fi
+          else
+            sha256sum "$asset" > "$RUNNER_TEMP/checksum"
+            gh release create "$TAG" "$asset" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/checksum"
+          fi

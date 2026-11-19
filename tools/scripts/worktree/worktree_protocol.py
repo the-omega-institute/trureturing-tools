@@ -276,6 +276,15 @@ def with_command(options):
     os.execvpe(options.argv[0], options.argv, git_environment())
 
 
+def install_pinned_tools(source, path):
+    if (path / "Meta/tools-release.json").is_file():
+        result = subprocess.run([sys.executable, "-I", "-B", ".github/scripts/install-tools.py",
+                                 "--cache-from", str(source)], cwd=path, env=git_environment(),
+                                capture_output=True, timeout=300)
+        if result.returncode:
+            raise GitFailure("tools_install_failed:" + result.stderr.decode(errors="replace").strip())
+
+
 def reuse(options, allow_recovered_base=False):
     del allow_recovered_base
     if options.path.is_symlink():
@@ -291,6 +300,7 @@ def reuse(options, allow_recovered_base=False):
         expected = git(options.source, "show", base + ":" + pin).stdout
         if (options.path / pin).read_bytes() != expected:
             raise Refused("incompatible_pin:" + pin)
+    install_pinned_tools(options.source, options.path)
     clear_matching_stale(options.source, expected_branch, head_oid(options.path))
     from worktree_agent_state import record
     record(options.source, options.path, branch=expected_branch)

@@ -21,8 +21,9 @@ internal static class GitIndexRepositoryFiles
 
     internal static IReadOnlyList<(string RelativePath, string Mode)> EnumerateTracked(
         string repositoryRoot) => Read(repositoryRoot)
-        .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
         .Select(static pair => (RelativePath: pair.Key, Mode: pair.Value.Mode))
+        .Concat(ToolsRelease.Current(repositoryRoot)?.Files.Select(static pair => (RelativePath: pair.Key, Mode: pair.Value.Mode)) ?? [])
+        .OrderBy(static pair => pair.RelativePath, StringComparer.Ordinal)
         .ToArray();
 
     internal static Dictionary<string, GitIndexEntry> Read(string repositoryRoot,

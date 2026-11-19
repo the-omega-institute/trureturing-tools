@@ -265,6 +265,13 @@ internal static class WorktreeCommand
             WorktreeCreationSafety.ValidateCreatedWorktree(options, runner);
             stage = "checkout";
             WorktreeCreationSafety.CheckoutCreatedWorktree(options, runner);
+            if (File.Exists(Path.Combine(options.Path, "Meta", "tools-release.json")))
+            {
+                stage = "tools";
+                RunRequired(runner, "python3", ["-I", "-B", ".github/scripts/install-tools.py",
+                    "--cache-from", options.Source], options.Path, TimeSpan.FromMinutes(5),
+                    "tools release installation failed");
+            }
             EnsureReviewScaffoldIgnores(options.Path);
             if (!options.SkipRestore)
             {

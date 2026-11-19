@@ -270,6 +270,11 @@ def local(args, data, revision):
                                        contract_revision=revision, purpose=args.purpose)), flush=True)
     if args.plan:
         return 0
+    if plan["delta"] and Path("Meta/tools-release.json").is_file():
+        code = execute("cache-base-tools", [sys.executable, "-I", "-B", ".github/scripts/install-tools.py",
+                                            "--cache-revision", base], compute=False)
+        if code:
+            return code
     failures = []
     current_code = None
     with tempfile.TemporaryDirectory(prefix="ci-local-") as directory:
