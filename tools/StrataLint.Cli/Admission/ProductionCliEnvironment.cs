@@ -12,7 +12,10 @@ internal sealed record FrozenRevisionIdentity(string Revision, string CommitOid,
 internal sealed record CheckArguments(
     string? ProtectedBase,
     string? CandidateLeanReport,
-    string? ScribePaths = null);
+    string? ScribePaths = null,
+    string? ChangedPaths = null,
+    string? ScopedReports = null,
+    string? ScopeBase = null);
 
 internal interface IRepositoryGateway
 {
@@ -371,45 +374,30 @@ internal sealed partial class ProductionCliEnvironment : ICliEnvironment
         return memory.ToArray();
     }
 
-    private static CheckArguments ParseCheckArguments(IReadOnlyList<string> arguments)
+    private static CheckArguments ParseCheckArguments(IReadOnlyList<string> arguments, bool stage = false)
     {
-        string? protectedBase = null;
-        string? candidateLeanReport = null;
-        string? scribePaths = null;
+        var options = new Dictionary<string, string>(StringComparer.Ordinal);
         for (var index = 0; index < arguments.Count; index += 2)
         {
-            if (index + 1 >= arguments.Count)
-            {
-                throw CheckUsage();
-            }
-
-            var target = arguments[index] switch
-            {
-                "--protected-base" when protectedBase is null => 0,
-                "--candidate-lean-report" when candidateLeanReport is null => 1,
-                "--scribe-paths-from" when scribePaths is null => 2,
-                _ => throw CheckUsage(),
-            };
-            switch (target)
-            {
-                case 0:
-                    protectedBase = arguments[index + 1];
-                    break;
-                case 1:
-                    candidateLeanReport = arguments[index + 1];
-                    break;
-                case 2:
-                    scribePaths = arguments[index + 1];
-                    break;
-            }
+            var name = arguments[index];
+            if (index + 1 >= arguments.Count
+                || name is not ("--protected-base" or "--candidate-lean-report" or "--scribe-paths-from")
+                    && !(stage && name is "--changed-paths-from" or "--scoped-reports-from" or "--scope-base")
+                || string.IsNullOrWhiteSpace(arguments[index + 1])
+                || !options.TryAdd(name, arguments[index + 1]))
+                throw CheckUsage(stage);
         }
 
-        return new CheckArguments(protectedBase, candidateLeanReport, scribePaths);
+        return new(options.GetValueOrDefault("--protected-base"),
+            options.GetValueOrDefault("--candidate-lean-report"), options.GetValueOrDefault("--scribe-paths-from"),
+            options.GetValueOrDefault("--changed-paths-from"), options.GetValueOrDefault("--scoped-reports-from"),
+            options.GetValueOrDefault("--scope-base"));
     }
 
-    private static InvalidOperationException CheckUsage() => new(
-        "USAGE: StrataLint check [--protected-base REV] "
-        + "--candidate-lean-report FILE [--scribe-paths-from FILE]");
+    private static InvalidOperationException CheckUsage(bool stage) => new(
+        stage ? "USAGE: check-current | check-delta --protected-base SHA; supply --candidate-lean-report FILE "
+            + "[--scribe-paths-from FILE] or --changed-paths-from FILE [--scoped-reports-from FILE] [--scope-base SHA for check-current]"
+        : "USAGE: StrataLint check [--protected-base REV] --candidate-lean-report FILE [--scribe-paths-from FILE]");
 
     private static RepositorySnapshot Decode(RawRepositorySnapshot raw) =>
         SnapshotDecoder.Decode(raw) switch

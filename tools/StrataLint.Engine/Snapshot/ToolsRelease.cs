@@ -62,6 +62,15 @@ internal sealed class ToolsRelease
         }
     }
 
+    internal static IEnumerable<(string Path, RawChangeKind Kind)> Changes(string root, string revision)
+    {
+        if (revision.Length != 40 || !revision.All(char.IsAsciiHexDigit))
+            throw new InvalidDataException("a tools release change requires the full base commit SHA");
+        var previous = GitRepositorySnapshotReader.ReadRevision(root, revision, ["tools"], includeInventory: true);
+        var current = GitRepositorySnapshotReader.ReadCurrent(root, pathspecs: ["tools"]);
+        return Changes(previous, current);
+    }
+
     internal static IEnumerable<(string Path, RawChangeKind Kind)> Changes(
         RawRepositorySnapshot previous, RawRepositorySnapshot current)
     {
