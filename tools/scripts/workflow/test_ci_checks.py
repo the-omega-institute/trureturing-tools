@@ -440,7 +440,7 @@ class ScopedReportTests(unittest.TestCase):
             root = Path(temporary)
             changed, plan = root / "paths", root / "plan.json"
             contract.write_paths(changed, ["Meta/tools-release.json"])
-            selected = {"programs": ["Inspector.Feature"], "targets": ["D5.Owner", "Inspector.Feature"]}
+            selected = {"programs": ["Inspector.Feature"], "targets": ["D5.Owner"]}
             with patch.object(lean.subprocess, "run", return_value=subprocess.CompletedProcess(
                     [], 0, stdout=json.dumps(selected))) as scribe:
                 plan.write_text(json.dumps(lean.plan_scope(changed, base)))
