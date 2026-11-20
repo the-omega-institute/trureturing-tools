@@ -727,11 +727,20 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertEqual("keep current material", (self.root / ".lake/build/keep.txt").read_text())
 
     def test_protected_producer_restores_exact_production_release_without_an_actions_seed(self):
+        for directory in ("Reg", "tools/lean-inspector-reg", "tools/lean-inspector-interface"):
+            name = pathlib.Path(directory).name
+            build = pathlib.Path(*([".."] * len(pathlib.Path(directory).parts)), ".lake/build", name)
+            write(self.root / directory / "lakefile.toml", f'name = "{name}"\nbuildDir = "{build}"\n')
+        lean = self.bin / "lean"
+        write(lean, '#!/usr/bin/env python3\nimport json,sys\n'
+                    'print(json.dumps({"imports":[{"errors":[],"result":{"imports":[]}} for _ in sys.stdin]}))\n')
+        lean.chmod(0o755)
         self.candidate_fixture()
-        published = self.transport("publish")
+        published = self.transport("publish", arguments=("--indexed",))
         self.assertEqual(0, published.returncode, published.stdout + published.stderr)
+        self.assertIn('"status":"published"', published.stdout)
         tag = next(self.remote.iterdir()).name
-        self.assertTrue(tag.startswith("lean-cache-v2-"))
+        self.assertTrue(tag.startswith("lean-cache-v3-"))
         shutil.rmtree(self.root / ".lake/build")
         environment = self.candidate_consumer()
         arguments = ("--mode", "candidate", "--tag", tag, "--source-commit")

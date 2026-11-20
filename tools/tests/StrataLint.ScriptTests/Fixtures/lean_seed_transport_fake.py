@@ -47,6 +47,9 @@ if args[:2] == ["release", "list"]:
                       for p in root.glob("*/release.json")]))
 elif args[0] == "api":
     directory = root / args[1].split("/")[-1]
+    if args[1].rsplit("/", 2)[-2] == "releases" and directory.name.isdigit():
+        directory = next((p.parent for p in root.glob("*/release.json")
+                          if p.stat().st_ino == int(directory.name)), directory)
     phase = "FAKE_POST_EDIT_API" if (root.parent / ("gh-edited-" + str(os.getppid()))).exists() else "FAKE_LOOKUP_API"
     if phase + "_JSON" in os.environ:
         print(os.environ[phase + "_JSON"])
@@ -94,7 +97,11 @@ else:
                 shutil.copyfile(path, destination / path.name)
     elif verb == "view":
         if not directory.exists(): sys.exit(1)
-        print(json.dumps(metadata(directory)))
+        result = metadata(directory)
+        if "--json" in args and "databaseId" in option("--json").split(","):
+            result = {"databaseId": (directory / "release.json").stat().st_ino,
+                      "isDraft": result["draft"], "tagName": tag}
+        print(json.dumps(result))
     elif verb == "delete": shutil.rmtree(directory)
     else: sys.exit(2)
 '''
