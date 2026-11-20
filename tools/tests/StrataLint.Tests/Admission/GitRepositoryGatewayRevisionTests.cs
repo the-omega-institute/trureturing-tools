@@ -50,8 +50,13 @@ public sealed class GitRepositoryGatewayRevisionTests
         var revision = TestGit.Run(root, "rev-parse", "HEAD").Trim();
         Install("new");
         var gateway = new GitRepositoryGateway(root);
-        AssertEntry(Assert.Single(gateway.ReadRevision(revision, [path]).Entries), path, "old");
-        AssertEntry(Assert.Single(gateway.ReadCurrent([path]).Entries), path, "new");
+        foreach (var selection in new[] { path, "tools", "tools/", ":(literal)tools/" })
+        {
+            AssertEntry(Assert.Single(gateway.ReadRevision(revision, [selection]).Entries), path, "old");
+            AssertEntry(Assert.Single(gateway.ReadCurrent([selection]).Entries), path, "new");
+        }
+        Assert.Empty(gateway.ReadRevision(revision, [path + "/"]).Entries);
+        Assert.Empty(gateway.ReadCurrent([path + "/"]).Entries);
         Assert.Contains(gateway.ReadChanges(revision).Paths, item => item.Value == path);
         File.WriteAllText(Path.Combine(root, path), "modified");
         Assert.Throws<InvalidDataException>(() => gateway.ReadCurrent([path]));

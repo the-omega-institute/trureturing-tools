@@ -47,7 +47,8 @@ def contract(shard, shard_count):
                 registered.add(arg.removeprefix("TEST_PROJECT="))
     discovered = {str(p) for p in Path("tools/tests").glob("*/*.csproj")
                   if ET.parse(p).findtext(".//IsTestProject") == "true"}
-    additional = sorted(discovered - registered)
+    additional = sorted(project for project in discovered - registered
+                        if Path(project).stem not in STANDALONE)
     for project in additional[shard::shard_count]:
         check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly", project)
     downstream = {"filemap", "tests-fib"}
