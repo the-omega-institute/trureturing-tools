@@ -118,6 +118,11 @@ if __name__ == "__main__":
             scope = (json.loads(args.read_plan.read_text()) if args.read_plan
                      else plan_scope(args.manifest, args.base or args.protected_base))
             modules = scope_modules(scope)
+            if "cache_suites" in scope and (modules or scope["cache_suites"]):
+                sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worktree"))
+                from lean_ci_cache_scope import cache_modules
+
+                modules = cache_modules(Path.cwd(), scope, modules)
             if modules:
                 print(" ".join(modules))
             sys.exit(0)

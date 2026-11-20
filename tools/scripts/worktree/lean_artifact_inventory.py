@@ -81,14 +81,29 @@ def inspector_release_sources(root: Path, pin: Path):
                 yield member.name
 
 
+def library_roots(library):
+    return library["roots"] if "roots" in library else [library["name"]]
+
+
+def library_globs(library):
+    return library["globs"] if "globs" in library else library_roots(library)
+
+
+def matches_module_glob(name, glob):
+    if glob.endswith((".+", ".*")):
+        prefix = glob[:-2]
+        return name.startswith(prefix + ".") or (glob.endswith(".*") and name == prefix)
+    return name == glob
+
+
 def workspace_modules(root: Path) -> dict[str, Module]:
     """Read the current project source set without building any Lean target."""
     reg_inspector_config = tomllib.loads((root / REG_INSPECTOR / "lakefile.toml").read_text())
-    reg_inspector_roots = {
-        name
-        for library in reg_inspector_config["lean_lib"]
-        for name in library["roots"]
-    }
+    reg_inspector_globs = {
+        pattern
+        for library in reg_inspector_config.get("lean_lib", [])
+        for pattern in [*library_globs(library), *(name + ".*" for name in library_roots(library))]
+    } | {exe.get("root", exe["name"]) for exe in reg_inspector_config.get("lean_exe", [])}
     packages = {}
     for directory in (Path("."), Path("Reg"), INTERFACE, REG_INSPECTOR):
         config = tomllib.loads((root / directory / "lakefile.toml").read_text())
@@ -119,8 +134,10 @@ def workspace_modules(root: Path) -> dict[str, Module]:
             relative = source.relative_to(owner)
         if source.is_relative_to(INSPECTOR):
             relative = source.relative_to(INSPECTOR)
-            owner = REG_INSPECTOR if relative.parts[0] in reg_inspector_roots else INSPECTOR
+            owner = INSPECTOR
         module = ".".join(relative.with_suffix("").parts)
+        if owner == INSPECTOR and any(matches_module_glob(module, glob) for glob in reg_inspector_globs):
+            owner = REG_INSPECTOR
         package, build = packages[owner]
         if module in result:
             raise ValueError(f"ambiguous module ownership: {module}")

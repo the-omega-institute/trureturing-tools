@@ -100,12 +100,15 @@ def unit_run(name, unit, *, current=None):
     return execute(name, command)
 
 
-def prepare_lean_scope(paths, scope_file, base):
+def prepare_lean_scope(paths, scope_file, base, *, cache_suites=None):
     code = execute("lean-plan", [sys.executable, "tools/scripts/workflow/ci_pr_lean.py", str(paths),
                                  *(["--base", base] if base else []), "--write-plan", str(scope_file)])
     if code:
         return code, False
     scope = json.loads(scope_file.read_text())
+    if cache_suites is not None:
+        scope["cache_suites"] = cache_suites
+        scope_file.write_text(json.dumps(scope))
     return 0, bool(scope["targets"] or scope["programs"])
 
 
@@ -131,8 +134,9 @@ def current_phase(phase, data, plan, base, paths, scope_file=None):
     if phase == "lean-plan":
         if scope_file is None:
             raise DetectError("Lean planning requires an output file")
-        code, builds = prepare_lean_scope(paths, scope_file, base)
-        needed = builds or any(plan[key] for _, key in READY_PHASES)
+        suites = [key for _, key in READY_PHASES if plan[key]]
+        code, builds = prepare_lean_scope(paths, scope_file, base, cache_suites=suites)
+        needed = builds or bool(suites)
         if code == 0 and os.environ.get("GITHUB_OUTPUT"):
             with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
                 stream.write(f"builds_lean={str(builds).lower()}\nneeds_lean={str(needed).lower()}\n")

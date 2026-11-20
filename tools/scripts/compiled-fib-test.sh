@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-make -C "$ROOT" lean LEAN_TARGETS="regInspector/LeanInformationAuditFibTests regInspector/compiledFibTests regInspector/auricFibAnalysis leanInspector/reportInspector"
+targets=(regInspector/LeanInformationAuditFibTests regInspector/compiledFibTests regInspector/auricFibAnalysis leanInspector/reportInspector)
+if [[ "${1:-}" == --print-lean-targets ]]; then
+  printf '%s\n' "${targets[@]}"
+  exit 0
+fi
+make -C "$ROOT" lean LEAN_TARGETS="${targets[*]}"
 cd "$ROOT"
 compute=()
 [[ -z "${STRATALINT_CI_COMPUTE_BUDGET:-}" || "${STRATALINT_CI_COMPUTE_ACTIVE:-0}" == 1 ]] || compute=(python3 tools/scripts/workflow/ci_compute.py run --)

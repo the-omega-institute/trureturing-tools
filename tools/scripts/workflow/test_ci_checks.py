@@ -85,6 +85,8 @@ class CheckTests(unittest.TestCase):
                     chosen[suite] = True
                 with patch.object(checks, "execute", return_value=0), patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
                     self.assertEqual(checks.current_phase("lean-plan", data, chosen, None, Path("changed"), scope), 0)
+                self.assertEqual(json.loads(scope.read_text()),
+                    {"targets": targets, "programs": programs, "cache_suites": [suite] if suite else []})
                 self.assertEqual(output.read_text().splitlines(), [
                     "builds_lean=" + str(bool(targets or programs)).lower(), "needs_lean=" + str(needs).lower()])
 
@@ -158,7 +160,8 @@ class CheckTests(unittest.TestCase):
                         return subprocess.CompletedProcess(command, current_exit if command[2] == "check-current" else delta_exit)
                     return subprocess.CompletedProcess(command, 0)
                 scope_file = Path(temp) / "scope"
-                scope_file.write_text(json.dumps({"programs": [], "targets": targets, "paths": [], "definitions": {}}))
+                scope_file.write_text(json.dumps({"programs": [], "targets": targets, "paths": [],
+                    "definitions": {}, "cache_suites": ["source-evidence", "compiled-audit", "fib-regressions"]}))
                 with patch.object(ci_pr_lean, "plan_scope", side_effect=AssertionError("scope planned twice")), \
                         patch.object(ci_pr_lean.subprocess, "run", side_effect=run), \
                         patch.object(ci_pr_lean, "report_batches", return_value=[([target], []) for target in targets]):
@@ -450,6 +453,89 @@ class ScopedReportTests(unittest.TestCase):
             self.assertEqual(subprocess.check_output(command), b"")
             plan.write_text(json.dumps({"programs": [], "targets": ["not a module"]}))
             self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+
+    def test_saved_cache_plan_expands_selected_libraries_and_resolves_programs(self):
+        import ci_pr_lean as lean
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+
+            def write(path, contents=""):
+                file = root / path
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text(contents)
+
+            write("lakefile.toml", 'name = "project"\n')
+            write("Reg/lakefile.toml", 'name = "reg"\nbuildDir = "../.lake/build/reg"\n')
+            write("tools/lean-inspector-interface/lakefile.toml",
+                'name = "interface"\nbuildDir = "../../.lake/build/interface"\n')
+            write("tools/lean-inspector-reg/lakefile.toml", """
+name = "regInspector"
+buildDir = "../../.lake/build/inspection"
+[[lean_lib]]
+name = "LeanInformationAuditRegTests"
+roots = ["Audit"]
+globs = ["Audit.*", "AuditOnly"]
+[[lean_lib]]
+name = "LeanInformationAuditFibTests"
+roots = ["Fib", "Analysis"]
+globs = ["Fib.+"]
+[[lean_exe]]
+name = "compiledJudgeTests"
+root = "Audit.Main"
+[[lean_exe]]
+name = "compiledFibTests"
+root = "Fib.Run"
+[[lean_exe]]
+name = "auricFibAnalysis"
+root = "Analysis.Main"
+""")
+            write("tools/lean-inspector/lakefile.lean", """
+lean_exe reportInspector where
+  root := `Producer
+  supportInterpreter := true
+
+lean_exe inputDiscovery where
+  root := `Producer.Discover
+""")
+            for source in ("Audit", "Audit/Main", "Audit/Deep/Case", "AuditOnly", "AuditOther",
+                           "Fib", "Fib/Run", "Fib/Deep/Case", "Analysis/Main", "Analysis/Unused",
+                           "Producer", "Producer/Discover", "Program", "compiledFibTests", "reportInspector"):
+                write(f"tools/lean-inspector/{source}.lean")
+            for source in ("D5/S3/Fourier/IntegerCharacterCoercivity",
+                           "D5/S3/TotalVariation/PrimitiveBridgeCancellation"):
+                write(source + ".lean")
+                write("Reg/" + source + ".lean")
+            write("D5/Scoped.lean")
+
+            targets_file = root / "targets"
+            command = [sys.executable, "-B", lean.__file__, "changed", "--read-plan", "plan", "--cache-targets"]
+
+            def restored(suites, targets=(), programs=()):
+                write("plan", json.dumps(dict(targets=targets, programs=programs, cache_suites=suites)))
+                with targets_file.open("w") as output:
+                    subprocess.run(command, cwd=root, check=True, stdout=output)
+                modules = targets_file.read_text().split()
+                self.assertEqual(modules, sorted(set(modules)))
+                return set(modules)
+
+            report_programs = {"Producer", "Producer.Discover"}
+            audit = report_programs | {"Audit", "Audit.Main", "Audit.Deep.Case", "AuditOnly"}
+            fib = report_programs | {"Fib.Run", "Fib.Deep.Case", "Analysis.Main"}
+            evidence = report_programs | {
+                "D5.S3.Fourier.IntegerCharacterCoercivity", "Reg.D5.S3.Fourier.IntegerCharacterCoercivity",
+                "D5.S3.TotalVariation.PrimitiveBridgeCancellation", "Reg.D5.S3.TotalVariation.PrimitiveBridgeCancellation",
+            }
+            self.assertEqual(restored(["compiled-audit"]), audit)
+            self.assertEqual(restored(["fib-regressions"]), fib)
+            self.assertEqual(restored(["source-evidence"]), evidence)
+            self.assertEqual(restored(["source-evidence", "compiled-audit", "fib-regressions"],
+                ["D5.Scoped"], ["Program"]), evidence | audit | fib | {"D5.Scoped", "Program"})
+            self.assertEqual(restored([], ["D5.Scoped"]), report_programs | {"D5.Scoped"})
+            self.assertEqual(restored([], programs=["Program"]), {"Program"})
+            self.assertEqual(restored([]), set())
+            self.assertEqual(targets_file.read_bytes(), b"")
 
     def test_empty_scope_has_no_build_and_large_scopes_keep_scribe_inputs_together(self):
         from ci_pr_lean import report_batches

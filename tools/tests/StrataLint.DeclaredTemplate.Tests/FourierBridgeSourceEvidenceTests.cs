@@ -10,6 +10,8 @@ namespace StrataLint.DeclaredTemplate.Tests;
 
 public sealed class FourierBridgeSourceEvidenceTests(Xunit.Abstractions.ITestOutputHelper output)
 {
+    private const string SourceInputs = "tools/tests/StrataLint.DeclaredTemplate.Tests/FourierBridgeSourceInputs.json";
+
     // Required production evidence has a hard deadline: expiration is a failure,
     // not an infrastructure skip. Keep the original 300-second process budget.
     private static readonly TimeSpan NativeEvidenceDeadline = TimeSpan.FromSeconds(300);
@@ -17,14 +19,16 @@ public sealed class FourierBridgeSourceEvidenceTests(Xunit.Abstractions.ITestOut
     // These are actual :report artifacts, including compiler type materials and axioms.
     // No synthetic positive report or copied certificate supplies the acceptance case.
     [Theory]
-    [InlineData("D5/S3/Fourier/IntegerCharacterCoercivity.lean",
+    [InlineData("integer-character",
         "D5.S3.Fourier.IntegerCharacterCoercivity.integer_character_global_coercivity", 4, 5, 6, new[] { 0, 1, 3 })]
-    [InlineData("D5/S3/TotalVariation/PrimitiveBridgeCancellation.lean",
+    [InlineData("primitive-bridge",
         "D5.S3.TotalVariation.PrimitiveBridgeCancellation.primitive_bridge_cancellation", 11, 14, 15, new[] { 7, 12 })]
     public void original_passes_production_materials_join_and_rejects_corruption(
-        string sourcePath, string theoremName, int telescope, int state, int scope, int[] coordinates)
+        string sourceKey, string theoremName, int telescope, int state, int scope, int[] coordinates)
     {
         var root = TestRepositoryLayout.FindRoot();
+        using var inputs = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(root, SourceInputs)));
+        var sourcePath = inputs.RootElement.GetProperty(sourceKey).GetString()!;
         var module = sourcePath[..^5].Replace('/', '.');
         var directory = Environment.GetEnvironmentVariable("FOURIER_BRIDGE_SOURCE_ARTIFACTS");
         if (string.IsNullOrEmpty(directory))
