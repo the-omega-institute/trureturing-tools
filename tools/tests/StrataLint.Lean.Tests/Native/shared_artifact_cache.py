@@ -30,6 +30,10 @@ class SharedArtifactCacheTests(unittest.TestCase):
                 self.assertEqual(0, proc.returncode, proc.stdout)
                 return proc.stdout.strip()
 
+            def make(directory, *goals):
+                # This miniature project supplies its own Lake packages and tool sources.
+                return call(directory, 'make', 'TOOLS_TARGETS=', *goals)
+
             def write(directory, name, text):
                 path = directory / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,18 +100,18 @@ class SharedArtifactCacheTests(unittest.TestCase):
                 return {file.relative_to(cache): (file.stat().st_mtime_ns, hashlib.sha256(file.read_bytes()).digest())
                         for file in cache.rglob('*') if file.is_file()}
 
-            call(main, 'make', 'lean', 'LEAN_TARGETS=Fixture')
+            make(main, 'lean', 'LEAN_TARGETS=Fixture')
             self.assertEqual(['Support', 'Fixture'], compile_log.read_text().splitlines())
             self.assertFalse(snapshot())
             compile_log.write_text('')
-            result = call(main, 'make', 'warm-donor', 'FULL_BUILD=1', 'LEAN_TARGETS=Fixture')
+            result = make(main, 'warm-donor', 'FULL_BUILD=1', 'LEAN_TARGETS=Fixture')
             self.assertIn('"status":"warmed"', result)
             self.assertEqual({'Impl', 'Reg', 'Host'}, set(compile_log.read_text().splitlines()))
             published = snapshot()
             scopes = {p.parts[1] for p in published if p.parts[0] == 'outputs'}
             self.assertTrue({'trureturing', 'leanInspector', 'reg', 'regInspector'} <= scopes, scopes)
             compile_log.write_text('')
-            result = call(reader, 'make', 'lean', 'LEAN_TARGETS=Fixture', 'FULL_BUILD=1')
+            result = make(reader, 'lean', 'LEAN_TARGETS=Fixture', 'FULL_BUILD=1')
             receipts = [json.loads(line.removeprefix('LEAN_CACHE ')) for line in result.splitlines()
                         if line.startswith('LEAN_CACHE ')]
             self.assertTrue(receipts)
@@ -116,7 +120,7 @@ class SharedArtifactCacheTests(unittest.TestCase):
             private_output = Path('.lake/build/lib/lean/Fixture.olean')
             self.assertEqual((main / private_output).read_bytes(), (reader / private_output).read_bytes())
             write(reader, 'Fixture.lean', module('Fixture', 'import Support', 2))
-            call(reader, 'make', 'lean', 'LEAN_TARGETS=Fixture')
+            make(reader, 'lean', 'LEAN_TARGETS=Fixture')
             self.assertEqual(['Fixture'], compile_log.read_text().splitlines())
             self.assertNotEqual((main / private_output).read_bytes(), (reader / private_output).read_bytes())
             self.assertEqual(published, snapshot())
@@ -125,7 +129,7 @@ class SharedArtifactCacheTests(unittest.TestCase):
             shutil.rmtree(main / '.lake')
             shutil.rmtree(cache)
             compile_log.write_text('')
-            cold = call(main, 'make', 'warm-donor', 'FULL_BUILD=1')
+            cold = make(main, 'warm-donor', 'FULL_BUILD=1')
             self.assertIn('"status":"warmed"', cold)
             self.assertIn('"cold_build_consent":true', cold)
             self.assertEqual({'Fixture', 'Support'}, set(compile_log.read_text().splitlines()))
@@ -134,7 +138,7 @@ class SharedArtifactCacheTests(unittest.TestCase):
             call(main, 'git', 'switch', '--detach')
             call(reader, 'git', 'restore', 'Fixture.lean')
             call(reader, 'git', 'switch', 'dev')
-            skipped = call(reader, 'make', 'warm-donor', 'FULL_BUILD=1')
+            skipped = make(reader, 'warm-donor', 'FULL_BUILD=1')
             self.assertIn('"reason":"worktree is not the main checkout"', skipped)
             self.assertEqual(published, snapshot())
 
