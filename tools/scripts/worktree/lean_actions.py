@@ -460,6 +460,15 @@ def resume_spec(root):
         "inputs": dependency_inputs(root), "mathlib": keys["mathlib_revision"],
         "os": keys["os"], "arch": keys["arch"],
     }
+    release_tag = os.environ.get("STRATALINT_RELEASE_SEED_TAG", "")
+    release_producer = os.environ.get("STRATALINT_RELEASE_SEED_PRODUCER", "")
+    if release_tag or release_producer:
+        if (not manual_source_is_valid() or not re.fullmatch(r"[A-Za-z0-9._-]+", release_tag)
+                or not re.fullmatch(r"[0-9a-f]{40}", release_producer) or release_producer == "0" * 40):
+            raise ValueError("Release continuation requires a protected dispatch and both Release pins")
+        binding["release_seed"] = {"tag": release_tag, "producer": release_producer,
+                                   "target": os.environ["STRATALINT_CACHE_SOURCE_COMMIT"],
+                                   "run": os.environ["GITHUB_RUN_ID"]}
     identity = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     prefix = f"lean-producer-resume-v1-{keys['mathlib_revision']}-{keys['os']}-{keys['arch']}-{identity}-"
     paths = native_archive_paths(root, LAYERS)

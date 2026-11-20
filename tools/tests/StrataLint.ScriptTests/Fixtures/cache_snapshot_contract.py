@@ -1049,6 +1049,29 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                     "user.email=fixture@example.invalid", "commit", "-qm", "changed"], check=True, capture_output=True)
                 self.assertEqual(spec["restore_prefix"], owner.resume_spec(self.root)["restore_prefix"])
 
+    def test_release_rebuild_continuation_is_private_to_the_pinned_dispatch(self):
+        owner = self.manual_resume_setup()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            ordinary = owner.resume_spec(self.root)
+            pins = {"STRATALINT_RELEASE_SEED_TAG": "lean-cache-v3-fixture",
+                    "STRATALINT_RELEASE_SEED_PRODUCER": "a" * 40}
+            with mock.patch.dict(os.environ, pins):
+                first = owner.resume_spec(self.root)
+                self.assertNotEqual(ordinary["identity"], first["identity"])
+                with mock.patch.dict(os.environ, GITHUB_RUN_ATTEMPT="3"):
+                    retry = owner.resume_spec(self.root)
+                    self.assertTrue(owner.resume_key_matches(retry, first["key"]))
+                    self.assertNotEqual(first["key"], retry["key"])
+                for override in ({"GITHUB_RUN_ID": "18"}, {"STRATALINT_RELEASE_SEED_TAG": "lean-cache-v2-other"},
+                                 {"STRATALINT_RELEASE_SEED_PRODUCER": "c" * 40},
+                                 {"STRATALINT_CACHE_SOURCE_COMMIT": "d" * 40,
+                                  "STRATALINT_CACHE_CHECKED_OUT_SHA": "d" * 40}):
+                    with mock.patch.dict(os.environ, override):
+                        self.assertFalse(owner.resume_key_matches(owner.resume_spec(self.root), first["key"]))
+                with mock.patch.dict(os.environ, STRATALINT_RELEASE_SEED_PRODUCER=""):
+                    with self.assertRaisesRegex(ValueError, "Release continuation"):
+                        owner.resume_spec(self.root)
+
     def test_resume_paths_include_registered_dependency_and_project_material(self):
         owner = self.resume_setup()
         with mock.patch.dict(os.environ, self.env, clear=True):

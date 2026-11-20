@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -17,15 +18,25 @@ HEAD, MERGE, LATER = ('1' * 40, '2' * 40, '3' * 40)
 def stub(kind, args):
     root = Path(os.environ['LAND_FIXTURE'])
     case = os.environ['LAND_CASE']
+    stop_at = os.environ.get('LAND_STOP_AT')
     with (root / 'commands.jsonl').open('a') as out:
         out.write(json.dumps([kind, *args]) + '\n')
     if kind == 'sleep':
         if case == 'red-poll-fail': sys.exit(36)
         return
     if kind == 'make':
-        if case == 'restore-fail' and 'lean-cache-from-github-without-mathlib' in args: sys.exit(31)
+        if args[:1] == ['lean-cache-from-github-without-mathlib']:
+            tag = os.environ.get('LAND_PINNED_TAG') or ('lean-cache-v2-old' if case == 'legacy-newest' else 'lean-cache-v3-new')
+            assert 'LEAN_CACHE_APPROVED_TAG=' + tag in args, args
+            assert 'LEAN_CACHE_APPROVED_PRODUCER=' + LATER in args, args
+            assert 'REFRESH_STALE=1' in args, args
+            assert 'LEAN_CACHE_INDEXED=' + ('0' if tag.startswith('lean-cache-v2-') else '1') in args, args
+            if stop_at == 'restore': os.kill(os.getppid(), signal.SIGKILL)
+            if case == 'restore-fail': sys.exit(31)
         if args[:1] == ['lean']:
             assert args == ['lean', 'FULL_BUILD=1', 'LEAN_TARGETS=', 'STRATALINT_WARM_DONOR=1'], args
+            if stop_at == 'lean': os.kill(os.getppid(), signal.SIGKILL)
+            if stop_at == 'stamp': (root/'main/.lake/build/.main-built-at').mkdir(parents=True)
             if case == 'lean-fail': sys.exit(32)
         return
     if kind == 'git':
@@ -41,7 +52,9 @@ def stub(kind, args):
                 if counter.exists(): sys.exit(35)
                 counter.touch()
         elif args[:1] == ['rev-parse']:
-            if args[1].startswith('refs/remotes/pr/'):
+            if args[1] == '--absolute-git-dir':
+                print(root/'main/.git')
+            elif args[1].startswith('refs/remotes/pr/'):
                 print(LATER if case == 'fetched-head' else HEAD)
             else: print((root / 'head').read_text())
         elif args[:1] == ['merge-tree']:
@@ -60,7 +73,11 @@ def stub(kind, args):
             if case == 'red-refetch-fail': sys.exit(1)
         elif args[:1] == ['merge']:
             assert args == ['merge', '--ff-only', '-q', LATER], args
+            if stop_at == 'before-merge':
+                os.kill(os.getppid(), signal.SIGKILL)
+                return
             (root / 'head').write_text(LATER)
+            if stop_at == 'after-merge': os.kill(os.getppid(), signal.SIGKILL)
         else: raise AssertionError(('unexpected git', args))
         return
     assert kind == 'gh'
@@ -116,18 +133,18 @@ def stub(kind, args):
     elif args[:1] == ['api']:
         assert '--paginate' in args and '--slurp' in args
         print(json.dumps([[]] if case == 'no-release' else [
-            [{'tag_name': 'lean-cache-v2-old', 'created_at': '1'},
+            [{'tag_name': 'lean-cache-v2-old', 'created_at': '4' if case == 'legacy-newest' else '1'},
              {'tag_name': 'unrelated-newest', 'created_at': '3'}],
             [{'tag_name': 'lean-cache-v3-new', 'created_at': '2'}]]))
     elif args[:2] == ['release', 'download']:
-        assert args[2] == 'lean-cache-v3-new'
+        assert args[2] == ('lean-cache-v2-old' if case == 'legacy-newest' else 'lean-cache-v3-new')
         Path(args[args.index('--dir')+1], 'manifest.json').write_text(json.dumps(
             {'producer_commit_sha': HEAD if case == 'same-head' else 'invalid' if case == 'bad-manifest' else LATER}))
     else: raise AssertionError(('unexpected gh', args))
 
 
 def fixture(root, case):
-    for directory in ('main', 'tree', 'scratch', 'state', 'sshx', 'bin'):
+    for directory in ('main', 'main/.git', 'tree', 'scratch', 'state', 'sshx', 'bin'):
         (root / directory).mkdir()
     target = root / 'repo/tools/scripts/agent/openproblem'
     shutil.copytree(TOOLS, target, ignore=shutil.ignore_patterns('__pycache__'))
@@ -192,8 +209,38 @@ def invoke(target, mode, args, env, root):
                           env=dict(env, LAND_MODE=mode), text=True, capture_output=True, timeout=25)
 
 
+def warm_retries():
+    for stop, first_release in [('before-merge', 'advance'), ('after-merge', 'legacy-newest'),
+                                ('restore', 'advance'), ('lean', 'legacy-newest'), ('stamp', 'advance')]:
+        with tempfile.TemporaryDirectory(prefix='landing warm retry ') as tmp:
+            root = Path(tmp)
+            target, env = fixture(root, first_release)
+            tag = 'lean-cache-v2-old' if first_release == 'legacy-newest' else 'lean-cache-v3-new'
+            env['LAND_PINNED_TAG'] = tag
+            first = invoke(target, 'main-warm', ['2', '0.01'], dict(env, LAND_STOP_AT=stop), root)
+            assert first.returncode == (16 if stop == 'stamp' else -signal.SIGKILL), (stop, first)
+            pending = root/'main/.git/main-warm-pending.json'
+            progress = json.loads(pending.read_text())
+            assert progress == dict(base=HEAD, tag=tag, producer=LATER,
+                                    phase=stop if stop in ('lean', 'stamp') else 'restore'), (stop, progress)
+            stamp = root/'main/.lake/build/.main-built-at'
+            if stop == 'stamp': stamp.rmdir()
+            assert not stamp.exists()
+            assert not (root/'state/main-lean.lock').exists()
+            next_case = 'advance' if first_release == 'legacy-newest' else 'legacy-newest'
+            retry = invoke(target, 'main-warm', ['2', '0.01'], dict(env, LAND_CASE=next_case), root)
+            assert retry.returncode == 0 and 'MAIN_WARM_RESUME' in retry.stdout, (stop, retry)
+            assert 'MAIN_WARM_KEEP' in retry.stdout and not pending.exists()
+            assert stamp.read_text().split()[0] == LATER
+            commands = [json.loads(line) for line in (root/'commands.jsonl').read_text().splitlines()]
+            assert sum(c[:2] == ['make', 'lean-cache-from-github-without-mathlib'] for c in commands) == 1 + (stop == 'restore')
+            assert sum(c[:2] == ['make', 'lean'] for c in commands) == 1 + (stop == 'lean')
+            print('PIPELINE_CASE main-warm retry-' + stop + ' EXIT=0')
+
+
 def run(mode, only=None):
     if mode == 'land' and only is None: shared_validators()
+    if mode == 'main-warm' and only is None: warm_retries()
     cases = ({'land-green': (0, 'LAND_MERGED'), 'land-pending': (0, 'LAND_AUTO'),
               'land-reject': (20, 'LAND_STANDING_REJECT'), 'head-mismatch': (14, 'LAND_HEAD_MISMATCH'),
               'fetched-head': (14, 'LAND_FETCHED_HEAD_MISMATCH'), 'land-head-race': (14, 'LAND_HEAD_MISMATCH'), 'duplicate': (21, 'LAND_DUPLICATE_FREEZE'),
@@ -216,7 +263,8 @@ def run(mode, only=None):
               'closed': (4, 'CLOSED_UNMERGED'), 'no-run': (2, 'DEVPUSH_NORUN'),
               'merge-timeout': (124, 'MERGE_WAIT_TIMEOUT')}
              if mode == 'land-watch' else
-             {'advance': (0, 'MAIN_WARM_ADVANCE'), 'same-head': (0, 'MAIN_WARM_KEEP'),
+             {'advance': (0, 'MAIN_WARM_ADVANCE'), 'legacy-newest': (0, 'MAIN_WARM_ADVANCE'),
+              'same-head': (0, 'MAIN_WARM_KEEP'),
               'divergent': (0, 'MAIN_WARM_KEEP'), 'dirty': (0, 'MAIN_WARM_SKIP'),
               'nondev': (0, 'MAIN_WARM_SKIP'), 'no-release': (0, 'MAIN_WARM_NO_RELEASE'),
               'bad-manifest': (13, 'full commit SHA required'), 'lock-busy': (15, 'MAIN_WARM_LOCK_FAILED'), 'restore-fail': (16, 'MAIN_WARM_RESTORE_FAILED'),
@@ -248,7 +296,7 @@ def run(mode, only=None):
                     assert not removed
             else:
                 builds = [c for c in commands if c[:2] == ['make', 'lean']]
-                advancing = case in ('advance', 'state-overrides-xdg', 'stamp-definition-moved')
+                advancing = case in ('advance', 'legacy-newest', 'state-overrides-xdg', 'stamp-definition-moved')
                 assert bool(builds) == (advancing or case == 'lean-fail'), (case, commands)
                 assert (root/'state/main-lean.lock').exists() == (case == 'lock-busy')
                 if case == 'xdg-lock-busy': assert (root/'xdg state/trureturing-op/main-lean.lock').is_dir()
