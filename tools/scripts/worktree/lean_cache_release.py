@@ -966,13 +966,14 @@ def clone_local_parts(local_assets, stage, parts, deadline):
             remaining(deadline)
 
 
-def restore_snapshot(root, partition, tag, stage, deadline, verification=None, refresh_stale=False, *,
+def restore_snapshot(root, partition, tag, stage, deadline, expected=None, refresh_stale=False, *,
                      cache_key, approved_producer=None, require_compatible_seed=False, on_installed=None,
-                     local_assets=None, release_metadata=None):
+                     local_assets=None, release_metadata=None, verification_tag=True):
+    verification = expected is not None and verification_tag
     with observed_phase("manifest"):
         metadata, manifest, parts = snapshot_manifest(partition, tag, stage, deadline,
-            expected=verification if approved_producer is None else {"producer_commit_sha": approved_producer},
-            verification=verification is not None, cache_key=cache_key, metadata=release_metadata,
+            expected=expected if approved_producer is None else {"producer_commit_sha": approved_producer},
+            verification=verification, cache_key=cache_key, metadata=release_metadata,
             expect_draft=release_metadata is not None)
     indexed = manifest.get("schema") == INDEXED_SCHEMA
     entries = [*parts, manifest["index"]] if indexed else parts
@@ -1133,7 +1134,7 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
             _observe("fetch", "cleanup-deferred", phase="cleanup", error=error,
                      attempt_only=True)
     receipt("fetch", "unpacked" if installed else "skipped",
-            mode="verification" if verification is not None else "partition", resolved=tag,
+            mode="verification" if verification else "partition", resolved=tag,
             installed=installed,
             producer_commit_sha=commit, publication_id=manifest["publication_id"], partition=partition,
             **{key: manifest[key] for key in ("workflow_run_id", "workflow_run_attempt") if key in manifest},
@@ -1163,23 +1164,32 @@ def fetch_verification(root, partition, identity, *, indexed=False):
 
 
 def fetch_candidate(root, partition, tag, producer, *, targets=()):
-    """Restore an explicit verification snapshot before a validated long producer builds."""
+    """Restore a pinned Release before the long producer builds its own snapshot."""
     if not re.fullmatch(r"[0-9a-f]{40}", producer) or producer == "0" * 40:
         raise ValueError("candidate fetch requires the immutable producer commit")
     deadline = operation_deadline()
+    protected_build = False
     if os.environ.get("GITHUB_ACTIONS") == "true":
         from lean_actions import manual_source_is_valid, preparation_source_is_valid
+        protected_build = manual_source_is_valid()
         head = checked_run(["git", "-C", str(root), "rev-parse", "--verify", "HEAD"], deadline).stdout.strip()
-        if (not (manual_source_is_valid() or preparation_source_is_valid())
+        if (not (protected_build or preparation_source_is_valid())
                 or head != os.environ.get("STRATALINT_CACHE_CHECKED_OUT_SHA")):
             raise ValueError("candidate fetch in CI requires a validated long producer source")
     cache_key = release_key(root)
     source, suffix, indexed = next(((part, tag.removeprefix(candidate), indexed)
         for part in seed_partitions(root) for indexed in (False, True)
         if tag.startswith(candidate := prefix(part, cache_key, True, indexed=indexed))), (None, "", False))
-    if (not valid_publication_id(suffix)
-            or not suffix.startswith(("local-" + producer[:12] + "-", "ci-"))):
-        raise ValueError("candidate tag is outside the compatible partition or producer")
+    verification = source is not None
+    if verification:
+        if not valid_publication_id(suffix) or not suffix.startswith(("local-" + producer[:12] + "-", "ci-")):
+            raise ValueError("candidate tag is outside the compatible partition or producer")
+    elif protected_build and not targets:
+        # A manual producer can rebuild Actions from an exact public production snapshot.
+        source = (snapshot_partition(root, partition, tag, cache_key, indexed=True)
+                  or snapshot_partition(root, partition, tag, cache_key))
+    if source is None:
+        raise ValueError("Release tag is outside the compatible partition or producer")
     if targets and not indexed:
         raise ValueError("scoped Release restore requires an indexed snapshot")
     def notify_installed():
@@ -1199,7 +1209,8 @@ def fetch_candidate(root, partition, tag, producer, *, targets=()):
                                cache_key=cache_key, producer=producer, targets=targets, verification=True)
                 return 0
             installed = restore_snapshot(root, source, tag, pathlib.Path(temporary), deadline,
-                {"producer_commit_sha": producer}, refresh_stale=True, cache_key=cache_key,
+                {"producer_commit_sha": producer}, refresh_stale=True,
+                cache_key=cache_key, verification_tag=verification,
                 require_compatible_seed=True, on_installed=notify_installed)
             if not installed:
                 raise ValueError("candidate snapshot was not installed")

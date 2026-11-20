@@ -726,6 +726,26 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertIn("snapshot does not match this exact publication", result.stdout)
         self.assertEqual("keep current material", (self.root / ".lake/build/keep.txt").read_text())
 
+    def test_protected_producer_restores_exact_production_release_without_an_actions_seed(self):
+        self.candidate_fixture()
+        published = self.transport("publish")
+        self.assertEqual(0, published.returncode, published.stdout + published.stderr)
+        tag = next(self.remote.iterdir()).name
+        self.assertTrue(tag.startswith("lean-cache-v2-"))
+        shutil.rmtree(self.root / ".lake/build")
+        environment = self.candidate_consumer()
+        arguments = ("--mode", "candidate", "--tag", tag, "--source-commit")
+        wrong_source = self.transport("fetch", arguments=(*arguments, "f" * 40), **environment)
+        self.assertNotEqual(0, wrong_source.returncode)
+        ordinary = self.transport("fetch", arguments=(*arguments, self.verification_commit),
+                                  **{**environment, "GITHUB_EVENT_NAME": "pull_request"})
+        self.assertNotEqual(0, ordinary.returncode)
+        self.assertFalse((self.root / ".lake/build").exists())
+        result = self.transport("fetch", arguments=(*arguments, self.verification_commit), **environment)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn('"status":"unpacked"', result.stdout)
+        self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
+
     def test_candidate_restore_rejects_ordinary_ci_and_wrong_source_without_replacing_build(self):
         self.candidate_fixture()
         tag = self.candidate_tag()
