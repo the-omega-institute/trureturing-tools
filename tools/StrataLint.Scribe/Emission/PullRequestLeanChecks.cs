@@ -35,7 +35,7 @@ internal static class PullRequestLeanChecks
         };
     }
 
-    internal static ImmutableArray<string> EffectivePaths(string root, ImmutableArray<string> paths, string? baseRevision)
+    internal static ImmutableArray<string> ExpandReleasePaths(string root, ImmutableArray<string> paths, string? baseRevision)
     {
         if (!paths.Contains(ToolsRelease.PinPath)) return paths;
         if (baseRevision is null) throw new InvalidDataException("a tools release change requires a base commit");
@@ -43,10 +43,17 @@ internal static class PullRequestLeanChecks
             .. ToolsRelease.Changes(root, baseRevision).Select(change => change.Path)];
     }
 
+    // Once the archives have been compared, the lock is provenance for the selected
+    // inputs. Admission still needs the expanded change set including the lock.
+    internal static RawChangeSet SemanticChanges(RawChangeSet expanded) => expanded.ContainsPath(ToolsRelease.PinPath)
+        ? RawChangeSet.CreateWithKinds(expanded.Entries.Where(change => change.Path.Value != ToolsRelease.PinPath)
+            .Select(change => (change.Path.Value, change.Kind)))
+        : expanded;
+
     internal static int Plan(string root, ImmutableArray<string> paths, TextWriter output, string? baseRevision = null)
     {
-        paths = EffectivePaths(root, paths, baseRevision);
-        var needImports = paths.Any(path => Module(path) is not null || FrozenStatePath.IsUnderRoot(path));
+        var changes = SemanticChanges(RawChangeSet.Create(ExpandReleasePaths(root, paths, baseRevision)));
+        var needImports = changes.Paths.Any(path => Module(path.Value) is not null || FrozenStatePath.IsUnderRoot(path.Value));
         var raw = GitRepositorySnapshotReader.ReadCurrent(root, readContents: path =>
             needImports && Module(path) is not null || path == ValuesKernelBindingValidator.RelativePath
             || path == ReportProducerScope.InputManifest || path.StartsWith("Meta/", StringComparison.Ordinal)
@@ -56,13 +63,14 @@ internal static class PullRequestLeanChecks
             SnapshotDecodeOutcome.Decoded accepted => accepted.Snapshot,
             SnapshotDecodeOutcome.InfrastructureFailure failure => throw new InvalidDataException(failure.Message),
         };
-        var plan = CreatePlan(root, snapshot, paths);
+        var plan = CreatePlan(root, snapshot, changes);
         output.WriteLine(JsonSerializer.Serialize(plan, JsonSerializerOptions.Web));
         return 0;
     }
 
-    internal static PullRequestLeanPlan CreatePlan(string root, RepositorySnapshot snapshot, ImmutableArray<string> paths)
+    internal static PullRequestLeanPlan CreatePlan(string root, RepositorySnapshot snapshot, RawChangeSet changes)
     {
+        ImmutableArray<string> paths = [.. changes.Paths.Select(path => path.Value)];
         var scribePaths = paths.ToHashSet(StringComparer.Ordinal);
         foreach (var path in paths.Where(path => path.StartsWith("Blueprint/", StringComparison.Ordinal)))
         {
@@ -98,7 +106,7 @@ internal static class PullRequestLeanChecks
         var definitions = selected.Paths.IsEmpty ? ImmutableDictionary<string, string[]>.Empty
             : ScribeLeanInputs.ByDefinition(root, selected);
         targets.UnionWith(definitions.Values.SelectMany(static roots => roots));
-        if (StatementProjectionReconciliation.IsAffectedBy(snapshot, RawChangeSet.Create(paths)))
+        if (StatementProjectionReconciliation.IsAffectedBy(snapshot, changes))
             targets.UnionWith(StatementProjectionFixtureLoader.LoadStatements(root).Keys.Select(LeanImportClosure.ModuleName));
         AddRuleEvidence(snapshot, paths, targets);
         return new([.. targets.Order(StringComparer.Ordinal)], [.. programs.Order(StringComparer.Ordinal)],
