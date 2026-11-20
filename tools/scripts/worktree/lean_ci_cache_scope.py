@@ -39,7 +39,7 @@ def inspector_program_root(config, target):
     return quoted[1:]
 
 
-def cache_modules(root, scope, scoped_modules):
+def cache_modules(root, scope, scoped_modules, report_inputs):
     suites = set(scope["cache_suites"])
     unknown = suites - COMPILED_SUITES.keys() - {"source-evidence"}
     if unknown:
@@ -53,11 +53,13 @@ def cache_modules(root, scope, scoped_modules):
 
     modules = workspace_modules(root)
     selected = set(scoped_modules)
+    report_roots = set(scope["targets"])
     source_evidence = "source-evidence" in suites
     if source_evidence:
         for source in json.loads(SOURCE_INPUTS.read_text()).values():
             name = Path(source).with_suffix("").as_posix().replace("/", ".")
-            selected.update((name, "Reg." + name))
+            report_roots.update((name, "Reg." + name))
+    selected.update(report_inputs(report_roots))
 
     # The report facet schedules these programs for normal scoped reports,
     # the source/mirror evidence, and the FIB suite's native report tests.

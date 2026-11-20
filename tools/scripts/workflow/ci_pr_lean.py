@@ -59,6 +59,19 @@ def scope_modules(scope):
     return modules
 
 
+def report_cache_inputs(roots):
+    # Use the report reader's source-derived scope, including named utility inputs.
+    if not roots:
+        return
+    producer = subprocess.check_output(
+        ["bash", str(Path(__file__).with_name("judge-lean-producer.sh")), str(Path(CLI).parent)],
+        text=True).strip() or CLI
+    for batch, _ in report_batches({"targets": sorted(roots), "paths": [], "definitions": {}}):
+        output = subprocess.check_output(
+            ["dotnet", producer, "lean-utility-input", "--modules", "--targets", " ".join(batch)], text=True)
+        yield from json.loads(output)
+
+
 def check(manifest, protected_base=None, scope_file=None, base=None):
     base = base or protected_base
     changed = read_changed(manifest)
@@ -87,8 +100,13 @@ def check(manifest, protected_base=None, scope_file=None, base=None):
             documents = batch / "documents"
             write_paths(roots, [name.replace(".", "/") + ".lean" for name in targets])
             write_paths(documents, selected_paths)
+            scribe_environment = os.environ.copy()
+            if ("DOTNET_GCConserveMemory" not in scribe_environment
+                    and "COMPlus_GCConserveMemory" not in scribe_environment):
+                scribe_environment["DOTNET_GCConserveMemory"] = "9"
             subprocess.run([*SCRIBE, "content-check", "--scoped", "--report", str(report),
-                            "--targets-from", str(roots), "--paths-from", str(documents)], check=True)
+                            "--targets-from", str(roots), "--paths-from", str(documents)],
+                           env=scribe_environment, check=True)
 
         report_list = directory / "reports"
         write_paths(report_list, reports)
@@ -122,7 +140,7 @@ if __name__ == "__main__":
                 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worktree"))
                 from lean_ci_cache_scope import cache_modules
 
-                modules = cache_modules(Path.cwd(), scope, modules)
+                modules = cache_modules(Path.cwd(), scope, modules, report_cache_inputs)
             if modules:
                 print(" ".join(modules))
             sys.exit(0)

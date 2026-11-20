@@ -508,6 +508,16 @@ lean_exe inputDiscovery where
                 write(source + ".lean")
                 write("Reg/" + source + ".lean")
             write("D5/Scoped.lean")
+            write("D5/NamedExample.lean")
+            write("bin/dotnet", """#!/usr/bin/env python3
+import json
+import sys
+assert sys.argv[2:5] == ["lean-utility-input", "--modules", "--targets"]
+roots = sys.argv[5].split()
+print(json.dumps(roots + (["D5.NamedExample"] if "D5.Scoped" in roots else [])))
+""")
+            (root / "bin/dotnet").chmod(0o755)
+            env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"])
 
             targets_file = root / "targets"
             command = [sys.executable, "-B", lean.__file__, "changed", "--read-plan", "plan", "--cache-targets"]
@@ -515,7 +525,7 @@ lean_exe inputDiscovery where
             def restored(suites, targets=(), programs=()):
                 write("plan", json.dumps(dict(targets=targets, programs=programs, cache_suites=suites)))
                 with targets_file.open("w") as output:
-                    subprocess.run(command, cwd=root, check=True, stdout=output)
+                    subprocess.run(command, cwd=root, env=env, check=True, stdout=output)
                 modules = targets_file.read_text().split()
                 self.assertEqual(modules, sorted(set(modules)))
                 return set(modules)
@@ -531,8 +541,8 @@ lean_exe inputDiscovery where
             self.assertEqual(restored(["fib-regressions"]), fib)
             self.assertEqual(restored(["source-evidence"]), evidence)
             self.assertEqual(restored(["source-evidence", "compiled-audit", "fib-regressions"],
-                ["D5.Scoped"], ["Program"]), evidence | audit | fib | {"D5.Scoped", "Program"})
-            self.assertEqual(restored([], ["D5.Scoped"]), report_programs | {"D5.Scoped"})
+                ["D5.Scoped"], ["Program"]), evidence | audit | fib | {"D5.Scoped", "D5.NamedExample", "Program"})
+            self.assertEqual(restored([], ["D5.Scoped"]), report_programs | {"D5.Scoped", "D5.NamedExample"})
             self.assertEqual(restored([], programs=["Program"]), {"Program"})
             self.assertEqual(restored([]), set())
             self.assertEqual(targets_file.read_bytes(), b"")
