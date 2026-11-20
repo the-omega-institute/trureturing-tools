@@ -54,7 +54,8 @@ def plan_scope(manifest, base=None):
 
 def check(manifest, protected_base=None, scope_file=None, base=None):
     base = base or protected_base
-    if read_changed(manifest) is None:
+    changed = read_changed(manifest)
+    if changed is None:
         raise ValueError("missing changed-path manifest")
     with tempfile.TemporaryDirectory(prefix="ci-pr-lean-") as temporary:
         directory = Path(temporary)
@@ -87,7 +88,7 @@ def check(manifest, protected_base=None, scope_file=None, base=None):
         write_paths(report_list, reports)
         arguments = ["--changed-paths-from", str(manifest), "--scoped-reports-from", str(report_list)]
         current = subprocess.run(["dotnet", CLI, "check-current", *arguments,
-                                  *(["--scope-base", base] if base else [])])
+                                  *(["--scope-base", base] if base and "Meta/tools-release.json" in changed else [])])
         if protected_base is None:
             return current.returncode
         delta = subprocess.run(["dotnet", CLI, "check-delta", "--protected-base", protected_base, *arguments])

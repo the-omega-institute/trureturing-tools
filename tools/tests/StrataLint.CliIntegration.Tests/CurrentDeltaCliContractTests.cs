@@ -66,11 +66,11 @@ public sealed class CurrentDeltaCliContractTests
             ("D5/CopySource.lean", RawChangeKind.Copied), ("D5/Copy.lean", RawChangeKind.Added)]);
         var prepared = new PreparedRepository(new string('a', 40), changes);
         File.WriteAllText(path, "D5/New.lean\0D5/Copy.lean\0");
-        Assert.Throws<InvalidDataException>(() => ScopedAdmissionReports.ChangedPaths(fixture.Path, path, prepared, null));
+        Assert.Throws<InvalidDataException>(() => ScopedAdmissionReports.ChangedPaths(fixture.Path, path, prepared));
         File.AppendAllText(path, "D5/Old.lean\0");
-        Assert.Equal(3, ScopedAdmissionReports.ChangedPaths(fixture.Path, path, prepared, null).Paths.Length);
+        Assert.Equal(3, ScopedAdmissionReports.ChangedPaths(fixture.Path, path, prepared).Paths.Length);
         File.AppendAllText(path, "README.md");
-        Assert.Throws<InvalidDataException>(() => ScopedAdmissionReports.ChangedPaths(fixture.Path, path, null, null));
+        Assert.Throws<InvalidDataException>(() => ScopedAdmissionReports.ChangedPaths(fixture.Path, path, null));
     }
 
     [Fact]

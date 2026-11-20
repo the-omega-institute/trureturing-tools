@@ -36,8 +36,9 @@ internal sealed partial class ProductionCliEnvironment
                 return new(2, RenderPlaneObservations(planeObservations), planeFailure.Message + "\n");
 
             var current = timing.Measure("snapshot-load", () => Decode(raw));
-            var changes = !scoped ? null : ScopedAdmissionReports.ChangedPaths(
-                repositoryRoot, options.ChangedPaths!, prepared, options.ScopeBase);
+            var scopeBase = options.ScopeBase is null ? prepared
+                : timing.Measure("scope-base", () => repository.Prepare(options.ScopeBase));
+            var changes = !scoped ? null : ScopedAdmissionReports.ChangedPaths(repositoryRoot, options.ChangedPaths!, scopeBase);
             var plan = changes is null ? null : timing.Measure("lean-scope", () => PullRequestLeanChecks.CreatePlan(
                 repositoryRoot, current, [.. changes.Paths.Select(path => path.Value)]));
             var report = timing.Measure("lean-report-load", () => plan is null

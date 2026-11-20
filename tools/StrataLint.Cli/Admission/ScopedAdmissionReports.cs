@@ -10,9 +10,9 @@ internal static class ScopedAdmissionReports
 {
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
-    internal static RawChangeSet ChangedPaths(string root, string manifest, PreparedRepository? prepared, string? scopeBase)
+    internal static RawChangeSet ChangedPaths(string root, string manifest, PreparedRepository? prepared)
     {
-        var changed = RawChangeSet.Create(PullRequestLeanChecks.EffectivePaths(root, [.. ReadManifest(manifest)], prepared?.Revision ?? scopeBase));
+        var changed = RawChangeSet.Create(PullRequestLeanChecks.EffectivePaths(root, [.. ReadManifest(manifest)], prepared?.Revision));
         if (prepared is not null)
         {
             // A copy source appears in --find-copies-harder output as provenance

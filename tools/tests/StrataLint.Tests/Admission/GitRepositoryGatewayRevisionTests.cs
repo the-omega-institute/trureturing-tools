@@ -62,9 +62,10 @@ public sealed class GitRepositoryGatewayRevisionTests
         File.WriteAllText(manifest, ToolsRelease.PinPath + "\0");
         var prepared = gateway.Prepare(revision);
         Assert.Equal(prepared.Changes.Paths.OrderBy(p => p.Value),
-            ScopedAdmissionReports.ChangedPaths(root, manifest, prepared, null).Paths.OrderBy(p => p.Value));
-        Assert.Contains(ScopedAdmissionReports.ChangedPaths(root, manifest, null, revision).Paths, p => p.Value == path);
-        Assert.Throws<InvalidDataException>(() => ScopedAdmissionReports.ChangedPaths(root, manifest, null, null));
+            ScopedAdmissionReports.ChangedPaths(root, manifest, prepared).Paths.OrderBy(p => p.Value));
+        Assert.Throws<InvalidDataException>(() => ScopedAdmissionReports.ChangedPaths(root, manifest, null));
+        File.WriteAllText(manifest, "");
+        Assert.Throws<InvalidDataException>(() => ScopedAdmissionReports.ChangedPaths(root, manifest, prepared));
         File.WriteAllText(Path.Combine(root, path), "modified");
         Assert.Throws<InvalidDataException>(() => gateway.ReadCurrent([path]));
     }
