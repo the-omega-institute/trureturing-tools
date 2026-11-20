@@ -13,6 +13,7 @@ from lean_artifact_inventory import (
 TOOLS = Path(__file__).resolve().parents[2]
 COMPILED_SUITES = {
     "compiled-audit": "compiled-judge-test.sh",
+    # A saved plan from before the ordinary FIB unit was retired can select it.
     "fib-regressions": "compiled-fib-test.sh",
 }
 SOURCE_INPUTS = TOOLS / "tests/StrataLint.DeclaredTemplate.Tests/FourierBridgeSourceInputs.json"
