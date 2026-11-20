@@ -8,15 +8,15 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import subprocess
+import tarfile
 import tomllib
 
 
 # The inspector packages share a source directory. The reg inspector owns the
 # test and analysis roots declared in its separate Lake workspace.
-SOURCE_ROOTS = ("D5", "Reg", "Trureturing.lean", "tools/lean-inspector",
-                "tools/lean-inspector-interface")
 PROJECT_BUILD = Path(".lake/build")
 INSPECTOR = Path("tools/lean-inspector")
 REG_INSPECTOR = Path("tools/lean-inspector-reg")
@@ -56,6 +56,31 @@ class Inventory:
         return members
 
 
+def inspector_release_sources(root: Path, pin: Path):
+    digest = json.loads(pin.read_text())["sha256"]
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("invalid tools release digest")
+    archive_path = root / "build/tools-releases" / (digest + ".tar.gz")
+    with archive_path.open("rb") as packed:
+        if hashlib.file_digest(packed, "sha256").hexdigest() != digest:
+            raise ValueError("tools release archive differs from its pin")
+        packed.seek(0)
+        with tarfile.open(fileobj=packed, mode="r|gz") as archive:
+            for member in archive:
+                source = Path(member.name)
+                if not (source.is_relative_to(INSPECTOR) or source.is_relative_to(INTERFACE)):
+                    continue
+                if source.suffix != ".lean" or source.name == "lakefile.lean":
+                    continue
+                installed = root / source
+                if not member.isfile() or ".." in source.parts or installed.is_symlink() or not installed.is_file():
+                    raise ValueError(f"invalid installed Lean source: {source}")
+                with archive.extractfile(member) as expected, installed.open("rb") as actual:
+                    if hashlib.file_digest(expected, "sha256").digest() != hashlib.file_digest(actual, "sha256").digest():
+                        raise ValueError(f"installed Lean source differs from its pin: {source}")
+                yield member.name
+
+
 def workspace_modules(root: Path) -> dict[str, Module]:
     """Read the current project source set without building any Lean target."""
     reg_inspector_config = tomllib.loads((root / REG_INSPECTOR / "lakefile.toml").read_text())
@@ -70,12 +95,20 @@ def workspace_modules(root: Path) -> dict[str, Module]:
         build = Path(os.path.normpath(directory / config.get("buildDir", ".lake/build")))
         packages[directory] = (config["name"], build.relative_to(PROJECT_BUILD))
     packages[INSPECTOR] = ("leanInspector", Path("lean-inspector/producer"))
+    pin = root / "Meta/tools-release.json"
+    roots = ["D5", "Reg", "Trureturing.lean"]
+    packaged = pin.is_file()
+    if not packaged:
+        roots.extend([INSPECTOR, INTERFACE])
     sources = subprocess.run(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
-         "--", *SOURCE_ROOTS], cwd=root, stdout=subprocess.PIPE, check=True,
+         "--", *roots], cwd=root, stdout=subprocess.PIPE, check=True,
     ).stdout
+    names = set(os.fsdecode(sources).split("\0"))
+    if packaged:
+        names.update(inspector_release_sources(root, pin))
     result = {}
-    for name in sorted(set(os.fsdecode(sources).split("\0"))):
+    for name in sorted(names):
         source = Path(name)
         if source.suffix != ".lean" or source.name == "lakefile.lean" or not (root / source).is_file():
             continue

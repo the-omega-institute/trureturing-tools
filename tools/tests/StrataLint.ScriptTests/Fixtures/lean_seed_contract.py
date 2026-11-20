@@ -23,6 +23,40 @@ from lean_release_legacy import ReleaseLegacyCases
 class TransportTests(ReleaseLegacyCases, ReleaseVerificationCases, ReleaseTransportCases, unittest.TestCase):
     """Release transport cases exposed under their existing test identity."""
 
+    def test_module_inventory_reads_installed_inspector_sources_from_the_pin(self):
+        from lean_artifact_inventory import workspace_modules
+
+        root = self.root / "installed"
+        write(root / ".gitignore", "/tools/\n/build/\n")
+        write(root / "lakefile.toml", 'name = "project"\n')
+        write(root / "Reg/lakefile.toml", 'name = "reg"\nbuildDir = "../.lake/build/reg"\n')
+        for directory in ("lean-inspector-interface", "lean-inspector-reg"):
+            write(root / "tools" / directory / "lakefile.toml",
+                  f'name = "{directory}"\nbuildDir = "../../.lake/build/{directory}"\n'
+                  '[[lean_lib]]\nroots = ["Tests"]\n')
+        sources = {"tools/lean-inspector/Inspector/Program.lean": "def program := 1\n",
+                   "tools/lean-inspector/Tests/Case.lean": "def testCase := 0\n",
+                   "tools/lean-inspector-interface/Core.lean": "def core := 0\n"}
+        packed = io.BytesIO()
+        with tarfile.open(fileobj=packed, mode="w:gz") as archive:
+            for path, body in sources.items():
+                write(root / path, body)
+                archive.add(root / path, arcname=path)
+        data = packed.getvalue()
+        sha = digest(data)
+        archive = root / "build/tools-releases" / (sha + ".tar.gz")
+        archive.parent.mkdir(parents=True)
+        archive.write_bytes(data)
+        write(root / "Meta/tools-release.json", json.dumps({"version": "v0.1.0", "sha256": sha}))
+        write(root / "tools/lean-inspector/.lake/packages/Other/Extra.lean", "def extra := 1\n")
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        modules = workspace_modules(root)
+        self.assertEqual({m.source.as_posix() for m in modules.values()}, set(sources))
+        self.assertEqual(modules["Tests.Case"].package, "lean-inspector-reg")
+        write(root / "tools/lean-inspector/Inspector/Program.lean", "def program := 2\n")
+        with self.assertRaisesRegex(ValueError, "differs from its pin"):
+            workspace_modules(root)
+
     def test_indexed_release_promotes_after_the_restore_outlives_the_pack_budget(self):
         import lean_cache_release as release
         import lean_release_index as indexed
