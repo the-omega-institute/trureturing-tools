@@ -313,6 +313,26 @@ class CheckTests(unittest.TestCase):
 
 
 class PullRequestReportTests(unittest.TestCase):
+    def test_cache_selection_and_checks_use_the_same_base_revision(self):
+        import ci_pr_lean as lean
+
+        paths = ["Meta/tools-release.json"]
+        base = "a" * 40
+        scope = {"targets": ["D5.Owner"], "programs": ["Inspector.Feature"], "paths": paths}
+        plan = subprocess.CompletedProcess([], 0, stdout=json.dumps(scope))
+        with patch.object(lean.subprocess, "run", return_value=plan) as run:
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                lean.cache_targets(paths, base)
+            self.assertEqual(output.getvalue().split(), ["D5.Owner", "Inspector.Feature"])
+            cache_plan = run.call_args.args[0]
+            run.reset_mock()
+            with contextlib.redirect_stdout(io.StringIO()):
+                lean.check(paths, base)
+            build_plan = run.call_args_list[0].args[0]
+            for command in (cache_plan, build_plan):
+                self.assertEqual(command[:-3], [*lean.SCRIBE, "lean-inputs", "--affected", "--paths-from"])
+                self.assertEqual(command[-2:], ["--base", base])
+
     def test_empty_scope_has_no_build_and_large_scopes_keep_scribe_inputs_together(self):
         from ci_pr_lean import report_batches
         self.assertEqual(list(report_batches({"targets": []})), [])

@@ -44,20 +44,33 @@ def report_batches(scope, limit=60_000):
         yield sorted(targets), documents
 
 
+def read_scope(paths, manifest, base):
+    write_paths(manifest, paths)
+    command = [*SCRIBE, "lean-inputs", "--affected", "--paths-from", str(manifest)]
+    if base:
+        command.extend(["--base", base])
+    plan = subprocess.run(command, stdout=subprocess.PIPE, text=True, check=True)
+    scope = json.loads(plan.stdout)
+    if any(not MODULE.fullmatch(module) for module in [*scope["targets"], *scope["programs"]]):
+        raise ValueError("invalid Lean module in PR scope")
+    return scope
+
+
+def cache_targets(paths, base=None):
+    with tempfile.TemporaryDirectory(prefix="ci-pr-lean-") as temporary:
+        scope = read_scope(paths, Path(temporary) / "paths", base)
+    targets = sorted(set(scope["targets"]) | set(scope["programs"]))
+    if targets:
+        print(" ".join(targets))
+    return 0
+
+
 def check(paths, base=None):
     with tempfile.TemporaryDirectory(prefix="ci-pr-lean-") as temporary:
         directory = Path(temporary)
         manifest = directory / "paths"
-        write_paths(manifest, paths)
-        command = [*SCRIBE, "lean-inputs", "--affected", "--paths-from", str(manifest)]
-        if base:
-            command.extend(["--base", base])
-        plan = subprocess.run(command,
-                              stdout=subprocess.PIPE, text=True, check=True)
-        scope = json.loads(plan.stdout)
+        scope = read_scope(paths, manifest, base)
         programs, targets = scope["programs"], scope["targets"]
-        if any(not MODULE.fullmatch(module) for module in [*targets, *programs]):
-            raise ValueError("invalid Lean module in PR scope")
         print(f"CI_PR_LEAN report_targets={len(targets)} program_targets={len(programs)}", flush=True)
         environment = dict(os.environ, FULL_BUILD="0")
         if programs:
@@ -80,9 +93,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=Path)
     parser.add_argument("--base")
-    args = parser.parse_args()
+    parser.add_argument("--cache-targets", action="store_true")
     try:
-        sys.exit(check(read_changed(args.manifest), args.base))
+        args = parser.parse_args()
+        operation = cache_targets if args.cache_targets else check
+        sys.exit(operation(read_changed(args.manifest), args.base))
     except subprocess.CalledProcessError as error:
         sys.exit(error.returncode if error.returncode > 0 else 128 - error.returncode)
     except (OSError, ValueError, KeyError) as error:
