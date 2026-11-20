@@ -1334,7 +1334,9 @@ def fetch_locked(root, partition, deadline, refresh_stale=False, approved_tag=No
 def latest_snapshot(root, partition, deadline):
     """Read the newest compatible published manifest without downloading its archive."""
     cache_key = release_key(root)
-    for source, tag in snapshot_candidates(root, partition, deadline, cache_key):
+    prefer_index = os.environ.get("LEAN_CACHE_INDEXED", "1") == "1"
+    for source, tag in snapshot_candidates(root, partition, deadline, cache_key,
+                                           indexed=prefer_index, fallback=prefer_index):
         with tempfile.TemporaryDirectory(prefix="lean-fetch-manifest-") as temporary:
             _, manifest, _ = snapshot_manifest(source, tag, pathlib.Path(temporary), deadline,
                                                cache_key=cache_key)
@@ -1362,6 +1364,8 @@ def _main():
     parser.add_argument("--refresh-stale", action="store_true",
                         help="replace an expired private project build after validating the complete snapshot")
     args = parser.parse_args()
+    if args.command == "fetch" and args.mode == "production" and os.environ.get("LEAN_CACHE_INDEXED", "1") == "1":
+        args.indexed = True
     global CURRENT_OPERATION, CURRENT_MODE, LOG_LAST
     CURRENT_OPERATION, CURRENT_MODE = args.command, args.mode
     LOG_LAST = {}

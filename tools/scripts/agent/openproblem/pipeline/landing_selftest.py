@@ -118,9 +118,9 @@ def stub(kind, args):
         print(json.dumps([[]] if case == 'no-release' else [
             [{'tag_name': 'lean-cache-v2-old', 'created_at': '1'},
              {'tag_name': 'unrelated-newest', 'created_at': '3'}],
-            [{'tag_name': 'lean-cache-v2-new', 'created_at': '2'}]]))
+            [{'tag_name': 'lean-cache-v3-new', 'created_at': '2'}]]))
     elif args[:2] == ['release', 'download']:
-        assert args[2] == 'lean-cache-v2-new'
+        assert args[2] == 'lean-cache-v3-new'
         Path(args[args.index('--dir')+1], 'manifest.json').write_text(json.dumps(
             {'producer_commit_sha': HEAD if case == 'same-head' else 'invalid' if case == 'bad-manifest' else LATER}))
     else: raise AssertionError(('unexpected gh', args))

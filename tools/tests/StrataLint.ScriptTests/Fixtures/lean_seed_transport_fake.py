@@ -32,7 +32,7 @@ if args[0] == "api" and "FAKE_VERIFICATION_API" in os.environ:
 def option(name): return args[args.index(name)+1]
 def metadata(directory):
     value = json.loads((directory / "release.json").read_text())
-    value["assets"] = [{"name": p.name, "size": p.stat().st_size, "digest": "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()}
+    value["assets"] = [{"id": p.stat().st_ino, "name": p.name, "size": p.stat().st_size, "digest": "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()}
                        for p in directory.iterdir() if p.name != "release.json"]
     if "FAKE_MANIFEST_DIGEST" in os.environ:
         for asset in value["assets"]:
