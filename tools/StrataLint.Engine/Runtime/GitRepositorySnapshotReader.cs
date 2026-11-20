@@ -294,7 +294,7 @@ internal static class GitRepositorySnapshotReader
     }
 
     internal static RawRepositorySnapshot ReadRevision(string repositoryRoot, string revision,
-        IReadOnlyList<string>? paths = null)
+        IReadOnlyList<string>? paths = null, bool includeInventory = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRoot);
         ArgumentException.ThrowIfNullOrWhiteSpace(revision);
@@ -309,7 +309,7 @@ internal static class GitRepositorySnapshotReader
             (arguments, maximumErrorBytes, standardInput, readStandardOutput) =>
                 BoundedProcessRunner.RunStreaming("git", arguments, root, TimeSpan.FromSeconds(120),
                     maximumErrorBytes, readStandardOutput, standardInput),
-            paths, root);
+            paths, root, includeInventory);
     }
 
     internal static RawRepositorySnapshot ReadRevisionProjection(string revision,
@@ -500,12 +500,16 @@ internal static class GitRepositorySnapshotReader
             (entry.ObjectId.Length == 40 ? "git-sha1:" : "git-sha256:") + entry.ObjectId)).ToArray();
     }
 
-    private static bool MatchesRevisionSelection(string path, string selection) =>
-        selection.StartsWith(":(literal)", StringComparison.Ordinal)
-            ? path == selection[10..] || path.StartsWith(selection[10..] + "/", StringComparison.Ordinal)
-            : selection.StartsWith(":(glob)", StringComparison.Ordinal)
-            ? FileMapGlob.CreateForAdmissionPlane(selection[7..]).IsMatch(path)
-            : path == selection || path.StartsWith(selection + "/", StringComparison.Ordinal);
+    private static bool MatchesRevisionSelection(string path, string selection)
+    {
+        if (selection.StartsWith(":(glob)", StringComparison.Ordinal))
+            return FileMapGlob.CreateForAdmissionPlane(selection[7..]).IsMatch(path);
+        if (selection.StartsWith(":(literal)", StringComparison.Ordinal))
+            selection = selection[10..];
+        if (selection.EndsWith('/'))
+            return path.StartsWith(selection, StringComparison.Ordinal);
+        return path == selection || path.StartsWith(selection + "/", StringComparison.Ordinal);
+    }
 
     // policy-override (#11124): bounds how many file bodies a visiting reader holds at
     // once; not derived from host capacity. Exit: a measured memory/throughput receipt.

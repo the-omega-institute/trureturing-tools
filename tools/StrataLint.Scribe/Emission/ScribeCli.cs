@@ -51,6 +51,8 @@ public static class ScribeCli
         var command = arguments.Count == 0 ? string.Empty : arguments[0];
         try
         {
+            if (arguments is ["lean-inputs", "--affected", "--paths-from", var manifest, "--base", var revision])
+                return PullRequestLeanChecks.Plan(FindRepositoryRoot(workingDirectory), ReadPaths(manifest, input), output, revision);
             if (arguments is ["lean-inputs", "--affected", "--paths-from", var changed])
                 return PullRequestLeanChecks.Plan(FindRepositoryRoot(workingDirectory), ReadPaths(changed, input), output);
             if (arguments is ["content-check", "--scoped", "--report", var artifact, "--targets-from", var targets,
@@ -312,7 +314,7 @@ public static class ScribeCli
 
     private const string Usage =
         "usage: dotnet run --project tools/StrataLint.Scribe -- "
-        + "emit-values|filemap [--check] | lean-inputs [--affected] --paths-from <file|-> | emit --paths-from <file|-> [--scoped] [--check] | describe-report --scribe-pack <file> --scribe-pack-digest <hex64> [--json] [--check] "
+        + "emit-values|filemap [--check] | lean-inputs [--affected] --paths-from <file|-> [--base <revision>] | emit --paths-from <file|-> [--scoped] [--check] | describe-report --scribe-pack <file> --scribe-pack-digest <hex64> [--json] [--check] "
         + "| content-check --report <file> --paths-from <file|-> "
         + "| content-check --scoped --report <file> --targets-from <file> --paths-from <file> "
         + "| projections --check --report <file> "

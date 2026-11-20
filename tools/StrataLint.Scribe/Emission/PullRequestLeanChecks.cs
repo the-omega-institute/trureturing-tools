@@ -32,9 +32,21 @@ internal static class PullRequestLeanChecks
         };
     }
 
-    internal static int Plan(string root, ImmutableArray<string> paths, TextWriter output)
+    private static IEnumerable<string> EffectiveLeanPaths(string root, ImmutableArray<string> paths, string? baseRevision)
     {
-        var changed = paths.Select(Module).OfType<string>().ToHashSet(StringComparer.Ordinal);
+        if (!paths.Contains(ToolsRelease.PinPath)) return paths;
+        if (baseRevision is null) throw new InvalidDataException("a tools release change requires --base");
+        // Git records a lockfile update. Compare its actual inspector sources on both sides.
+        string[] directories = [Inspector, Interface];
+        var previous = GitRepositorySnapshotReader.ReadRevision(root, baseRevision, directories, includeInventory: true);
+        var current = GitRepositorySnapshotReader.ReadCurrent(root, pathspecs: directories);
+        return paths.Where(path => !directories.Any(prefix => path.StartsWith(prefix, StringComparison.Ordinal)))
+            .Concat(ToolsRelease.Changes(previous, current).Select(change => change.Path));
+    }
+
+    internal static int Plan(string root, ImmutableArray<string> paths, TextWriter output, string? baseRevision = null)
+    {
+        var changed = EffectiveLeanPaths(root, paths, baseRevision).Select(Module).OfType<string>().ToHashSet(StringComparer.Ordinal);
         var targets = new HashSet<string>(StringComparer.Ordinal);
         var programs = new HashSet<string>(StringComparer.Ordinal);
         var scribePaths = paths.ToHashSet(StringComparer.Ordinal);

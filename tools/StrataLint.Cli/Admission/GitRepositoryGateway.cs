@@ -162,23 +162,9 @@ internal sealed partial class GitRepositoryGateway : IRepositoryGateway
         const string prefix = "tools/";
         var previous = ReadSelectedRevision(revision, ["tools"], includeInventory: true);
         var current = GitRepositorySnapshotReader.ReadCurrent(root, pathspecs: ["tools"]);
-        var oldFiles = previous.Entries.Where(entry => entry.Path.StartsWith(prefix, StringComparison.Ordinal))
-            .ToDictionary(entry => entry.Path, StringComparer.Ordinal);
-        var newFiles = current.Entries.Where(entry => entry.Path.StartsWith(prefix, StringComparison.Ordinal))
-            .ToDictionary(entry => entry.Path, StringComparer.Ordinal);
-        var oldModes = previous.PathInventory.ToDictionary(entry => entry.Path, entry => entry.EffectiveMode, StringComparer.Ordinal);
-        var newModes = current.PathInventory.ToDictionary(entry => entry.Path, entry => entry.EffectiveMode, StringComparer.Ordinal);
-        var result = changes.Where(change => !change.Path.StartsWith(prefix, StringComparison.Ordinal)).ToList();
-        foreach (var path in oldFiles.Keys.Union(newFiles.Keys, StringComparer.Ordinal))
-        {
-            if (!oldFiles.TryGetValue(path, out var oldFile))
-                result.Add((path, RawChangeKind.Added));
-            else if (!newFiles.TryGetValue(path, out var newFile))
-                result.Add((path, RawChangeKind.Deleted));
-            else if (oldModes[path] != newModes[path] || !oldFile.Bytes.AsSpan().SequenceEqual(newFile.Bytes.AsSpan()))
-                result.Add((path, RawChangeKind.Modified));
-        }
-        return result.OrderBy(change => change.Path, StringComparer.Ordinal).ToArray();
+        return changes.Where(change => !change.Path.StartsWith(prefix, StringComparison.Ordinal))
+            .Concat(ToolsRelease.Changes(previous, current))
+            .OrderBy(change => change.Path, StringComparer.Ordinal).ToArray();
     }
 
     private byte[] ReadNameStatus(string revision)

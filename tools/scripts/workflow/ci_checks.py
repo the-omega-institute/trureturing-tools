@@ -128,7 +128,8 @@ def current_phase(phase, data, plan, base, paths):
             raise DetectError("scoped PR phase used for a push")
         if not paths.is_file():
             raise DetectError("incremental Lean checks require the PR changed paths")
-        return execute(phase, [sys.executable, "tools/scripts/workflow/ci_pr_lean.py", str(paths)])
+        return execute(phase, [sys.executable, "tools/scripts/workflow/ci_pr_lean.py", str(paths),
+                               *(["--base", base] if base else [])])
     if phase == "lean-report":
         if not plan["full-report"]:
             raise DetectError("full Lean report is a push phase")

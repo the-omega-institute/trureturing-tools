@@ -44,12 +44,15 @@ def report_batches(scope, limit=60_000):
         yield sorted(targets), documents
 
 
-def check(paths):
+def check(paths, base=None):
     with tempfile.TemporaryDirectory(prefix="ci-pr-lean-") as temporary:
         directory = Path(temporary)
         manifest = directory / "paths"
         write_paths(manifest, paths)
-        plan = subprocess.run([*SCRIBE, "lean-inputs", "--affected", "--paths-from", str(manifest)],
+        command = [*SCRIBE, "lean-inputs", "--affected", "--paths-from", str(manifest)]
+        if base:
+            command.extend(["--base", base])
+        plan = subprocess.run(command,
                               stdout=subprocess.PIPE, text=True, check=True)
         scope = json.loads(plan.stdout)
         programs, targets = scope["programs"], scope["targets"]
@@ -76,8 +79,10 @@ def check(paths):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=Path)
+    parser.add_argument("--base")
+    args = parser.parse_args()
     try:
-        sys.exit(check(read_changed(parser.parse_args().manifest)))
+        sys.exit(check(read_changed(args.manifest), args.base))
     except subprocess.CalledProcessError as error:
         sys.exit(error.returncode if error.returncode > 0 else 128 - error.returncode)
     except (OSError, ValueError, KeyError) as error:

@@ -62,6 +62,27 @@ internal sealed class ToolsRelease
         }
     }
 
+    internal static IEnumerable<(string Path, RawChangeKind Kind)> Changes(
+        RawRepositorySnapshot previous, RawRepositorySnapshot current)
+    {
+        const string prefix = "tools/";
+        var oldFiles = previous.Entries.Where(entry => entry.Path.StartsWith(prefix, StringComparison.Ordinal))
+            .ToDictionary(entry => entry.Path, StringComparer.Ordinal);
+        var newFiles = current.Entries.Where(entry => entry.Path.StartsWith(prefix, StringComparison.Ordinal))
+            .ToDictionary(entry => entry.Path, StringComparer.Ordinal);
+        var oldModes = previous.PathInventory.ToDictionary(entry => entry.Path, entry => entry.EffectiveMode, StringComparer.Ordinal);
+        var newModes = current.PathInventory.ToDictionary(entry => entry.Path, entry => entry.EffectiveMode, StringComparer.Ordinal);
+        foreach (var path in oldFiles.Keys.Union(newFiles.Keys, StringComparer.Ordinal))
+        {
+            if (!oldFiles.TryGetValue(path, out var oldFile))
+                yield return (path, RawChangeKind.Added);
+            else if (!newFiles.TryGetValue(path, out var newFile))
+                yield return (path, RawChangeKind.Deleted);
+            else if (oldModes[path] != newModes[path] || !oldFile.Bytes.AsSpan().SequenceEqual(newFile.Bytes.AsSpan()))
+                yield return (path, RawChangeKind.Modified);
+        }
+    }
+
     internal static RawRepositorySnapshot AtRevision(string root, RawRepositorySnapshot snapshot,
         Func<string, bool> select, Func<string, bool> readContents,
         Action<string, ReadOnlyMemory<byte>>? observeContentDigest = null)
