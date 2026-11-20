@@ -429,6 +429,28 @@ class CheckTests(unittest.TestCase):
 
 
 class ScopedReportTests(unittest.TestCase):
+    def test_cached_scope_uses_the_planned_report_and_program_roots(self):
+        import ci_pr_lean as lean
+
+        base = "a" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            changed, plan = root / "paths", root / "plan.json"
+            contract.write_paths(changed, ["Meta/tools-release.json"])
+            selected = {"programs": ["Inspector.Feature"], "targets": ["D5.Owner", "Inspector.Feature"]}
+            with patch.object(lean.subprocess, "run", return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=json.dumps(selected))) as scribe:
+                plan.write_text(json.dumps(lean.plan_scope(changed, base)))
+                self.assertEqual(scribe.call_args.args[0],
+                    [*lean.SCRIBE, "lean-inputs", "--affected", "--paths-from", str(changed), "--base", base])
+            command = [sys.executable, lean.__file__, str(changed), "--read-plan", str(plan), "--cache-targets"]
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.split(), ["D5.Owner", "Inspector.Feature"])
+            plan.write_text(json.dumps({"programs": [], "targets": []}))
+            self.assertEqual(subprocess.check_output(command), b"")
+            plan.write_text(json.dumps({"programs": [], "targets": ["not a module"]}))
+            self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+
     def test_empty_scope_has_no_build_and_large_scopes_keep_scribe_inputs_together(self):
         from ci_pr_lean import report_batches
         self.assertEqual(list(report_batches({"targets": []})), [])

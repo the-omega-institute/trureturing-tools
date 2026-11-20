@@ -52,6 +52,13 @@ def plan_scope(manifest, base=None):
     return json.loads(planned.stdout)
 
 
+def scope_modules(scope):
+    modules = sorted(set(scope["targets"]) | set(scope["programs"]))
+    if any(not MODULE.fullmatch(module) for module in modules):
+        raise ValueError("invalid Lean module in scope")
+    return modules
+
+
 def check(manifest, protected_base=None, scope_file=None, base=None):
     base = base or protected_base
     changed = read_changed(manifest)
@@ -61,8 +68,7 @@ def check(manifest, protected_base=None, scope_file=None, base=None):
         directory = Path(temporary)
         scope = plan_scope(manifest, base) if scope_file is None else json.loads(scope_file.read_text())
         programs, targets = scope["programs"], scope["targets"]
-        if any(not MODULE.fullmatch(module) for module in [*targets, *programs]):
-            raise ValueError("invalid Lean module in PR scope")
+        scope_modules(scope)
         print(f"CI_PR_LEAN report_targets={len(targets)} program_targets={len(programs)}", flush=True)
         environment = dict(os.environ, FULL_BUILD="0")
         if programs:
@@ -103,8 +109,18 @@ if __name__ == "__main__":
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--write-plan", type=Path)
     modes.add_argument("--read-plan", type=Path)
+    parser.add_argument("--cache-targets", action="store_true")
     args = parser.parse_args()
     try:
+        if args.cache_targets:
+            if args.write_plan:
+                parser.error("--cache-targets cannot write a build plan")
+            scope = (json.loads(args.read_plan.read_text()) if args.read_plan
+                     else plan_scope(args.manifest, args.base or args.protected_base))
+            modules = scope_modules(scope)
+            if modules:
+                print(" ".join(modules))
+            sys.exit(0)
         if args.write_plan:
             args.write_plan.write_text(json.dumps(plan_scope(args.manifest, args.base or args.protected_base)))
             sys.exit(0)

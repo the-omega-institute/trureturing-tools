@@ -24,6 +24,10 @@ case "$REBUILD" in
   1) POLICY=build ;;
   *) echo 'lean-report.sh: rebuild-report-cache requires 0 or 1' >&2; exit 2 ;;
 esac
+# A valid aggregate report can coexist with an evicted compiler shard.
+if [[ "${PARTIAL_INDEXED_PROJECT:-false}" == true ]]; then
+  make -C "$ROOT" lean FULL_BUILD=1
+fi
 INSPECTOR_ARGS=(--repository "$ROOT" --output "${LEAN_REPORT:-$ROOT/.lake/build/stratalint/raw-lean-report.json}"
                 --cache-miss-policy "$POLICY" --regenerate-report-artifacts "$REGENERATE")
 if [[ -n "${STRATALINT_LEAN_REPORT_LOG_DIR:-}" ]]; then
