@@ -3,9 +3,12 @@ using System.Text;
 using System.Formats.Tar;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Trureturing.Truth;
 using StrataLint.Cli;
 using StrataLint.Engine;
+using StrataLint.Scribe;
+using StrataLint.TestSupport;
 
 namespace StrataLint.Tests;
 
@@ -15,17 +18,43 @@ public sealed class RepositorySnapshotAllocationCollection;
 [Collection("Repository snapshot allocation")]
 public sealed class GitRepositoryGatewayRevisionTests
 {
-    [Fact]
-    public void ReleaseChangesComparePinnedArchiveMembersAcrossRevisions()
+    [Theory]
+    [InlineData("tools/notes.txt", false, false)]
+    [InlineData("tools/report-producer.py", true, false)]
+    [InlineData("tools/lean-inspector/Inspector.lean", true, true)]
+    public void ReleaseChangesComparePinnedArchiveMembersAcrossRevisions(string path, bool projection, bool inspector)
     {
         using var repository = new TemporaryDirectory();
         var root = repository.Path;
         InitializeRepository(root);
         File.WriteAllText(Path.Combine(root, ".gitignore"), "/tools/\n/build/\n");
-        Directory.CreateDirectory(Path.Combine(root, "Meta"));
-        Directory.CreateDirectory(Path.Combine(root, "tools"));
+        void Write(string relativePath, string content)
+        {
+            var file = Path.Combine(root, relativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+            File.WriteAllText(file, content);
+        }
+        Write("global.json", "{}");
+        Directory.CreateDirectory(Path.Combine(root, "Blueprint"));
+        Write("Meta/ReportProducers/scribe-content.json", """
+            {"schema":"report-producer-scope-v2","registration":"lean-report-inputs.json","scope":"scribe-content","projects":[]}
+            """);
+        Write("lean-report-inputs.json", """
+            {"inspector_sources":{"include":[{"pattern":"tools/lean-inspector/**/*.lean","optional":true}],"exclude":[]},
+             "producer_scopes":{
+                "lean-report":{"include":[{"pattern":"Meta/tools-release.json","optional":false},
+                                          {"pattern":"tools/report-producer.py","optional":true}],"exclude":[]},
+                "scribe-content":{"include":[],"exclude":[]}}}
+            """);
+        Write(EngineeringRegistrationFixture.Path, EngineeringRegistrationFixture.Manifest());
+        Write("Golden/Projection/statement-projection-pilot-v1.json", """
+            {"schema":"statement-projection-pilot-fixture-v1","declarations":[
+             {"name":"D5.Probe.theorem","source_path":"D5/Probe.lean","kind":"theorem","type":"statement-v1(uparams=[],type=es(l0))"}]}
+            """);
+        Write("Golden/Projection/statement-projection-expansion-v1.json", """
+            {"schema":"statement-projection-expansion-fixture-v1","declarations":[]}
+            """);
         var cache = Directory.CreateDirectory(Path.Combine(root, "build", "tools-releases")).FullName;
-        const string path = "tools/judge.txt";
         void Install(string text)
         {
             var bytes = Encoding.UTF8.GetBytes(text);
@@ -41,8 +70,8 @@ public sealed class GitRepositoryGatewayRevisionTests
             var payload = archive.ToArray();
             var digest = Convert.ToHexStringLower(SHA256.HashData(payload));
             File.WriteAllBytes(Path.Combine(cache, digest + ".tar.gz"), payload);
-            File.WriteAllText(Path.Combine(root, ToolsRelease.PinPath), $$"""{"version":"v1.0.0","sha256":"{{digest}}"}""");
-            File.WriteAllBytes(Path.Combine(root, path), bytes);
+            Write(ToolsRelease.PinPath, $$"""{"version":"v1.0.0","sha256":"{{digest}}"}""");
+            Write(path, text);
         }
         Install("old");
         TestGit.Run(root, "add", ".");
@@ -61,9 +90,27 @@ public sealed class GitRepositoryGatewayRevisionTests
         var manifest = Path.Combine(cache, "changed-paths");
         File.WriteAllText(manifest, ToolsRelease.PinPath + "\0");
         var prepared = gateway.Prepare(revision);
-        Assert.Equal(prepared.Changes.Paths.OrderBy(p => p.Value),
-            ScopedAdmissionReports.ChangedPaths(root, manifest, prepared).Paths.OrderBy(p => p.Value));
+        Assert.True(prepared.Changes.ContainsPath(ToolsRelease.PinPath));
+        Assert.Equal(path, Assert.Single(ScopedAdmissionReports.ChangedPaths(root, manifest, prepared).Paths).Value);
         Assert.Throws<InvalidDataException>(() => ScopedAdmissionReports.ChangedPaths(root, manifest, null));
+
+        string Plan(string changed, params string[] baseArguments)
+        {
+            File.WriteAllText(manifest, changed + "\0");
+            using var output = new StringWriter();
+            using var error = new StringWriter();
+            var exit = ScribeCli.Run(["lean-inputs", "--affected", "--paths-from", manifest, .. baseArguments], root, output, error);
+            Assert.True(exit == 0, error.ToString());
+            return output.ToString();
+        }
+        var pinPlan = Plan(ToolsRelease.PinPath, "--base", revision);
+        Assert.Equal(Plan(path), pinPlan);
+        using var plan = JsonDocument.Parse(pinPlan);
+        Assert.Equal(projection ? new[] { "D5.Probe" } : [],
+            plan.RootElement.GetProperty("targets").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(inspector ? new[] { "Inspector" } : [],
+            plan.RootElement.GetProperty("programs").EnumerateArray().Select(value => value.GetString()));
+        Assert.Throws<InvalidDataException>(() => ScopedAdmissionReports.ChangedPaths(root, manifest, prepared));
         File.WriteAllText(manifest, "");
         Assert.Throws<InvalidDataException>(() => ScopedAdmissionReports.ChangedPaths(root, manifest, prepared));
         File.WriteAllText(Path.Combine(root, path), "modified");

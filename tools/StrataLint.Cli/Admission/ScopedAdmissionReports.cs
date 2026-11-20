@@ -12,7 +12,7 @@ internal static class ScopedAdmissionReports
 
     internal static RawChangeSet ChangedPaths(string root, string manifest, PreparedRepository? prepared)
     {
-        var changed = RawChangeSet.Create(PullRequestLeanChecks.EffectivePaths(root, [.. ReadManifest(manifest)], prepared?.Revision));
+        var changed = RawChangeSet.Create(PullRequestLeanChecks.ExpandReleasePaths(root, [.. ReadManifest(manifest)], prepared?.Revision));
         if (prepared is not null)
         {
             // A copy source appears in --find-copies-harder output as provenance
@@ -22,7 +22,7 @@ internal static class ScopedAdmissionReports
             if (!expected.SetEquals(changed.Paths))
                 throw new InvalidDataException("changed-path manifest differs from the protected-base delta");
         }
-        return changed;
+        return PullRequestLeanChecks.SemanticChanges(changed);
     }
 
     internal static LeanAxiomReport Read(string repositoryRoot, RepositorySnapshot snapshot,

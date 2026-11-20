@@ -40,7 +40,7 @@ internal sealed partial class ProductionCliEnvironment
                 : timing.Measure("scope-base", () => repository.Prepare(options.ScopeBase));
             var changes = !scoped ? null : ScopedAdmissionReports.ChangedPaths(repositoryRoot, options.ChangedPaths!, scopeBase);
             var plan = changes is null ? null : timing.Measure("lean-scope", () => PullRequestLeanChecks.CreatePlan(
-                repositoryRoot, current, [.. changes.Paths.Select(path => path.Value)]));
+                repositoryRoot, current, changes));
             var report = timing.Measure("lean-report-load", () => plan is null
                 ? RawLeanReportArtifact.ReadFile(options.CandidateLeanReport!, current, validateMaterials: true)
                 : ScopedAdmissionReports.Read(repositoryRoot, current, plan.Targets, options.ScopedReports));
@@ -69,7 +69,9 @@ internal sealed partial class ProductionCliEnvironment
                     BootstrapOutcome.InfrastructureFailure failure => throw new InvalidDataException(failure.Message),
                 };
                 result = timing.Measure("rule-passes", () => AdmissionPipeline.CheckDelta(
-                    DeltaRuleContext.Create(current, baseline, policy, lean, prepared.Changes, meta, null), MeasureRule), Blocked);
+                    DeltaRuleContext.Create(current, baseline, policy, lean, prepared.Changes, meta,
+                        ruleInputChanges: scoped ? PullRequestLeanChecks.SemanticChanges(prepared.Changes) : null),
+                    MeasureRule), Blocked);
             }
             else
             {

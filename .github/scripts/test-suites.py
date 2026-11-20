@@ -51,9 +51,7 @@ def contract(shard, shard_count):
                         if Path(project).stem not in STANDALONE)
     for project in additional[shard::shard_count]:
         check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly", project)
-    downstream = {"filemap"}
-    producer_commands = {"banned-api-proof", "capability-proof", "tests-integration-mirror"}
-    fixture = [name for name, unit in sorted(units.items()) if name not in downstream | producer_commands
+    fixture = [name for name, unit in sorted(units.items()) if name not in {"filemap", "tests-integration-mirror"}
                and Path(unit["project"]).stem not in STANDALONE]
     selected = fixture[shard::shard_count]
     if not selected and not additional[shard::shard_count]:

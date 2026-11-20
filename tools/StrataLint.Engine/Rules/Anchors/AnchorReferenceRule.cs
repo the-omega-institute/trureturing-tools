@@ -8,8 +8,7 @@ internal static class AnchorReferenceRule
     {
         var findings = ImmutableArray.CreateBuilder<RuleFinding>();
         var report = context.Lean.Report;
-        var checkAll = context.RuleImplementationChanged || context.Changes.Paths.Any(
-            path => RepositoryRules.IsLeanReportProducerInput(path.Value, context.RegisteredRuleBuildInputs));
+        var checkAll = context.RuleImplementationChanged || RepositoryRules.LeanReportProducerAffected(context);
         var imports = LeanImportClosure.ImportGraph(report);
         foreach (var (path, file) in RepositoryRules.FormalFiles(context.Current, report)
             .OrderBy(static item => item.Path.Value, StringComparer.Ordinal))
