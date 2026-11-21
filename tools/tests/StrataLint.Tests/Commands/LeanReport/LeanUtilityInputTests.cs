@@ -42,6 +42,11 @@ public sealed class LeanUtilityInputTests
         Assert.Equal(new[] { "D5.S0.Carrier.Ring", "D5.S0.Carrier.ValuesBinding" },
             owner.GetProperty("inputModules").EnumerateArray().Select(item => item.GetString()));
         Assert.DoesNotContain("claimSourceSha256", result.Output, StringComparison.Ordinal);
+
+        var modules = LeanUtilityInputCommand.Run(() => UtilityAdmissionTestSupport.Raw(fixture.Files),
+            ["--modules", "--targets", "D5.S0.Carrier.Ring"]);
+        Assert.Equal(0, modules.ExitCode);
+        Assert.Contains("D5.S0.Carrier.ValuesBinding", JsonSerializer.Deserialize<string[]>(modules.Output)!);
     }
 
     [Fact]

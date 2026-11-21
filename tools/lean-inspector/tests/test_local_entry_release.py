@@ -54,7 +54,7 @@ class LocalEntryReleaseCases:
         self.script('bin/gh', '''
 if [ -n "${FAKE_RELEASE_FAILURE:-}" ]; then echo "$FAKE_RELEASE_FAILURE" >&2; exit 77; fi
 case "$1 $2" in
-  "release list") printf '[{"tagName":"%s","createdAt":"2026-10-10T12:00:00Z","isDraft":false}]\\n' "$FAKE_RELEASE_TAG" ;;
+  "api graphql") printf '{"nodes":[{"tagName":"%s","isDraft":false}],"pageInfo":{"hasNextPage":false}}\\n' "$FAKE_RELEASE_TAG" ;;
   api\\ repos/the-omega-institute/trureturing/releases/tags/*)
     printf '{"draft":false,"tag_name":"%s","assets":[{"name":"manifest.json","digest":"sha256:%s"},{"name":"lean-build.tgz","digest":"sha256:%s","size":1}]}\\n' "$FAKE_RELEASE_TAG" "$FAKE_RELEASE_MANIFEST_DIGEST" "$(printf a%.0s {1..64})" ;;
   "release download")
@@ -610,7 +610,7 @@ PY
                                    if line.startswith('LEAN_REPORT_SEED_DECISION ')))
         self.assertEqual((local, producer, tag), (decision['local'], decision['release'], decision['tag']))
         calls = [json.loads(line) for line in (self.root / 'releases/calls.jsonl').read_text().splitlines()]
-        self.assertEqual(1, sum(call[:2] == ['release', 'list'] for call in calls),
+        self.assertEqual(1, sum(call[:2] == ['api', 'graphql'] for call in calls),
                          '[FAIL] approved_fetch_does_not_reselect')
 
 

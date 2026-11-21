@@ -52,6 +52,26 @@ def plan_scope(manifest, base=None):
     return json.loads(planned.stdout)
 
 
+def scope_modules(scope):
+    modules = sorted(set(scope["targets"]) | set(scope["programs"]))
+    if any(not MODULE.fullmatch(module) for module in modules):
+        raise ValueError("invalid Lean module in scope")
+    return modules
+
+
+def report_cache_inputs(roots):
+    # Use the report reader's source-derived scope, including named utility inputs.
+    if not roots:
+        return
+    producer = subprocess.check_output(
+        ["bash", str(Path(__file__).with_name("judge-lean-producer.sh")), str(Path(CLI).parent)],
+        text=True).strip() or CLI
+    for batch, _ in report_batches({"targets": sorted(roots), "paths": [], "definitions": {}}):
+        output = subprocess.check_output(
+            ["dotnet", producer, "lean-utility-input", "--modules", "--targets", " ".join(batch)], text=True)
+        yield from json.loads(output)
+
+
 def check(manifest, protected_base=None, scope_file=None, base=None):
     base = base or protected_base
     changed = read_changed(manifest)
@@ -61,8 +81,7 @@ def check(manifest, protected_base=None, scope_file=None, base=None):
         directory = Path(temporary)
         scope = plan_scope(manifest, base) if scope_file is None else json.loads(scope_file.read_text())
         programs, targets = scope["programs"], scope["targets"]
-        if any(not MODULE.fullmatch(module) for module in [*targets, *programs]):
-            raise ValueError("invalid Lean module in PR scope")
+        scope_modules(scope)
         print(f"CI_PR_LEAN report_targets={len(targets)} program_targets={len(programs)}", flush=True)
         environment = dict(os.environ, FULL_BUILD="0")
         # Hosted current restores the judge for this source key or builds it on a fresh runner.
@@ -116,10 +135,28 @@ if __name__ == "__main__":
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--write-plan", type=Path)
     modes.add_argument("--read-plan", type=Path)
+    parser.add_argument("--cache-targets", action="store_true")
     args = parser.parse_args()
     try:
+        if args.cache_targets:
+            if args.write_plan:
+                parser.error("--cache-targets cannot write a build plan")
+            scope = (json.loads(args.read_plan.read_text()) if args.read_plan
+                     else plan_scope(args.manifest, args.base or args.protected_base))
+            modules = scope_modules(scope)
+            if "cache_suites" in scope and (modules or scope["cache_suites"]):
+                sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worktree"))
+                from lean_ci_cache_scope import cache_modules
+
+                modules = cache_modules(Path.cwd(), scope, modules, report_cache_inputs)
+            if modules:
+                print(" ".join(modules))
+            sys.exit(0)
         if args.write_plan:
-            args.write_plan.write_text(json.dumps(plan_scope(args.manifest, args.base or args.protected_base)))
+            scope = plan_scope(args.manifest, args.base or args.protected_base)
+            # Main-repository CI selects content reports and programs. The tool
+            # repository runs its own compiled suites against the consumer fixture.
+            args.write_plan.write_text(json.dumps({**scope, "cache_suites": []}))
             sys.exit(0)
         code = check(args.manifest, args.protected_base, args.read_plan, args.base)
         sys.exit(code if code >= 0 else 128 - code)

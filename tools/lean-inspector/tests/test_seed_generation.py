@@ -410,12 +410,13 @@ args = sys.argv[1:]
 root = pathlib.Path(os.environ['FAKE_RELEASE_ROOT'])
 with (root / 'calls.jsonl').open('a') as log:
     log.write(json.dumps(args) + '\\n')
-if args[:2] == ['release', 'list']:
-    print((root / 'list.json').read_text())
+if args[:2] == ['api', 'graphql']:
+    rows = sorted(json.loads((root / 'list.json').read_text()), key=lambda row: row['createdAt'], reverse=True)
+    print(json.dumps(dict(nodes=rows, pageInfo=dict(hasNextPage=False))))
 elif args[0] == 'api':
     assets = root / args[1].rsplit('/', 1)[1]
     if os.environ.get('FAKE_CHANGED_PRODUCER') and sum(
-            json.loads(line)[0] == 'api' for line in (root / 'calls.jsonl').read_text().splitlines()) > 1:
+            json.loads(line)[0] == 'api' and json.loads(line)[1] != 'graphql' for line in (root / 'calls.jsonl').read_text().splitlines()) > 1:
         import hashlib
         manifest = json.loads((assets / 'manifest.json').read_text())
         manifest['producer_commit_sha'] = os.environ['FAKE_CHANGED_PRODUCER']
