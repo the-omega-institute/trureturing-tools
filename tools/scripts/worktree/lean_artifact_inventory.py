@@ -161,15 +161,16 @@ def lake_configuration(root: Path) -> str:
     return hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def project_imports(root: Path, modules: dict[str, Module]) -> dict[str, set[str]]:
+def project_imports(root: Path, modules: dict[str, Module], *, sources=None) -> dict[str, set[str]]:
     """Use the pinned Lean header parser, including module and public imports."""
+    names = list(modules if sources is None else sources)
     headers = subprocess.run(
         ["lean", "--deps-json", "--stdin"], cwd=root, check=True,
-        input="".join(f"{module.source.as_posix()}\n" for module in modules.values()),
+        input="".join(f"{modules[name].source.as_posix()}\n" for name in names),
         text=True, stdout=subprocess.PIPE,
     )
     graph = {}
-    for name, header in zip(modules, json.loads(headers.stdout)["imports"], strict=True):
+    for name, header in zip(names, json.loads(headers.stdout)["imports"], strict=True):
         if header["errors"]:
             raise ValueError(f"invalid Lean module header for {name}: {header['errors']}")
         graph[name] = {item["module"] for item in header["result"]["imports"]} & modules.keys()

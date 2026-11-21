@@ -7,6 +7,7 @@ from graphlib import TopologicalSorter
 import gzip
 import hashlib
 import io
+from itertools import batched
 import json
 import os
 from pathlib import Path
@@ -36,6 +37,23 @@ class Layer:
 
 def terminal(nodes, graph):
     return nodes.difference(dep for name in nodes for dep in graph[name])
+
+
+def scoped_imports(root, modules, targets):
+    pending = set(targets)
+    unknown = pending - modules.keys()
+    if unknown:
+        raise ValueError(f"unknown Lean modules: {sorted(unknown)}")
+    graph = {}
+    while pending:
+        discovered = set()
+        for batch in batched(sorted(pending), 512):
+            imported = project_imports(root, modules, sources=batch)
+            graph.update(imported)
+            for deps in imported.values():
+                discovered.update(deps)
+        pending = discovered - graph.keys()
+    return graph
 
 
 def partition(graph, targets):
@@ -244,7 +262,7 @@ def main():
     sha = checkout(root)
     modules = workspace_modules(root)
     targets = args.target or production_targets(root, modules)
-    layers = partition(project_imports(root, modules), targets)
+    layers = partition(scoped_imports(root, modules, targets), targets)
     if args.action == "verify":
         selected = [layers[args.stage]] if args.stage else layers.values()
         roots = sorted({name for layer in selected for name in layer.roots})

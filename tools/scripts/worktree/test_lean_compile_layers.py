@@ -26,6 +26,20 @@ class CompilePartitions(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown"):
             layers.partition(graph, ["Absent"])
 
+    def test_header_batches_follow_dependencies_outside_the_first_batch(self):
+        graph = {f"A{i}": {"Shared"} for i in range(1025)}
+        graph.update({"Shared": {"Base"}, "Base": set(), "Unused": set()})
+        observed = []
+        def read(root, modules, *, sources):
+            observed.extend(sources)
+            self.assertLessEqual(len(sources), 512)
+            return {name: graph[name] for name in sources}
+        targets = [name for name in graph if name.startswith("A")]
+        with patch.object(layers, "project_imports", side_effect=read):
+            result = layers.scoped_imports(Path("."), graph, targets)
+        self.assertEqual(result, {name: deps for name, deps in graph.items() if name != "Unused"})
+        self.assertEqual(len(observed), len(set(observed)))
+
     def test_single_target_and_package_batched_verification(self):
         plan = layers.partition({"Reg.A": {"D5.A"}, "D5.A": set()}, ["Reg.A"])
         self.assertEqual(plan["common"].roots, ())
