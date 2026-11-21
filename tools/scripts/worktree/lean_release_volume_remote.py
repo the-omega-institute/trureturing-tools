@@ -52,7 +52,7 @@ def asset_for(host, tag, digest, size, deadline):
     return checked_asset(metadata, tag, digest, size)
 
 
-def ensure_asset(host, tag, digest, size, source, deadline):
+def ensure_asset(host, tag, digest, size, source, deadline, *, serialized=False):
     metadata = host.existing_release(tag, deadline)
     if metadata is not None and not metadata["draft"]:
         checked_asset(metadata, tag, digest, size)
@@ -63,7 +63,18 @@ def ensure_asset(host, tag, digest, size, source, deadline):
         host.gh(deadline, "release", "create", tag, "--repo", host.REPO, "--draft",
                 "--title", tag, "--notes", "Immutable Lean cache volume.")
     uploaded = False
-    if metadata is not None and metadata.get("assets"):
+    assets = metadata.get("assets", []) if metadata is not None else []
+    if serialized and len(assets) == 1 and assets[0].get("state") == "starter":
+        starter = assets[0]
+        if (starter.get("name") != digest or type(starter.get("size")) is not int or starter["size"] != 0
+                or starter.get("digest") not in (None, "", "sha256:" + hashlib.sha256(b"").hexdigest())
+                or type(starter.get("id")) is not int or starter["id"] <= 0
+                or not re.fullmatch(r"lean-volume-v1-[0-9a-f]{64}-" + re.escape(digest), tag)
+                or source is None or source.stat().st_size != size or archive_sha(source, deadline) != digest):
+            raise ValueError("incomplete physical volume does not match the staged upload")
+        host.gh(deadline, "api", "--method", "DELETE", f"repos/{host.REPO}/releases/assets/{starter['id']}")
+        assets = []
+    if assets:
         checked_asset(metadata, tag, digest, size)
     else:
         if source is None:
@@ -122,7 +133,8 @@ def stage_publication(host, stage, contents, partition, cache_key, identity, ver
     for digest, size in tree["volumes"].items():
         physical = volume_prefix(scope) + digest
         source = packed / new[digest]["name"] if digest in new else None
-        if ensure_asset(host, physical, digest, size, source, deadline):
+        if ensure_asset(host, physical, digest, size, source, deadline,
+                        serialized=(os.environ.get("GITHUB_ACTIONS") == "true" and identity["publication_id"].startswith("ci-"))):
             uploads.append(digest)
     # Retire the complete v5 staging copy before verification reads the published object.
     for base, entries in ((stage, contents["parts"]), (packed, parts)):

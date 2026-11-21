@@ -12,7 +12,7 @@ import tempfile
 import tarfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import lean_release_volumes as volumes
 
@@ -25,6 +25,42 @@ def run(root, *args):
 
 
 class VolumeDownloads(unittest.TestCase):
+    def test_resume_only_the_unique_empty_starter_in_a_serialized_physical_draft(self):
+        import lean_release_volume_remote as remote
+
+        host = Mock()
+        host.REPO = "fixture/private"
+        body = b"complete physical volume"
+        digest = hashlib.sha256(body).hexdigest()
+        physical = remote.volume_prefix("isolated-scope") + digest
+        starter = {"state": "starter", "id": 23, "name": digest, "size": 0, "digest": None}
+        complete = {**starter, "state": "uploaded", "size": len(body), "digest": "sha256:" + digest}
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "payload"
+            path.write_bytes(body)
+            for draft, assets, serialized, source in (
+                    (False, [starter], True, path), (True, [starter], False, path),
+                    (True, [starter, starter], True, path), (True, [starter], True, None),
+                    (True, [dict(starter, name="wrong")], True, path),
+                    (True, [dict(starter, digest="wrong")], True, path),
+                    (True, [dict(starter, state="uploaded")], True, path)):
+                host.existing_release.return_value = {"draft": draft, "assets": assets}
+                with self.assertRaises(ValueError):
+                    remote.ensure_asset(host, physical, digest, len(body), source, None, serialized=serialized)
+                host.gh.assert_not_called()
+            path.write_bytes(b"Z" * len(body))
+            host.existing_release.return_value = {"draft": True, "assets": [starter]}
+            with self.assertRaises(ValueError):
+                remote.ensure_asset(host, physical, digest, len(body), path, None, serialized=True)
+            host.gh.assert_not_called()
+            path.write_bytes(body)
+            host.existing_release.side_effect = [{"draft": True, "assets": [starter]},
+                                                 {"draft": False, "assets": [complete]}]
+            self.assertTrue(remote.ensure_asset(host, physical, digest, len(body), path, None, serialized=True))
+            calls = [c.args for c in host.gh.call_args_list]
+            self.assertEqual(calls[0], (None, "api", "--method", "DELETE", "repos/fixture/private/releases/assets/23"))
+            self.assertEqual([c[2] for c in calls[1:]], ["upload", "edit"])
+
     def test_full_alternating_frames_use_two_unbounded_volume_transfers(self):
         import lean_cache_release as release
         import lean_release_volume_remote as remote
