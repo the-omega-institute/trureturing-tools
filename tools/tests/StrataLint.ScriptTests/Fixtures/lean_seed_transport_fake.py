@@ -8,6 +8,8 @@ if "FAKE_GH_LOG" in os.environ:
     with pathlib.Path(os.environ["FAKE_GH_LOG"]).open("a") as log:
         log.write(json.dumps(args) + "\\n")
 verb = args[0] if args and args[0] == "api" else (args[1] if len(args) > 1 else "")
+if args[:2] == ["api", "graphql"]:
+    verb = "list"
 if os.environ.get("FAKE_HANG") == verb:
     import signal
     signal.pause()
@@ -17,6 +19,28 @@ def fail():
 if len(args) > 1 and os.environ.get("FAKE_FAIL") == verb and verb != "upload": fail()
 if (len(args) > 1 and verb == "download" and os.environ.get("FAKE_FAIL_ASSET") == "1"
         and any(value.startswith("lean-build.tgz") for value in args)): fail()
+if args[:2] == ["api", "graphql"]:
+    if "FAKE_LIST_JSON" in os.environ:
+        releases = json.loads(os.environ["FAKE_LIST_JSON"])
+    else:
+        releases = [dict(tagName=p.parent.name, createdAt=p.parent.name,
+                         isDraft=json.loads(p.read_text())["draft"]) for p in root.glob("*/release.json")]
+    releases.sort(key=lambda row: row["createdAt"], reverse=True)
+    start = next((int(a[6:]) for a in args if a.startswith("after=")), 0)
+    end = start + 100
+    print(json.dumps({"nodes": releases[start:end], "pageInfo": {
+        "hasNextPage": end < len(releases), "endCursor": str(end)}}))
+    sys.exit(0)
+if args[:2] == ["api", "--include"]:
+    asset_id = int(args[-1].rsplit("/", 1)[1])
+    path = next(p for p in root.glob("*/*") if p.is_file() and p.stat().st_ino == asset_id)
+    bounds = next(a for a in args if a.startswith("Range: bytes=")).removeprefix("Range: bytes=")
+    start, end = map(int, bounds.split("-"))
+    data = path.read_bytes()
+    assert 0 <= start <= end < len(data)
+    sys.stdout.buffer.write(f"HTTP/2.0 206 Partial Content\\r\\nContent-Range: bytes {bounds}/{len(data)}\\r\\n\\r\\n".encode())
+    sys.stdout.buffer.write(data[start:end+1])
+    sys.exit(0)
 if args[:2] == ["release", "list"] and "FAKE_LIST_JSON" in os.environ:
     print(os.environ["FAKE_LIST_JSON"]); sys.exit(0)
 if args[0] == "api" and args[1].endswith("/branches/dev"):
@@ -32,7 +56,7 @@ if args[0] == "api" and "FAKE_VERIFICATION_API" in os.environ:
 def option(name): return args[args.index(name)+1]
 def metadata(directory):
     value = json.loads((directory / "release.json").read_text())
-    value["assets"] = [{"name": p.name, "size": p.stat().st_size, "digest": "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()}
+    value["assets"] = [{"id": p.stat().st_ino, "name": p.name, "size": p.stat().st_size, "digest": "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()}
                        for p in directory.iterdir() if p.name != "release.json"]
     if "FAKE_MANIFEST_DIGEST" in os.environ:
         for asset in value["assets"]:
@@ -47,6 +71,9 @@ if args[:2] == ["release", "list"]:
                       for p in root.glob("*/release.json")]))
 elif args[0] == "api":
     directory = root / args[1].split("/")[-1]
+    if args[1].rsplit("/", 2)[-2] == "releases" and directory.name.isdigit():
+        directory = next((p.parent for p in root.glob("*/release.json")
+                          if p.stat().st_ino == int(directory.name)), directory)
     phase = "FAKE_POST_EDIT_API" if (root.parent / ("gh-edited-" + str(os.getppid()))).exists() else "FAKE_LOOKUP_API"
     if phase + "_JSON" in os.environ:
         print(os.environ[phase + "_JSON"])
@@ -94,7 +121,11 @@ else:
                 shutil.copyfile(path, destination / path.name)
     elif verb == "view":
         if not directory.exists(): sys.exit(1)
-        print(json.dumps(metadata(directory)))
+        result = metadata(directory)
+        if "--json" in args and "databaseId" in option("--json").split(","):
+            result = {"databaseId": (directory / "release.json").stat().st_ino,
+                      "isDraft": result["draft"], "tagName": tag}
+        print(json.dumps(result))
     elif verb == "delete": shutil.rmtree(directory)
     else: sys.exit(2)
 '''

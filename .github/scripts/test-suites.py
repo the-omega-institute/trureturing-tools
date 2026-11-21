@@ -49,6 +49,8 @@ def check(*arguments):
 
 
 def standalone():
+    check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/worktree",
+          "-p", "test_lean_compile_layers.py")
     for name in STANDALONE:
         check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly",
               f"tools/tests/{name}/{name}.csproj", "--no-build")
@@ -71,6 +73,8 @@ def contract(shard, shard_count):
         os.environ["PATH"] = str(Path.home() / ".elan/bin") + os.pathsep + os.environ["PATH"]
     fourier = any(project.stem == "StrataLint.DeclaredTemplate.Tests" for project in selected)
     roots = [prefix + module for module in FOURIER_MODULES for prefix in ("", "Reg.")] if fourier else []
+    if shard == 0:
+        check(sys.executable, "-B", "tools/scripts/worktree/test_lean_release_volumes.py")
     if roots or shard == 0:
         prepare_mathlib(roots, shard == 0)
     for project in selected:

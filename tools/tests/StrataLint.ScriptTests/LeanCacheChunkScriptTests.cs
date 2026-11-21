@@ -158,8 +158,8 @@ public sealed class LeanCacheChunkScriptTests
         Assert.Contains($"\"producer_commit_sha\":\"{producer}\"", result.Text, StringComparison.Ordinal);
         Assert.Equal(LeanCacheChunkFixture.Archive, fixture.Unpacked);
         Assert.Equal("report-seed", fixture.UnpackedReport);
-        Assert.All(fixture.GhCalls.Where(args => args[0] == "api"),
-            args => Assert.Equal($"repos/fixture/cache/releases/tags/{fixture.Tag}", args[1]));
+        Assert.Equal(["graphql", $"repos/fixture/cache/releases/tags/{fixture.Tag}"],
+            fixture.GhCalls.Where(args => args[0] == "api").Select(args => args[1]).ToArray());
     }
 
     [Fact]

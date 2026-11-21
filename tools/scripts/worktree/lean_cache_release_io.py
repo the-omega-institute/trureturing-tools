@@ -4,6 +4,12 @@ import contextlib
 import hashlib
 import time
 
+INDEXED_SCHEMA = "lean-release-seed-v5"
+INDEXED_ASSET = "lean-members"
+
+PRODUCTION_PREFIX = {False: "lean-cache-v2-", True: "lean-cache-v3-", "volumes": "lean-cache-v4-"}
+VERIFICATION_PREFIX = {False: "lean-cache-verify-v1-", True: "lean-cache-verify-v2-", "volumes": "lean-cache-verify-v3-"}
+
 
 class OperationBudget:
     """A computation deadline whose clock can exclude an owned asset transfer."""

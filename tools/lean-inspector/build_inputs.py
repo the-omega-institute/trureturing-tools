@@ -182,6 +182,9 @@ def main():
     work_file = Path(os.environ.get('STRATALINT_LEAN_BUILD_WORK_FILE', ROOT / 'build/lean-cache/build-work.json'))
     if args.action == 'check':
         work_file.unlink(missing_ok=True)
+        # A reusable report can coexist with missing project compiler artifacts.
+        if os.environ.get('PARTIAL_INDEXED_PROJECT') == 'true':
+            subprocess.run(['make', 'lean', 'FULL_BUILD=1'], cwd=ROOT, check=True)
     output = args.output.resolve()
     seed = Path(os.environ.get('STRATALINT_LEAN_REPORT_REUSE', output)).resolve()
     force = (os.environ.get('REBUILD_REPORT_CACHE') == '1'
