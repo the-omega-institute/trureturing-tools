@@ -490,6 +490,23 @@ lean_exe inputDiscovery where
                            "D5/S3/TotalVariation/PrimitiveBridgeCancellation"):
                 write(source + ".lean")
                 write("Reg/" + source + ".lean")
+            for source in ("Contract/AuricFib", "Contract/Registration"):
+                write(f"tools/lean-inspector-interface/LeanInformationAuditInterface/{source}.lean")
+            write("tools/lean-inspector/LeanInformationAudit/TemplateEnrollment.lean")
+            write("D5/WithRuntime.lean", "import LeanInformationAuditInterface.Contract.AuricFib\n"
+                  "import LeanInformationAuditInterface.Contract.Registration\n")
+            write("bin/lean", """#!/usr/bin/env python3
+import json
+from pathlib import Path
+import sys
+assert sys.argv[1:] == ["--deps-json", "--stdin"]
+headers = []
+for path in sys.stdin.read().splitlines():
+    imports = [dict(module=line.split()[1]) for line in Path(path).read_text().splitlines() if line.startswith("import ")]
+    headers.append(dict(errors=[], result=dict(imports=imports)))
+print(json.dumps(dict(imports=headers)))
+""")
+            (root / "bin/lean").chmod(0o755)
             write("D5/Scoped.lean")
             write("D5/NamedExample.lean")
             write("bin/dotnet", """#!/usr/bin/env python3
@@ -526,6 +543,9 @@ print(json.dumps(roots + (["D5.NamedExample"] if "D5.Scoped" in roots else [])))
             self.assertEqual(restored(["source-evidence", "compiled-audit", "fib-regressions"],
                 ["D5.Scoped"], ["Program"]), evidence | audit | fib | {"D5.Scoped", "D5.NamedExample", "Program"})
             self.assertEqual(restored([], ["D5.Scoped"]), report_programs | {"D5.Scoped", "D5.NamedExample"})
+            self.assertEqual(restored([], ["D5.WithRuntime"]), report_programs | {
+                "D5.WithRuntime", "Analysis.Main", "LeanInformationAudit.TemplateEnrollment"})
+            self.assertEqual(restored([], programs=["D5.WithRuntime"]), {"D5.WithRuntime"})
             self.assertEqual(restored([], programs=["Program"]), {"Program"})
             self.assertEqual(restored([]), set())
             self.assertEqual(targets_file.read_bytes(), b"")

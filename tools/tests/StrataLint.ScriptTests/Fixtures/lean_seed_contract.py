@@ -92,7 +92,7 @@ class TransportTests(ReleaseLegacyCases, ReleaseVerificationCases, ReleaseTransp
                 patch.object(release, "release_key", return_value=cache_key), \
                 patch.object(release, "publication_identity", return_value=identity), \
                 patch.object(release.report_reuse, "capture"), \
-                patch.object(release.report_reuse, "read_receipt"), \
+                patch.object(release.report_reuse, "read_receipt", return_value={"completed": release.report_reuse.CHECKED}), \
                 patch.object(release.report_reuse.publication, "validate_bundle"), \
                 patch.object(indexed, "pack", return_value=archive), \
                 patch.object(release, "gh", side_effect=transport), \

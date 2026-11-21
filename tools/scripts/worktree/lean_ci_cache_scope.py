@@ -4,13 +4,17 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tomllib
 
 from lean_artifact_inventory import (
-    INSPECTOR, REG_INSPECTOR, library_globs, matches_module_glob, workspace_modules,
+    INSPECTOR, REG_INSPECTOR, import_closure, library_globs, matches_module_glob, project_imports, workspace_modules,
 )
 
 TOOLS = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(TOOLS / "lean-inspector"))
+from scoped import runtime_targets
+
 COMPILED_SUITES = {
     "compiled-audit": "compiled-judge-test.sh",
     # A saved plan from before the ordinary FIB unit was retired can select it.
@@ -60,7 +64,14 @@ def cache_modules(root, scope, scoped_modules, report_inputs):
         for source in json.loads(SOURCE_INPUTS.read_text()).values():
             name = Path(source).with_suffix("").as_posix().replace("/", ".")
             report_roots.update((name, "Reg." + name))
-    selected.update(report_inputs(report_roots))
+    report_modules = set(report_inputs(report_roots))
+    selected.update(report_modules)
+    if report_modules:
+        graph = project_imports(root, modules)
+        # The report reader selects utility inputs. Lean supplies imports from
+        # every local package, including the inspector contracts they reference.
+        dependencies = import_closure(graph, report_modules & modules.keys())
+        targets.update(runtime_targets(dependencies))
 
     # The report facet schedules these programs for normal scoped reports,
     # the source/mirror evidence, and the FIB suite's native report tests.
@@ -73,6 +84,9 @@ def cache_modules(root, scope, scoped_modules, report_inputs):
     reg_libraries = {library["name"]: library for library in reg.get("lean_lib", [])}
     reg_executables = {exe["name"]: exe for exe in reg.get("lean_exe", [])}
     for target in sorted(targets):
+        if target.startswith("+"):
+            selected.add(target[1:])
+            continue
         package, _, name = target.partition("/")
         if package == reg["name"] and name in reg_libraries:
             globs = library_globs(reg_libraries[name])
