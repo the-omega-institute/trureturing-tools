@@ -56,7 +56,8 @@ class SharedArtifactCacheTests(unittest.TestCase):
             commit(mathlib)
             rev = call(mathlib, 'git', 'rev-parse', 'HEAD')
             write(main, '.gitignore', '.lake/\n')
-            for name in ('lean-toolchain', 'Makefile', 'tools/scripts/worktree/lean-cache-run.sh',
+            shutil.copy2(ROOT / 'tools/consumer/Makefile', main / 'Makefile')
+            for name in ('lean-toolchain', 'tools/scripts/worktree/lean-cache-run.sh',
                          'tools/scripts/worktree/warm-donor.sh', 'tools/scripts/worktree/lean-git/git'):
                 (main / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / name, main / name)
