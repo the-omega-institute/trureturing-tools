@@ -331,7 +331,9 @@ private def prepareNativeModuleReport (mod : Module) : FetchM (Job PreparedArtif
     let fibInputs := ownInputs.filter fun entry =>
       (entry.getObjValAs? String "type").toOption ==
         some "LeanInformationAudit.AuricFib.Contract.Application"
-    let analyzer ← if fibInputs.isEmpty then pure "" else do
+    let fibAnalysis ← IO.ofExcept (config.getObjValAs? Bool "fib_analysis")
+    let skipFib := !fibAnalysis && !fibInputs.isEmpty
+    let analyzer ← if !fibAnalysis || fibInputs.isEmpty then pure "" else do
       let some executable ← findLeanExe? `auricFibAnalysis | error "fib.analysis_program_missing"
       pure executable.file.toString
     let mut deps := deps
@@ -362,6 +364,7 @@ private def prepareNativeModuleReport (mod : Module) : FetchM (Job PreparedArtif
         let info ← exportJob.await
         addTrace (info.allArtsTrace.mix info.legacyTransTrace)
       addTrace format.getTrace
+      if skipFib then addTrace (BuildTrace.ofHash (Hash.ofString "omit-auric-fib"))
       let executable ← inspector.await
       observePhase "lake-report-inspector" "ready"
       observePhase "lake-report-programs" "finish"

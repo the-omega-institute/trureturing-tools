@@ -104,6 +104,10 @@ class Selection:
             keys.add('dependency_sources')
         if 'report_execution' in self.data:
             keys.add('report_execution')
+        if 'full_report_fib_analysis' in self.data:
+            keys.add('full_report_fib_analysis')
+            if type(self.data['full_report_fib_analysis']) is not bool:
+                fail('full_report_fib_analysis', 'expected a boolean')
         fields(self.data, keys, 'declaration')
         if type(self.data['schema_version']) is not int or self.data['schema_version'] != 1:
             fail('schema_version', 'unsupported version')
@@ -134,6 +138,10 @@ class Selection:
             if dict(pattern=anchor, optional=False) not in required:
                 fail('producer_scopes.lean-report', f'missing required registration {anchor}')
         self.modules()
+
+    @property
+    def full_report_fib(self):
+        return self.data.get('full_report_fib_analysis', True) or os.environ.get('STRATALINT_MANUAL_FIB_REPORT') == '1'
 
     def compatibility(self):
         return hashlib.sha256(
@@ -383,6 +391,8 @@ def input_coordinates(repository, memo_root=None):
     updates, digests = {}, []
     for group in ('report_modules', 'config_inputs'):
         manifest = hashlib.sha256()
+        if group == 'config_inputs' and not inputs.full_report_fib:
+            manifest.update(b'full_report_fib_analysis=false\n')
         for relative in inputs.expand(group):
             path = inputs.safe_file(relative)
             oid = eligible.get(os.fsencode(relative))

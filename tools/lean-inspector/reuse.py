@@ -32,6 +32,15 @@ BASE_RECORD = '.lake/lean-report-seed-base.json'
 SUFFIX = '.reuse.json'
 COMPLETED = ['defaults', 'report', 'publication']
 CHECKED = [*COMPLETED, 'fib-inputs-checked']
+REPORT_CHECKED = [*COMPLETED, 'full-report-checked']
+
+
+def checked_steps(inputs):
+    if not isinstance(inputs, dict):
+        raise ValueError('invalid reuse inputs')
+    return CHECKED if inputs.get('full_report_fib_analysis', True) else REPORT_CHECKED
+
+
 INVALID_SEED = (OSError, UnicodeError, ValueError, KeyError, TypeError,
                 zipfile.BadZipFile, zlib.error, NotImplementedError, subprocess.CalledProcessError)
 if zipfile.lzma is not None:
@@ -117,6 +126,8 @@ def capture(repository):
         execution=dict(toolchain=execution['toolchain'], tools=execution['tools'],
                        platform={name: getattr(platform, name)() for name in execution['platform']},
                        environment=environment))
+    if not inputs.full_report_fib:
+        snapshot['full_report_fib_analysis'] = False
     if receipt_covers_dependencies(inputs):
         snapshot['covers_compiler_dependencies'] = True
     return snapshot
@@ -133,7 +144,7 @@ def read_receipt(report, captured=None):
         raise ValueError('reuse receipt is absent or nonregular')
     receipt = publication.read_json(path.read_bytes())
     materials.require_keys(receipt, {'schema', 'completed', 'inputs', 'bundle'}, 'reuse receipt')
-    if receipt['schema'] != SCHEMA or receipt['completed'] not in (COMPLETED, CHECKED):
+    if receipt['schema'] != SCHEMA or receipt['completed'] not in (COMPLETED, checked_steps(receipt['inputs'])):
         raise ValueError('reuse receipt lacks complete entry success')
     if captured is not None and receipt['inputs'] != captured:
         raise InputMismatch(receipt['inputs'], captured)
@@ -167,7 +178,7 @@ def probe(repository, report, *, require_covered_dependencies=False):
 
 def write_receipt(report, captured, *, checked=False):
     path = publication.member(report, SUFFIX)
-    record = dict(schema=SCHEMA, completed=CHECKED if checked else COMPLETED, inputs=captured, bundle=bundle_hashes(report))
+    record = dict(schema=SCHEMA, completed=checked_steps(captured) if checked else COMPLETED, inputs=captured, bundle=bundle_hashes(report))
     # Never write through cache hard links or leave a partially written receipt.
     fd, temporary = tempfile.mkstemp(prefix='.report-reuse.', dir=path.parent)
     try:
@@ -337,7 +348,7 @@ def _reuse(repository, report, output):
                 raise ValueError('reuse receipt changed during publication')
         if capture(repository) != captured:
             raise ValueError('registered inputs changed during reuse')
-        write_receipt(output, captured, checked=receipt['completed'] == CHECKED)
+        write_receipt(output, captured, checked=receipt['completed'] == checked_steps(captured))
         if canonical and base is not None and not record_seed_base(repository, base):
             invalidate_seed_base(repository)
     except INVALID_SEED as error:
@@ -368,10 +379,12 @@ def seed_format(report):
             raise ValueError('missing reuse receipt')
         receipt = publication.read_json(path.read_bytes())
         materials.require_keys(receipt, {'schema', 'completed', 'inputs', 'bundle'}, 'reuse receipt')
-        if receipt['schema'] != SCHEMA or receipt['completed'] not in (COMPLETED, CHECKED):
+        if receipt['schema'] != SCHEMA or receipt['completed'] not in (COMPLETED, checked_steps(receipt['inputs'])):
             raise ValueError('reuse receipt lacks complete entry success')
         inputs = receipt['inputs']
         fields = {'eligible', 'report_format', 'files', 'execution'}
+        if isinstance(inputs, dict) and inputs.get('full_report_fib_analysis') is False:
+            fields.add('full_report_fib_analysis')
         if isinstance(inputs, dict) and inputs.get('covers_compiler_dependencies') is True:
             fields.add('covers_compiler_dependencies')
         inputs = materials.require_keys(inputs, fields, 'reuse inputs')

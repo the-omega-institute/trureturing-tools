@@ -399,6 +399,8 @@ def check_aggregate_rows(rows, origins, repository=None):
         seen.add(name)
         check_origin(origins[name], row)
         if modules is not None:
+            if not inputs.full_report_fib and 'fib_analysis' in row:
+                raise ValueError('unexpected FIB analysis in full report')
             if name not in modules:
                 raise ValueError('report source membership mismatch')
             if row['source_path'] != modules[name]:

@@ -311,6 +311,7 @@ def prepare(root, scope="full"):
             # This invocation input is never an artifact reuse condition.
             write_if_changed(state(root) / 'module-inputs.json', materials.canonical_json(dict(
                 modules=sorted(modules), configs=inputs.expand('config_inputs'),
+                fib_analysis=bool(scope_file) or inputs.full_report_fib,
                 records={name: materials.canonical_json(record).decode('ascii')
                          for name, record in records.items()})))
             return
@@ -436,6 +437,8 @@ def module_stage(root, name, source, utility_path, executable, output, analyzer,
     report = directory / public.RAW
     arguments = ['--output', str(directory / 'spool.json'), '--material-spool', str(spool),
         '--utility-input', str(utility), name, record['source_path'], 'sha256:' + public.digest(source)]
+    if not os.environ.get('STRATALINT_INSPECTOR_SCOPE_FILE') and not template_inputs.full_report_fib:
+        arguments.insert(0, '--without-fib')
     capture = retain_request(root, executable, arguments, record['utilities'])
     with phase('native-inspect', request_capture=capture):
         run_inspector(root, executable, arguments)
@@ -554,6 +557,8 @@ def inspect_batch_chunk(requests, *, check_constants=False, generated_index=None
             arguments.insert(0, '--check-batch-constants')
         if generated_index is not None:
             arguments[0:0] = ['--generated-index', str(generated_index)]
+        if not os.environ.get('STRATALINT_INSPECTOR_SCOPE_FILE') and not template_inputs.full_report_fib:
+            arguments.insert(0, '--without-fib')
         argument_file = directory / 'arguments.json'
         argument_file.write_text(json.dumps(arguments))
         capture = retain_request(root, executable, arguments, utilities, origin)

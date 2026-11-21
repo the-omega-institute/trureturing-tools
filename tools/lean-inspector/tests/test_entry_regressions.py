@@ -21,12 +21,13 @@ import reuse
 class EntryRegressionTests(unittest.TestCase):
     def entry(self, *, cached=False, changed=False, selected=False, failure=0,
               unavailable_clock=False, missing_inputs=False, regenerate=False, obsolete=False, invalid_fresh=False,
-              force_without_seed=None, follow_with_unchecked_report=False, legacy=False, archive=False):
+              force_without_seed=None, follow_with_unchecked_report=False, legacy=False, archive=False, full_fib=True):
         fixture = test_reuse.ReuseTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         root = fixture.root
         fixture.policy.pop('dependency_sources')
+        fixture.policy['full_report_fib_analysis'] = full_fib
         fixture.write_policy()
 
         def write(name, text):
@@ -49,7 +50,7 @@ class EntryRegressionTests(unittest.TestCase):
                 target_module='D5.A', target_type_identity='c' * 64, input_identity=identity,
                 request=dict(kind='unavailable', parameter=None), unavailable_reason='fixture',
                 reading=fib_analysis.unavailable('fixture'))
-            if not missing:
+            if full_fib and not missing:
                 row['fib_analysis'] = dict(applications=[leaf])
             fixture.report.write_bytes(materials.canonical_json(value))
             origins = json.loads(publication.member(fixture.report, '.provenance.json').read_text())['module_origins']
@@ -207,6 +208,15 @@ exit """ + str(failure) + '\n')
                     build_inputs.checked_report(staging, report, report, staging, staging / 'work.json',
                                                 try_seed=True)
                 self.assertEqual(reuse.read_seed_base(root), source if known else None)
+
+    def test_disabled_full_fib_skips_regressions_and_records_report_only_success(self):
+        for cached in (False, True):
+            with self.subTest(cached=cached):
+                result, calls, report, _, _ = self.entry(cached=cached, changed=True,
+                    selected=True, failure=41, full_fib=False)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(calls, [] if cached else ['compile', 'report'])
+                self.assertEqual(reuse.read_receipt(report)['completed'], reuse.REPORT_CHECKED)
 
     def test_optional_dependency_disappearance_cannot_enable_receipt_shortcut(self):
         fixture = test_reuse.ReuseTests()

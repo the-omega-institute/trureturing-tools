@@ -42,6 +42,9 @@ def cleanup_module(module):
 class UniversalProductionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        manual = patch.dict(os.environ, STRATALINT_MANUAL_FIB_REPORT='1')
+        manual.start()
+        cls.addClassCleanup(manual.stop)
         cls.work = tempfile.TemporaryDirectory(prefix='auric-fib-universal.')
         cls.directory = Path(cls.work.name)
         cls.source = ROOT / (MODULE.replace('.', '/') + '.lean')

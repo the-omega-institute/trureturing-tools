@@ -15,7 +15,7 @@ make lean-report FULL_BUILD=1 REBUILD_REPORT_CACHE=1
 本地默认 `reuse-or-build`，其中 build 仅生成报告。预编译输入包括 Reg inspector 工作区 `tools/lean-inspector-reg/.lake/config/` 中与当前包配置相符的 `lakefile.olean` 及其 trace。
 若只恢复了仓库根目录的 `.lake/build`，且这些配置工件缺失或过期，请先按报告范围准备输入。定向报告运行 `make lean-report-prepare LEAN_TARGETS="…"`，目标与后续报告相同。全量报告运行 `make lean-report-prepare FULL_BUILD=1`。这两个入口也会准备所需的模块和工具。
 默认的 Release 版 `StrataLint.Lean.dll` 通过 MSBuild 的只读查询核对是否需要重新构建。显式指定 `STRATALINT_LEAN_PRODUCER_DLL` 可使用调用方已准备的独立工具包。
-`make check-lean-report FULL_BUILD=1` 按需准备编译产物、取得完整报告并执行适用的 FIB 回归。只有带 `fib-inputs-checked` 的收据可作为回归基线，旧收据与独立分析收据在实际检查后取得该标记。整库检查仅在收据覆盖所有登记的依赖路径时直接重发相符的报告。其余情况由 Lake 检查编译依赖，复用有效的模块和聚合报告。
+`make check-lean-report FULL_BUILD=1` 按需准备编译产物、取得完整报告。当清单的 `full_report_fib_analysis` 为 false 时，整库跳过 FIB 提取与回归，发布使用 `full-report-checked` 收据。手动运行 `make -C tools auric-fib-report FULL_BUILD=1` 可生成独立的 FIB 报告。启用整库 FIB 的消费者执行适用的回归。只有带 `fib-inputs-checked` 的收据可作为回归基线，旧收据与独立分析收据在实际检查后取得该标记。整库检查仅在收据覆盖所有登记的依赖路径时直接重发相符的报告。其余情况由 Lake 检查编译依赖，复用有效的模块和聚合报告。
 
 显式选用 `LEAN_REPORT_CACHE_MISS_POLICY=fetch-or-fail` 时，报告种子缺失、不完整或成功收据的 `inputs.report_format`
 不符时，主 checkout 先在私有写锁内恢复 dev 同分区、缓存 key 一致的 Release 快照。恢复后仍无
@@ -115,7 +115,7 @@ The CI `current` job executes this entry after successful scoped checks when
 `tests-lean` is selected. Its source list includes runtime
 D5/Reg inputs, fixtures, compiler, scripts and consumers. `make compiled-fib-test`
 builds the separate FIB library, source-contract executable and finite analyzer,
-then runs the production-consumer and finite-input regressions. Before publishing its candidate, `make check-lean-report FULL_BUILD=1` compares
+then runs the production-consumer and finite-input regressions. With full-report FIB enabled, before publishing its candidate, `make check-lean-report FULL_BUILD=1` compares
 complete custody-bound Application inputs with the previously published report, including
 unavailable inputs and additions or removals across supported owners. It runs `make compiled-fib-test`
 when those inputs change, when the previous report lacks a checked baseline, or when the suite
@@ -275,7 +275,7 @@ Inspector 的可复用工件由 [Lake facets](lakefile.lean) 管理，均在当�
 | `report.zip` | 汇总后的完整规范报告 bundle。 |
 | `inputs/`、`inputs.json`、`report-format` | 当前模块输入、成员及配置坐标、报告格式标识。 |
 
-Lean-cache 发布使用完整检查入口准备编译产物，将生成的报告与先前发布的 FIB 输入比较。
+Lean-cache 发布使用完整检查入口准备编译产物。启用整库 FIB 时才比较先前发布的 FIB 输入。
 选中的回归必须通过，随后才将报告发布到目标路径并打包根 buildDir。
 归档携带原生 Inspector 可执行文件、模块与汇总工件，以及规范报告、materials、origin 和
 attestation。发布继续使用 mathlib 分区内的 run/attempt 快照及 draft 上传协议；draft

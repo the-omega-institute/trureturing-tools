@@ -165,8 +165,11 @@ auric-fib-analysis: auric-fib-analysis-build
 auric-fib-analysis-test: auric-fib-analysis-build
 	@/bin/bash "$(HERE)/scripts/auric-fib-analysis.sh" --test
 
+auric-fib-report: export STRATALINT_MANUAL_FIB_REPORT := 1
 auric-fib-report:
-	@$(MAKE) --no-print-directory -C "$(REPOSITORY)" lean-report >&2 && python3 -B "$(HERE)/lean-inspector/fib_analysis.py" "$(REPOSITORY)/.lake/build/stratalint/raw-lean-report.json"
+	@$(MAKE) --no-print-directory -C "$(REPOSITORY)" lean-report-prepare >&2
+	@$(MAKE) --no-print-directory -C "$(REPOSITORY)" lean-report LEAN_REPORT=.lake/build/stratalint/auric-fib-report.json >&2
+	@python3 -B "$(HERE)/lean-inspector/fib_analysis.py" "$(REPOSITORY)/.lake/build/stratalint/auric-fib-report.json"
 
 # Source-owned generic clients use the same report facets and custody consumer.
 auric-fib-universal-test:

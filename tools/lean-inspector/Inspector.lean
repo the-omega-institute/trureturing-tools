@@ -471,7 +471,7 @@ private def withReportWriter (reportOutput materialSpool : System.FilePath)
 
 -- No target store, assessment, expression cache or report row escapes this frame.
 @[noinline] private unsafe def produceTarget (base : RawArtifacts.Store)
-    (state : IO.Ref RawArtifacts.Store) (statementOnly profiling : Bool)
+    (state : IO.Ref RawArtifacts.Store) (statementOnly profiling withoutFib : Bool)
     (input : ModuleInput) (utilities : Array UtilityInput)
     (generated : IO.Ref (Std.HashMap String String))
     (seen : IO.Ref (NameMap Name))
@@ -515,7 +515,7 @@ private def withReportWriter (reportOutput materialSpool : System.FilePath)
     (closedNegation (fun name => current.modules.find? name.toName)
       (current.constants.find?) input)
     cache writer counter utilities generatedNames binding input
-  let fib ← if !statementOnly && data.constants.any FibApplications.isInput then
+  let fib ← if !withoutFib && !statementOnly && data.constants.any FibApplications.isInput then
     FibApplications.extract target data.constants current (digestBytes writer)
     else pure Json.null
   let row := { row with
@@ -525,7 +525,7 @@ private def withReportWriter (reportOutput materialSpool : System.FilePath)
   out.flush
 
 private unsafe def produceCompiled (reportOutput materialSpool : System.FilePath)
-    (statementOnly checkConstantsOnly : Bool)
+    (statementOnly checkConstantsOnly withoutFib : Bool)
     (generatedIndex : Option System.FilePath)
     (inputs : Array ModuleInput) (utilities : Array UtilityInput) : IO Unit := do
   let start ← IO.monoNanosNow
@@ -575,7 +575,7 @@ private unsafe def produceCompiled (reportOutput materialSpool : System.FilePath
       let selected := utilities.filter (·.modulePath == input.sourcePath)
       if index > 0 then out.putStr ", "
       try
-        produceTarget base targetState statementOnly profiling input selected generated seen writer out counter
+        produceTarget base targetState statementOnly profiling withoutFib input selected generated seen writer out counter
       finally
         RawArtifacts.release targetState
       if profiling then
@@ -595,6 +595,8 @@ unsafe def main (args : List String) : IO Unit := do
     | _ => pure args
   -- Statement-only output deliberately has no binding fields and cannot meet
   -- the declared-template admission consumer. It serves standalone encoders.
+  let withoutFib := args.head? == some "--without-fib"
+  let args := if withoutFib then args.drop 1 else args
   let statementOnly := args.head? == some "--statements-only"
   let args := if statementOnly then args.drop 1 else args
   let checkConstantsOnly := args.head? == some "--check-batch-constants"
@@ -616,7 +618,7 @@ unsafe def main (args : List String) : IO Unit := do
       | .error message => throw <| IO.userError s!"invalid utility input: {message}"
   let selectedUtilities := utilities.filter fun utility =>
     inputs.any (·.sourcePath == utility.modulePath)
-  produceCompiled reportOutput materialSpool statementOnly checkConstantsOnly generatedIndex inputs selectedUtilities
+  produceCompiled reportOutput materialSpool statementOnly checkConstantsOnly withoutFib generatedIndex inputs selectedUtilities
 
 end LeanInformationAudit.InspectorProducer
 

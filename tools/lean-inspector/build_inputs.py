@@ -47,7 +47,9 @@ def prepare(roots, directory, need_inputs=True):
     else:
         targets = programs
         if need_inputs:
-            targets = [*targets, *TOOLS, 'regInspector/auricFibAnalysis']
+            targets = [*targets, *TOOLS]
+            if publication.selection.Selection(ROOT).full_report_fib:
+                targets.append('regInspector/auricFibAnalysis')
         commands = [['bash', 'tools/scripts/worktree/lean-cache-run.sh', '--build-report-programs',
                      *sorted(set(targets))]]
     if not roots and need_inputs:
@@ -97,6 +99,24 @@ def checked_report(directory, output, seed, program_logs, work_file, *, try_seed
                    STRATALINT_LEAN_BUILD_WORK_FILE=str(directory / 'analysis-work.json'))
         subprocess.run(['make', 'lean-report', 'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build',
                         'LEAN_REPORT=' + str(candidate)], cwd=ROOT, env=env, check=True)
+    if not publication.selection.Selection(ROOT).full_report_fib:
+        with reuse.publication_guard(ROOT, output):
+            publish_checked(candidate, output, captured, reused, seed_commit)
+    else:
+        check_fib_and_publish(directory, candidate, output, captured, reused, seed, seed_commit)
+    try:
+        logs.mkdir(parents=True, exist_ok=True)
+        for path in program_logs.glob('programs.*.log'):
+            shutil.copyfile(path, logs / path.name)
+        phases = [] if reused else ['report']
+        if (program_logs / 'programs.exit.log').exists():
+            phases.append('programs')
+        build_work.record(ROOT, logs, work_file, *phases)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        print('LEAN_BUILD_WORK_UNKNOWN ' + str(error), file=sys.stderr)
+
+
+def check_fib_and_publish(directory, candidate, output, captured, reused, seed, seed_commit):
     # Keep stable comparison data across regressions that build transient Lean fixtures.
     previous = directory / 'previous' / publication.RAW
     previous.parent.mkdir()
@@ -138,21 +158,15 @@ def checked_report(directory, output, seed, program_logs, work_file, *, try_seed
                 else current.samefile(observed))
             if not unchanged:
                 raise ValueError('published report changed during regression check')
-        if reuse.capture(ROOT) != captured:
-            raise ValueError('inputs changed during report check')
-        identity = publication.publish(candidate, output, publication.coordinates(ROOT), ROOT, validate=False)
-        publication.member(output, reuse.SUFFIX).unlink(missing_ok=True)
-        reuse._seal(ROOT, output, captured, identity, checked=True, reused=reused, seed_commit=seed_commit)
-    try:
-        logs.mkdir(parents=True, exist_ok=True)
-        for path in program_logs.glob('programs.*.log'):
-            shutil.copyfile(path, logs / path.name)
-        phases = [] if reused else ['report']
-        if (program_logs / 'programs.exit.log').exists():
-            phases.append('programs')
-        build_work.record(ROOT, logs, work_file, *phases)
-    except (OSError, ValueError, TypeError, KeyError) as error:
-        print('LEAN_BUILD_WORK_UNKNOWN ' + str(error), file=sys.stderr)
+        publish_checked(candidate, output, captured, reused, seed_commit)
+
+
+def publish_checked(candidate, output, captured, reused, seed_commit):
+    if reuse.capture(ROOT) != captured:
+        raise ValueError('inputs changed during report check')
+    identity = publication.publish(candidate, output, publication.coordinates(ROOT), ROOT, validate=False)
+    publication.member(output, reuse.SUFFIX).unlink(missing_ok=True)
+    reuse._seal(ROOT, output, captured, identity, checked=True, reused=reused, seed_commit=seed_commit)
 
 
 def compile_scope(roots):
