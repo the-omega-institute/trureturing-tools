@@ -255,7 +255,7 @@ Scribe 检查使用对应批次的报告，`check-current` 和适用的 `check-d
 
 独立的整库缓存 producer 和本地全量数学门使用 `make check-lean-report FULL_BUILD=1`。
 单独运行 `make lean-report FULL_BUILD=1` 时，`inspect.sh` 通过预编译的 StrataLint.Lean DLL 取得 utility 输入，
-可用 `STRATALINT_LEAN_PRODUCER_DLL` 指定该 DLL 的绝对路径。[缓存 producer](../../.github/actions/lean-cache-produce/action.yml)
+可用 `STRATALINT_LEAN_PRODUCER_DLL` 指定该 DLL 的绝对路径。[缓存 producer](../ci/actions/lean-cache-produce/action.yml)
 
 离线 truth/export 与 bundle 验证工具保留,不提供
 自动选择 CI 来源或发布资格的链路。

@@ -76,7 +76,7 @@ public sealed class RuleEngineCapacityTests
 
         var diagnostics = RuleCatalog.Default.EvaluateSingle(RuleId.CreateKnown(3), fixture.Build()).Diagnostics;
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Path == "tools/ci/ci-checks.json"
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Path == (manifest is null ? "tools/ci/ci-checks.json" : "Meta/ci-checks.json")
             && diagnostic.AdmissionEffect == AdmissionEffect.Block && diagnostic.Message.Contains("SL-003", StringComparison.Ordinal));
     }
 

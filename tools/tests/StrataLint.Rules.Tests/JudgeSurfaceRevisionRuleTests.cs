@@ -578,6 +578,16 @@ public sealed class JudgeSurfaceRevisionRuleTests
         Assert.Contains("does not parse", finding.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("tools/ci/workflows/ci-current.yml")]
+    [InlineData("tools/ci/actions/lean-cache-produce/action.yml")]
+    public void ReleasedActionsUseTheStructuredYamlScanner(string path)
+    {
+        var finding = Assert.Single(Evaluate(path, "steps: ["));
+        Assert.Equal(path, finding.Path);
+        Assert.Contains("does not parse", finding.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void RunWithANonScalarValueIsFailClosed()
     {

@@ -1,7 +1,7 @@
 name: CI
 
 # The required CI workflow. `detect` lists the changed paths and decides from
-# the unit patterns in Meta/ci-units.json which units the change hits; every unit is a
+# the unit patterns in the installed CI registry which units the change hits; every unit is a
 # job that runs only when hit, and `required` is the one required check: it is
 # green when detection succeeded and every unit ran exactly when hit and passed.
 # Detection validates and routes the complete changed-path list without a path-count cutoff.

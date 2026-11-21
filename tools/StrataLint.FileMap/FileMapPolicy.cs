@@ -258,6 +258,7 @@ internal static partial class FileMapPolicy
             : [new FileMapFinding("FILEMAP-POLICY-INVALID", FileMapLoader.RelativePath,
                 ((PolicyLoadOutcome.InfrastructureFailure)policy).Message)];
 
+        var release = ToolsRelease.Current(repositoryRoot);
         return InspectCoverage(manifest, selected)
             .Concat(InspectPatternPopulation(manifest, paths, selectedManifest.Entries))
             .Concat(pathFindings)
@@ -269,7 +270,7 @@ internal static partial class FileMapPolicy
                 paths,
                 GeneratedArtifactInventory.Create(documentPaths), scope is { Inventory: true } ? null : selectedPaths, scope?.RelatedPatterns, indexedPaths))
             .Concat(InspectDeclaredModes(selectedManifest, candidateModes))
-            .Concat(InspectDirectoryKinds(manifest, selected, paths))
+            .Concat(InspectDirectoryKinds(manifest, selected, paths, release is null ? null : release.Files.ContainsKey))
             .Concat(dependencyFindings)
             .Concat(InspectGitIgnore(File.ReadAllLines(Absolute(repositoryRoot, ".gitignore"))))
             .OrderBy(static finding => finding.Path, StringComparer.Ordinal)
@@ -559,7 +560,8 @@ internal static partial class FileMapPolicy
     internal static IReadOnlyList<FileMapFinding> InspectDirectoryKinds(
         FileMapManifest manifest,
         IEnumerable<string> paths,
-        IEnumerable<string>? residencePaths = null)
+        IEnumerable<string>? residencePaths = null,
+        Func<string, bool>? isReleaseMember = null)
     {
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(paths);
@@ -602,7 +604,8 @@ internal static partial class FileMapPolicy
             if (path.StartsWith("tools/", StringComparison.Ordinal)
                 && !path.StartsWith("tools/tests/", StringComparison.Ordinal)
                 && kind is FileMapKind.Data
-                && !entry.ResidenceViolation)
+                && !entry.ResidenceViolation
+                && !IsReleasedCiRegistry(path, entry, isReleaseMember))
             {
                 findings.Add(new FileMapFinding(
                     "FILEMAP-DATA-RESIDENCE",
@@ -630,6 +633,20 @@ internal static partial class FileMapPolicy
         }
 
         return findings;
+    }
+
+    // These registries are installed from the pinned release and retain their own data verifiers.
+    private static bool IsReleasedCiRegistry(string path, FileMapEntry entry, Func<string, bool>? isReleaseMember)
+    {
+        var verifier = path switch
+        {
+            "tools/ci/ci-units.json" => "CiUnitContract",
+            "tools/ci/ci-cache-paths.json" => "NativeArchivePaths",
+            RegisteredCheckMaterials.ManifestPath => "RegisteredCheckMaterials",
+            _ => null,
+        };
+        return verifier is not null && entry.Pattern == path && entry.AdmissionPlane == FileMapAdmissionPlane.Judge
+            && entry.VerifiedBy.Contains(verifier) && isReleaseMember?.Invoke(path) == true;
     }
 
     internal static IReadOnlyList<string> ResidenceViolations(

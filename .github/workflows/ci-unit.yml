@@ -8,7 +8,7 @@ on:
   workflow_call:
     inputs:
       unit:
-        description: Unit identity in Meta/ci-units.json
+        description: Unit identity in the installed CI registry
         type: string
         required: true
       timeout-minutes:

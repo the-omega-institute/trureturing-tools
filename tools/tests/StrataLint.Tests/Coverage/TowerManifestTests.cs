@@ -83,6 +83,35 @@ public sealed class TowerManifestTests
         Assert.Equal(2, accepted.Manifest.Checks.Count(check => check.Subject == "checks"));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ReleasedChecksComeFromTheWorkflowAtThePinnedRevision(bool matchingRevision)
+    {
+        var revision = new string('a', 40);
+        var pinRevision = matchingRevision ? revision : new string('b', 40);
+        var syntax = Syntax(Component("checks", "ci-jobs", ["current"], "bootstrap-pr-1"));
+        var snapshot = Snapshot(
+            (".github/workflows/ci-current.yml", $$$"""
+                on: {pull_request: {branches: [dev]}, push: {branches: [dev]}}
+                jobs:
+                  checks:
+                    uses: the-omega-institute/trureturing-tools/.github/workflows/ci-current.yml@{{{revision}}}
+                """),
+            ("Meta/tools-release.json", $$"""{"workflow_sha":"{{pinRevision}}"}"""),
+            ("tools/ci/workflows/ci-current.yml", """
+                on: workflow_call
+                jobs: {current: {runs-on: fixture, steps: [{run: 'dotnet judge.dll check-delta'}]}}
+                """));
+
+        var outcome = TowerManifestValidator.Validate(syntax, snapshot, Catalog());
+        if (matchingRevision)
+            Assert.IsType<TowerValidationOutcome.Accepted>(outcome);
+        else
+            Assert.Contains(Assert.IsType<TowerValidationOutcome.Rejected>(outcome).Findings,
+                finding => finding.Code == "TOWER-CI-JOB");
+    }
+
     [Fact]
     public void YamlDeclaresMembersAndEdgesWithoutEmbeddingValidationSemantics()
     {

@@ -104,7 +104,7 @@ public sealed class AddressesAndFormulasScopingTests
         var result = Execute(fixture, UnrelatedPath);
 
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.RuleId == RuleId.CreateKnown(15)
-            && diagnostic.Path == "tools/ci/ci-checks.json"
+            && diagnostic.Path == (manifest is null ? "tools/ci/ci-checks.json" : "Meta/ci-checks.json")
             && diagnostic.Message.Contains("registration", StringComparison.Ordinal));
     }
 
