@@ -720,7 +720,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
     def test_ordinary_seed_allows_resume_without_certifying_an_incomplete_report(self):
         owner = self.resume_setup()
         self.work(0, 0)
-        action = (CACHE.parents[3] / "tools/ci/actions/lean-cache-produce/action.yml").read_text()
+        action = (CACHE.parents[3] / ".github/actions/lean-cache-produce/action.yml").read_text()
 
         def selected(step, values):
             block = next(block for block in action.split("\n    - ") if block.startswith(step + "\n"))

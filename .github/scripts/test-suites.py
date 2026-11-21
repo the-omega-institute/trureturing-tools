@@ -1,5 +1,6 @@
 """Exercise the producer's test suites and its pinned consumer contracts."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -19,6 +20,27 @@ STANDALONE = (
     "StrataLint.TestEvidence.Tests",
     "Trureturing.Truth.Tests",
 )
+
+FOURIER_MODULES = ("D5.S3.Fourier.IntegerCharacterCoercivity",
+                   "D5.S3.TotalVariation.PrimitiveBridgeCancellation")
+
+
+def lake_modules(*targets):
+    command = ["lake", "-d", "tools/lean-inspector-reg", "--json", "query", *targets]
+    output = subprocess.check_output(command, text=True, env=dict(os.environ, MATHLIB_NO_CACHE_ON_UPDATE="1"))
+    return {module for line in output.splitlines() for module in json.loads(line)}
+
+
+def prepare_mathlib(roots, compiled_judge):
+    modules = set(roots)
+    if compiled_judge:
+        modules.update(lake_modules("regInspector/LeanInformationAuditRegTests:modules"))
+        modules.update(("Inspector", "LeanInformationAudit.Contract.InputDiscovery"))
+    imports = lake_modules(*(f"+{module}:transImports" for module in sorted(modules)))
+    mathlib = ["Mathlib"] if "Mathlib" in imports else sorted(module for module in imports if module.startswith("Mathlib."))
+    if mathlib:
+        print(f"Preparing the pinned Mathlib closure ({len(mathlib)} modules)", flush=True)
+        subprocess.run(["lake", "exe", "cache", "get", *mathlib], check=True)
 
 
 def check(*arguments):
@@ -47,13 +69,15 @@ def contract(shard, shard_count):
     if shard == 0 or any(project.stem in lean_projects for project in selected):
         check("bash", "tools/scripts/workflow/install-lean-toolchain.sh", "lean-toolchain")
         os.environ["PATH"] = str(Path.home() / ".elan/bin") + os.pathsep + os.environ["PATH"]
+    fourier = any(project.stem == "StrataLint.DeclaredTemplate.Tests" for project in selected)
+    roots = [prefix + module for module in FOURIER_MODULES for prefix in ("", "Reg.")] if fourier else []
+    if roots or shard == 0:
+        prepare_mathlib(roots, shard == 0)
     for project in selected:
         if project.stem == "StrataLint.DeclaredTemplate.Tests":
-            # Prepare the two real source/mirror pairs before the assertion's bounded report reader.
-            modules = ("D5.S3.Fourier.IntegerCharacterCoercivity", "D5.S3.TotalVariation.PrimitiveBridgeCancellation")
-            reports = [f"+{prefix}{module}:report" for module in modules for prefix in ("", "Reg.")]
+            check("make", "lean-report-prepare", "LEAN_TARGETS=" + " ".join(roots))
             check("bash", "tools/scripts/worktree/lean-cache-run.sh", "lake", "-d",
-                  "tools/lean-inspector-reg", "build", *reports)
+                  "tools/lean-inspector-reg", "build", *(f"+{module}:report" for module in roots))
         check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly", str(project))
     if shard == 0:
         check("make", "-C", "tools", "selftest")
