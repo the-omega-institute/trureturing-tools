@@ -9,6 +9,7 @@ import hashlib
 import sys
 import subprocess
 import tempfile
+import tarfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -316,7 +317,7 @@ class VolumeReleases(unittest.TestCase):
             out.seek(-1, 1)
             out.write(bytes([value ^ 17]))
         dest = self.area / "corrupt"
-        with self.assertRaises((OSError, ValueError, EOFError)):
+        with self.assertRaises((OSError, ValueError, EOFError, tarfile.ReadError)):
             volumes.restore(self.pool, "one", self.project, dest)
         self.assertFalse(dest.exists())
 
