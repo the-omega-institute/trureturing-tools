@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from contextlib import ExitStack, redirect_stdout
 import io
+import hashlib
 import sys
 import subprocess
 import tempfile
@@ -20,6 +21,38 @@ def run(root, *args):
     if result.returncode:
         raise AssertionError(f"{args} exited {result.returncode}: {result.stdout}{result.stderr}")
     return result.stdout
+
+
+class VolumeDownloads(unittest.TestCase):
+    def test_full_alternating_frames_use_two_unbounded_volume_transfers(self):
+        import lean_cache_release as release
+        import lean_release_volume_remote as remote
+
+        frames = [i.to_bytes(4, "big") for i in range(2048)]
+        payload = b"".join(frames)
+        blobs = [b"".join(frames[::2]), b"".join(frames[1::2])]
+        keys = [hashlib.sha256(blob).hexdigest() for blob in blobs]
+        manifest = {"volume_scope": "fixture", "archive_bytes": len(payload),
+                    "archive_sha256": hashlib.sha256(payload).hexdigest()}
+        tree = {"volumes": {key: len(blob) for key, blob in zip(keys, blobs, strict=True)},
+                "members": [{"offset": i * 4} for i in range(len(frames))],
+                "locations": [[[keys[i % 2], (i // 2) * 4, 4]] for i in range(len(frames))]}
+        downloads = []
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory)
+            def gh(deadline, *args):
+                self.assertIsNone(deadline)
+                key = args[-1]
+                self.assertEqual(list(stage.glob("[0-9a-f]" * 64)), [])
+                (stage / key).write_bytes(blobs[keys.index(key)])
+                downloads.append(key)
+            with patch.object(release, "gh", side_effect=gh), patch.object(remote, "asset_for", return_value={}), \
+                    patch.object(release, "receipt") as receipt:
+                remote.download_full(release, stage, manifest, tree, release.operation_deadline())
+            self.assertEqual((stage / "lean-members").read_bytes(), payload)
+            self.assertCountEqual(downloads, keys)
+            self.assertEqual(receipt.call_args.kwargs, {"payload_requests": 2, "payload_bytes": 8192,
+                "logical_bytes": 8192, "staged_payload_bound": 12288})
 
 
 class VolumeReleases(unittest.TestCase):
@@ -211,6 +244,66 @@ class VolumeReleases(unittest.TestCase):
             self.assertIn('"status":"hit"', installed.getvalue())
             run(rolling, "lake", "--no-build", "build", "@fixture/+D5.A:olean")
             self.assertFalse((rolling / ".lake/build/lib/lean/D5/B.olean").exists())
+
+            import lean_release_volume_remote as remote
+            source_ref = "refs/heads/integration-ci-volume-tests"
+            verified = {"source_ref": source_ref}
+            original_scoped = release.restore_scoped
+            def fixture_probe(*args, **options):
+                return original_scoped(*args, **dict(options, targets=["D5.A"]))
+            stack.enter_context(patch.object(release, "restore_scoped", side_effect=fixture_probe))
+            responses = self.area / "run-identity.json"
+            api = {}
+            stack.enter_context(patch.dict(os.environ, {"FAKE_VERIFICATION_API": str(responses)}))
+            vtags = {}
+            prefix = release.prefix(partition, key, True, indexed="volumes")
+            for num, test_id in ((501, "other-test"), (502, "pair"), (503, "pair")):
+                kind = str(num)
+                vtag = prefix + f"ci-{num}-1"
+                vtags[num] = vtag
+                if num == 503:
+                    self.write("D5/B.lean", "def valB : Nat := 98765\n")
+                    self.build()
+                    self.commit("B double prime")
+                author = run(self.project, "git", "rev-parse", "HEAD").strip()
+                api[f"repos/fixture/private/actions/runs/{num}/attempts/1"] = {
+                    "id": num, "run_attempt": 1, "path": ".github/workflows/ci-publication-verify.yml",
+                    "repository": {"full_name": "fixture/private"}, "head_sha": author,
+                    "head_branch": source_ref.removeprefix("refs/heads/")}
+                responses.write_text(json.dumps(api))
+                identity.return_value = {"producer_commit_sha": author, "publication_id": f"ci-{num}-1",
+                                         "source_ref": source_ref, "workflow_run_id": kind, "workflow_run_attempt": "1"}
+                options = {"LEAN_CACHE_VOLUME_TEST_ID": test_id}
+                if num == 503:
+                    options["LEAN_CACHE_VOLUME_RETIRE_TAG"] = vtags[502]
+                with patch.dict(os.environ, options), redirect_stdout(io.StringIO()) as output:
+                    code = release.publish(self.project, partition, verification=verified, build_report=False, indexed=True)
+                self.assertEqual(code, 0, output.getvalue())
+            retired = json.loads(next(x for x in output.getvalue().splitlines()
+                                      if x.startswith("LEAN_CACHE_VOLUME-RETIRE ")).split(" ", 1)[1])
+            self.assertEqual((retired["tag"], retired["source_ref"], retired["test_id"]),
+                             (vtags[502], source_ref, "pair"))
+            self.assertGreater(retired["retired_snapshot_payload_bytes"], 0)
+            self.assertFalse((self.pool / vtags[502]).exists())
+            self.assertTrue((self.pool / vtags[501]).exists())
+            manifest = json.loads((self.pool / vtags[503] / release.MANIFEST).read_bytes())
+            with self.assertRaisesRegex(ValueError, "same verification test"):
+                remote.retire_verification(release, partition, key, vtags[503], manifest, vtags[501],
+                                           release.operation_deadline())
+            self.assertTrue((self.pool / vtags[501]).exists())
+            second = self.consumer("verification-empty")
+            stage = self.area / "fetch-verification"
+            stage.mkdir()
+            self.assertTrue(release.restore_snapshot(second, partition, vtags[503], stage, release.operation_deadline(),
+                expected={"producer_commit_sha": author}, cache_key=key))
+            run(second, "lake", "--no-build", "build", *[f"@fixture/+D5.{n}:olean" for n in "ABC"])
+            scoped = self.consumer("verification-scoped")
+            stage = self.area / "fetch-verification-scoped"
+            stage.mkdir()
+            result = original_scoped(scoped, partition, vtags[503], stage, release.operation_deadline(),
+                cache_key=key, producer=author, targets=["D5.B"], verification=True)
+            self.assertGreater(result[1], 0)
+            run(scoped, "lake", "--no-build", "build", "@fixture/+D5.B:olean")
 
     def test_damaged_physical_member_leaves_no_partial_install(self):
         volumes.publish(self.pool, "one", self.project)

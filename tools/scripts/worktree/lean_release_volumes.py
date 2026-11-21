@@ -68,6 +68,8 @@ def read_tree(path, manifest):
             any(not index.valid_digest(digest) or type(size) is not int or not 0 < size <= VOLUME_BYTES
                 for digest, size in sizes.items())):
         raise ValueError("invalid physical volume inventory")
+    if sum(sizes.values()) > 2 * manifest["archive_bytes"]:
+        raise ValueError("physical volume inventory exceeds compaction bound")
     used = set()
     for row, spans in zip(rows, tree["locations"], strict=True):
         total = 0
@@ -124,6 +126,7 @@ def materialize_delta(stage, metadata, rows, previous, chunk_bytes, delta, deadl
     projected_parts = len(sizes) + (delta_bytes + chunk_bytes - 1) // chunk_bytes
     compact = (projected_parts > MAX_VOLUMES or
                sum(sizes.values()) + delta_bytes > 2 * metadata["archive_bytes"])
+    peak = metadata["archive_bytes"]
     if compact or delta_bytes == metadata["archive_bytes"]:
         locations = [None] * len(rows)
         sizes = {}
@@ -131,10 +134,16 @@ def materialize_delta(stage, metadata, rows, previous, chunk_bytes, delta, deadl
     elif delta_bytes:
         staged = delta
         with MultipartArchiveOutput(delta, "delta", chunk_bytes, deadline) as out:
+            remaining_source = metadata["archive_bytes"]
             for row, spans in zip(rows, locations, strict=True):
-                if spans is None:
-                    for part, start, count in index.volume_ranges(metadata["parts"], row["offset"], row["bytes"]):
-                        copy_range(stage / part["name"], start, count, out)
+                for part, start, count in index.volume_ranges(metadata["parts"], row["offset"], row["bytes"]):
+                    source = stage / part["name"]
+                    if spans is None:
+                        copy_range(source, start, count, out)
+                        peak = max(peak, remaining_source + out.tell())
+                    if start + count == part["bytes"]:
+                        source.unlink()
+                        remaining_source -= part["bytes"]
         parts = out.metadata()["parts"]
     else:
         parts, staged = [], delta
@@ -145,7 +154,7 @@ def materialize_delta(stage, metadata, rows, previous, chunk_bytes, delta, deadl
                               for part, start, count in index.volume_ranges(parts, written, row["bytes"])]
             written += row["bytes"]
     sizes.update({part["sha256"]: part["bytes"] for part in parts})
-    return {"members": rows, "locations": locations, "volumes": sizes}, staged, parts, written, compact
+    return {"members": rows, "locations": locations, "volumes": sizes}, staged, parts, written, compact, peak
 
 
 def publish(store, tag, root, base=None, chunk_bytes=VOLUME_BYTES):
@@ -168,7 +177,7 @@ def publish(store, tag, root, base=None, chunk_bytes=VOLUME_BYTES):
             previous = read_snapshot(store, base) if base else None
             delta = stage / "delta"
             delta.mkdir()
-            tree, payloads, parts, written, compact = materialize_delta(
+            tree, payloads, parts, written, compact, peak = materialize_delta(
                 stage, metadata, rows, previous, chunk_bytes, delta)
             uploaded = []
             for part in parts:
@@ -190,7 +199,8 @@ def publish(store, tag, root, base=None, chunk_bytes=VOLUME_BYTES):
             new_tag.rename(destination)
             return {"payload_bytes": sum(part["bytes"] for part in uploaded), "metadata_bytes": meta_bytes,
                     "new_volumes": [part["sha256"] for part in uploaded],
-                    "reused_bytes": metadata["archive_bytes"] - written, "compacted": compact}
+                    "reused_bytes": metadata["archive_bytes"] - written, "compacted": compact,
+                    "peak_staged_payload_bytes": peak}
 
 
 def restore(store, tag, root, destination, targets=()):

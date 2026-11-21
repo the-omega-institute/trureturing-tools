@@ -718,6 +718,8 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
                 confirmed.mkdir()
                 snapshot_manifest(partition, tag, confirmed, deadline, expected=metadata, metadata=current,
                                   verification=verification is not None, cache_key=cache_key)
+                if physical and verification is not None and (old_tag := os.environ.get("LEAN_CACHE_VOLUME_RETIRE_TAG")):
+                    remote.retire_verification(sys.modules[__name__], partition, cache_key, tag, metadata, old_tag, deadline)
                 if verification is None:
                     if physical:
                         pruned, prune_error = remote.prune(sys.modules[__name__], partition, cache_key, tag,
@@ -780,7 +782,8 @@ def snapshot_manifest(partition, tag, stage, deadline, expected=None, verificati
     if physical:
         import lean_release_volume_remote as remote
 
-        scope = remote.namespace(partition, cache_key, verification, publication_id, sys.modules[__name__])
+        scope = remote.namespace(partition, cache_key, verification, publication_id, sys.modules[__name__],
+                                 test_id=manifest.get("volume_test_id"), source_ref=manifest.get("source_ref"))
         if (manifest.get("volume_scope") != scope or "parts" in manifest
                 or type(manifest.get("archive_bytes")) is not int
                 or not 0 < manifest["archive_bytes"] <= CHUNK_BYTES * 100):
@@ -1026,8 +1029,7 @@ def restore_snapshot(root, partition, tag, stage, deadline, expected=None, refre
             import lean_release_volume_remote as remote
 
             tree = remote.load_tree(sys.modules[__name__], tag, stage, manifest, deadline)
-            with deadline.pause():
-                parts = remote.download_full(sys.modules[__name__], stage, manifest, tree, operation_deadline())
+            parts = remote.download_full(sys.modules[__name__], stage, manifest, tree, deadline)
         elif local_assets is None:
             # A multi-gigabyte Release asset is a streaming transport. Its
             # duration depends on the link and must not consume the bounded
