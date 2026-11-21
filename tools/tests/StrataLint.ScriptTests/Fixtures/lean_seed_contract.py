@@ -220,8 +220,36 @@ class TransportTests(ReleaseLegacyCases, ReleaseVerificationCases, ReleaseTransp
                 patch("lean_cache_release.gh") as transport:
             result = restore_scoped(self.root, "fixture", "tag", self.root, None,
                                     cache_key={}, producer="", targets=["D5.Fixture"], verification=True)
-        self.assertEqual((0, 0), result)
+        self.assertIsNone(result)
         transport.assert_not_called()
+
+    def test_rolling_scoped_fetch_chooses_the_first_applicable_snapshot(self):
+        import lean_cache_release as release
+
+        tags = [("partition", f"tag-{index}") for index in range(7)]
+        # A compatible snapshot may have zero missing modules on a warm checkout.
+        cases = (([None, (0, 0)], 2, 0), ([None, (3, 123)], 2, 0),
+                 ([(0, 0)], 1, 0), ([None] * 7, 5, 0),
+                 ([None, ValueError("corrupt index")], 2, 1))
+        for outcomes, expected_attempts, expected_status in cases:
+            with self.subTest(outcomes=outcomes), \
+                    patch.object(release, "release_key", return_value={}), \
+                    patch.object(release, "snapshot_candidates", return_value=tags[:len(outcomes)]), \
+                    patch.object(release, "restore_scoped", side_effect=outcomes) as restore:
+                status = release.fetch_locked(self.root, "partition", None, indexed=True, targets=["D5.A"])
+                self.assertEqual(expected_status, status)
+                self.assertEqual([tag for _, tag in tags[:expected_attempts]],
+                                 [call.args[2] for call in restore.call_args_list])
+
+        with patch.object(release, "release_key", return_value={}), \
+                patch.object(release, "snapshot_partition", return_value="partition"), \
+                patch.object(release, "snapshot_candidates") as listing, \
+                patch.object(release, "restore_scoped", return_value=None) as restore:
+            status = release.fetch_locked(self.root, "partition", None, approved_tag="pinned",
+                                          approved_producer="a" * 40, indexed=True, targets=["D5.A"])
+            self.assertEqual(0, status)
+            self.assertEqual(["pinned"], [call.args[2] for call in restore.call_args_list])
+            listing.assert_not_called()
 
     def local_environment(self, **changes):
         return dict(GITHUB_ACTIONS="false", GITHUB_EVENT_NAME="", GITHUB_REF="", GITHUB_REPOSITORY="",

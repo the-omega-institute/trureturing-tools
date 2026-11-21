@@ -659,7 +659,7 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
                         modules, transferred = restore_scoped(root, partition, tag, transport, deadline,
                             cache_key=cache_key, producer=identity["producer_commit_sha"],
                             targets=["D5.S0.Tower.GoldenGapWord"], verification=True,
-                            destination_root=control, release_metadata=draft, require_complete=True)
+                            destination_root=control, release_metadata=draft, require_complete=True) or (0, 0)
                         if not modules or not 0 < transferred < metadata["archive_bytes"]:
                             raise ValueError("indexed verification did not restore a strict subset")
                         recovered = control / ".lake/build"
@@ -841,7 +841,8 @@ def download_range(asset, offset, length, output, deadline):
 
 
 def restore_scoped(root, partition, tag, stage, deadline, *, cache_key, producer, targets, verification,
-                   destination_root=None, release_metadata=None, require_complete=False):
+                   destination_root=None, release_metadata=None, require_complete=False) -> tuple[int, int] | None:
+    """Return installed module and byte counts, or None for an incompatible workspace."""
     from lean_artifact_inventory import lake_configuration
     import lean_release_index as indexed_release
 
@@ -853,7 +854,7 @@ def restore_scoped(root, partition, tag, stage, deadline, *, cache_key, producer
         raise ValueError("scoped restore requires an indexed Release")
     if lake_configuration(root) != manifest["lake_inputs_sha256"]:
         receipt("fetch", "scoped-miss", resolved=tag, reason="Lake workspace configuration changed")
-        return 0, 0
+        return None
     index = manifest["index"]
     gh(deadline, "release", "download", tag, "--repo", REPO, "--dir", str(stage), "--pattern", index["name"])
     index_path = stage / index["name"]
@@ -1281,6 +1282,7 @@ def fetch_locked(root, partition, deadline, refresh_stale=False, approved_tag=No
     fetch_staging_cleanup(root, now=time.time())
     reason = "no published snapshot in this partition"
     final_error = None
+    skipped_configuration = False
     cache_key = release_key(root)
     try:
         if approved_tag is not None:
@@ -1305,9 +1307,12 @@ def fetch_locked(root, partition, deadline, refresh_stale=False, approved_tag=No
                 temporary = tempfile.TemporaryDirectory(prefix="lean-fetch-")
                 try:
                     if targets:
-                        restore_scoped(root, source, tag, pathlib.Path(temporary.name), deadline,
-                                       cache_key=cache_key, producer=approved_producer, targets=targets,
-                                       verification=False)
+                        restored = restore_scoped(root, source, tag, pathlib.Path(temporary.name), deadline,
+                                                  cache_key=cache_key, producer=approved_producer, targets=targets,
+                                                  verification=False)
+                        if restored is None:
+                            skipped_configuration = True
+                            continue
                     else:
                         restore_snapshot(root, source, tag, pathlib.Path(temporary.name), deadline,
                             refresh_stale=refresh_stale, cache_key=cache_key, approved_producer=approved_producer,
@@ -1328,6 +1333,8 @@ def fetch_locked(root, partition, deadline, refresh_stale=False, approved_tag=No
                 receipt("fetch", "miss", _error=error, reason=reason, resolved=tag, partition=partition)
                 if approved_tag is not None or isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
                     break
+        if skipped_configuration and final_error is None:
+            return 0
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         reason, final_error = str(error), error
     receipt("fetch", "miss", _error=final_error, reason=reason, partition=partition)
