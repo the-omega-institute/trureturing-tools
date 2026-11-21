@@ -125,55 +125,7 @@ class HashOutput:
         return len(block)
 
 
-def pack_volumes(root, stage, previous, chunk_bytes, save_part, deadline=None):
-    """Index a logical snapshot while staging at most one confirmed physical volume."""
-    if not 0 < chunk_bytes <= VOLUME_BYTES:
-        raise ValueError("invalid physical volume size")
-    config = lake_configuration(root)
-    modules, groups = index.frame_inventory(root)
-    rows, sizes = [], {}
-    compact = False
-    compatible = previous is not None and previous[0]["lake_inputs_sha256"] == config
-    if compatible:
-        logical = HashOutput()
-        for name, artifacts in groups:
-            rows.append(index.write_frame(root, modules, name, artifacts, logical, deadline, stable_timestamps=True))
-        logical_bytes, logical_sha = logical.size, logical.digest.hexdigest()
-        old_tree = previous[1]
-        reused = {row["sha256"]: spans for row, spans in zip(old_tree["members"], old_tree["locations"], strict=True)}
-        locations = [reused.get(row["sha256"]) for row in rows]
-        changed = sum(row["bytes"] for row, spans in zip(rows, locations, strict=True) if spans is None)
-        sizes = {key: old_tree["volumes"][key] for spans in locations if spans for key, _, _ in spans}
-        compact = (len(sizes) + (changed + chunk_bytes - 1) // chunk_bytes > MAX_VOLUMES
-                   or sum(sizes.values()) + changed > 2 * logical_bytes)
-        if compact:
-            sizes.clear()
-            locations = [None] * len(rows)
-    else:
-        if not groups:
-            raise ValueError("member index does not cover archive")
-        locations = [None] * len(groups)
-
-    parts = []
-    if any(spans is None for spans in locations):
-        with MultipartArchiveOutput(stage, "volume", chunk_bytes, deadline, on_part=save_part) as output:
-            for pos, (name, artifacts) in enumerate(groups):
-                if locations[pos] is not None:
-                    continue
-                row = index.write_frame(root, modules, name, artifacts, output, deadline, stable_timestamps=True)
-                if compatible:
-                    row["offset"] = rows[pos]["offset"]
-                    if row != rows[pos]:
-                        raise ValueError("compiler frame changed between measurement and upload")
-                else:
-                    rows.append(row)
-        parts = output.parts
-        if not compatible:
-            logical_bytes, logical_sha = output.archive_bytes, output.archive_hash.hexdigest()
-
-    index.validate_members(rows, logical_bytes)
-    if not 0 < logical_bytes <= MAX_VOLUMES * VOLUME_BYTES:
-        raise ValueError("invalid logical volume archive size")
+def finish_tree(rows, locations, sizes, parts):
     written = 0
     for pos, row in enumerate(rows):
         if locations[pos] is None:
@@ -182,9 +134,68 @@ def pack_volumes(root, stage, previous, chunk_bytes, save_part, deadline=None):
             written += row["bytes"]
     sizes.update({part["sha256"]: part["bytes"] for part in parts})
     tree = {"members": rows, "locations": locations, "volumes": sizes}
-    contents = {"archive_bytes": logical_bytes, "archive_sha256": logical_sha, "lake_inputs_sha256": config}
     peak = max((part["bytes"] for part in parts), default=0)
+    return tree, written, peak
+
+
+def pack_measured(stage, old_tree, rows, contents, chunk_bytes, save_part, emit, deadline):
+    """Write the selected frames of a measured logical stream and verify pass two."""
+    logical_bytes = contents["archive_bytes"]
+    index.validate_members(rows, logical_bytes)
+    if not 0 < chunk_bytes <= VOLUME_BYTES or not 0 < logical_bytes <= MAX_VOLUMES * VOLUME_BYTES:
+        raise ValueError("invalid logical or physical volume size")
+    reused = {row["sha256"]: spans for row, spans in zip(old_tree["members"], old_tree["locations"], strict=True)}
+    locations = [reused.get(row["sha256"]) for row in rows]
+    changed = sum(row["bytes"] for row, spans in zip(rows, locations, strict=True) if spans is None)
+    sizes = {key: old_tree["volumes"][key] for spans in locations if spans for key, _, _ in spans}
+    compact = (len(sizes) + (changed + chunk_bytes - 1) // chunk_bytes > MAX_VOLUMES
+               or sum(sizes.values()) + changed > 2 * logical_bytes)
+    if compact:
+        if (logical_bytes + chunk_bytes - 1) // chunk_bytes > MAX_VOLUMES:
+            raise ValueError("logical snapshot cannot fit the physical volume limit")
+        sizes.clear()
+        locations = [None] * len(rows)
+
+    parts = []
+    selected = [pos for pos, spans in enumerate(locations) if spans is None]
+    if selected:
+        with MultipartArchiveOutput(stage, "volume", chunk_bytes, deadline, on_part=save_part) as output:
+            for pos, row in zip(selected, emit(selected, output), strict=True):
+                if dict(row, offset=rows[pos]["offset"]) != rows[pos]:
+                    raise ValueError("compiler frame changed between measurement and upload")
+        parts = output.parts
+    tree, written, peak = finish_tree(rows, locations, sizes, parts)
     return contents, tree, written, compact, peak
+
+
+def pack_volumes(root, stage, previous, chunk_bytes, save_part, deadline=None):
+    """Index a logical snapshot while staging at most one confirmed physical volume."""
+    if not 0 < chunk_bytes <= VOLUME_BYTES:
+        raise ValueError("invalid physical volume size")
+    config = lake_configuration(root)
+    modules, groups = index.frame_inventory(root)
+
+    def emit(selected, output):
+        for pos in selected:
+            name, artifacts = groups[pos]
+            yield index.write_frame(root, modules, name, artifacts, output, deadline, stable_timestamps=True)
+
+    if previous is not None and previous[0]["lake_inputs_sha256"] == config:
+        logical = HashOutput()
+        rows = list(emit(range(len(groups)), logical))
+        contents = {"archive_bytes": logical.size, "archive_sha256": logical.digest.hexdigest(),
+                    "lake_inputs_sha256": config}
+        return pack_measured(stage, previous[1], rows, contents, chunk_bytes, save_part, emit, deadline)
+
+    if not groups:
+        raise ValueError("member index does not cover archive")
+    with MultipartArchiveOutput(stage, "volume", chunk_bytes, deadline, on_part=save_part) as output:
+        rows = list(emit(range(len(groups)), output))
+    index.validate_members(rows, output.archive_bytes)
+    tree, written, peak = finish_tree(rows, [None] * len(rows), {}, output.parts)
+    contents = {"archive_bytes": output.archive_bytes, "archive_sha256": output.archive_hash.hexdigest(),
+                "lake_inputs_sha256": config}
+    return contents, tree, written, False, peak
 
 
 def write_tree(path, tree):

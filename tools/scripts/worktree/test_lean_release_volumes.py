@@ -192,6 +192,132 @@ class VolumeReleases(unittest.TestCase):
             volumes.retire(self.pool, ["first", "repeat"])
         self.assertTrue(old_tag.exists())
 
+    def test_sparse_overlay_matches_complete_build_and_compacts_without_local_inherited_frames(self):
+        import lean_release_sparse_pack as sparse
+        import lean_release_volume_remote as remote
+
+        stage = self.area / "sparse-stage"
+        stage.mkdir()
+        self.write(".lake/build/report/fixture.json", "first report")
+        volumes.publish(self.pool, "base", self.project, chunk_bytes=5000)
+        previous = volumes.read_snapshot(self.pool, "base")
+        self.write("D5/C.lean", "def valC : Nat := 34567\n")
+        self.build()
+        self.commit("C prime")
+        self.write(".lake/build/report/fixture.json", "new results")
+        volumes.publish(self.pool, "complete", self.project, "base", chunk_bytes=6500)
+        expected, complete_tree = volumes.read_snapshot(self.pool, "complete")
+        plan = {"inherit_modules": ["D5.A", "D5.B"], "rebuild_modules": ["D5.C"],
+                "restore_modules": ["D5.A"], "removed_modules": []}
+        # B never needed restoring, and locally present A is still inherited from the predecessor.
+        for path in next(r for r in previous[1]["members"] if r["module"] == "D5.B")["paths"]:
+            (self.project / ".lake/build" / path).unlink()
+        (self.project / ".lake/build/lib/lean/D5/A.olean").write_bytes(b"stale local file")
+        reads = []
+        def read_prior(rows, out):
+            reads.append([row["module"] for row in rows])
+            for key, start, size in remote.ranges(previous[1], rows):
+                volumes.copy_range(self.pool / "volumes" / key, start, size, out)
+
+        def save(part, path):
+            self.assertEqual(list(stage.iterdir()), [path])
+            self.assertLessEqual(path.stat().st_size, 6500)
+            volumes.store_asset(self.pool, part, path)
+
+        for tag, limit in (("sparse", 100), ("compact", 2)):
+            reads.clear()
+            with patch.object(volumes, "MAX_VOLUMES", limit):
+                contents, tree, _, compact, peak = sparse.pack_overlay(
+                    self.project, stage, previous, plan, 6500, save, read_prior)
+                self.assertEqual(contents, {k: expected[k] for k in contents})
+                self.assertEqual(compact, tag == "compact")
+                self.assertLessEqual(peak, 6500)
+                self.assertEqual(reads, [["D5.A", "D5.B"]] * (2 if compact else 1))
+                if not compact:
+                    self.assertEqual(tree, complete_tree)
+                target = self.pool / "snapshots" / tag
+                target.mkdir()
+                volumes.write_tree(target / volumes.INDEX, tree)
+                (target / volumes.MANIFEST).write_bytes(volumes.json_bytes(
+                    dict(expected, tag=tag, index_sha256=volumes.archive_sha(target / volumes.INDEX, None))))
+                volumes.read_snapshot(self.pool, tag)
+            for mode, targets in (("full", []), ("scoped", ["D5.B"])):
+                dest = self.consumer(tag + "-" + mode)
+                volumes.restore(self.pool, tag, dest, dest / ".lake/build", targets)
+                names = ["D5.A", "D5.B", "D5.C"] if mode == "full" else targets
+                run(dest, "lake", "--no-build", "build", *[f"@fixture/+{name}:olean" for name in names])
+                if mode == "full":
+                    self.assertEqual((dest / ".lake/build/report/fixture.json").read_text(), "new results")
+
+    def test_sparse_overlay_adds_and_removes_modules_in_target_order(self):
+        import lean_release_sparse_pack as sparse
+        import lean_release_volume_remote as remote
+        volumes.publish(self.pool, "base", self.project, chunk_bytes=8192)
+        previous = volumes.read_snapshot(self.pool, "base")
+        old = {r["module"]: r for r in previous[1]["members"]}
+        for path in old["D5.C"]["paths"]:
+            (self.project / ".lake/build" / path).unlink()
+        (self.project / "D5/C.lean").unlink()
+        self.write("D5/New.lean", "import D5.A\ndef valNew : Nat := valA + 1\n")
+        self.commit("Replace C with New")
+        run(self.project, "lake", "build", "@fixture/+D5.New:olean")
+        volumes.publish(self.pool, "full", self.project, "base", chunk_bytes=8192)
+        expected, full_tree = volumes.read_snapshot(self.pool, "full")
+        for path in old["D5.B"]["paths"]:
+            (self.project / ".lake/build" / path).unlink()
+
+        def read_prior(rows, out):
+            for key, start, size in remote.ranges(previous[1], rows):
+                volumes.copy_range(self.pool / "volumes" / key, start, size, out)
+
+        plan = {"inherit_modules": ["D5.A", "D5.B"], "restore_modules": ["D5.A"],
+                "rebuild_modules": ["D5.New"], "removed_modules": ["D5.C"]}
+        stage = self.area / "stage"
+        stage.mkdir()
+        contents, tree, _, _, _ = sparse.pack_overlay(
+            self.project, stage, previous, plan, 8192,
+            lambda part, path: volumes.store_asset(self.pool, part, path), read_prior)
+        self.assertEqual(contents["archive_sha256"], expected["archive_sha256"])
+        self.assertEqual(tree, full_tree)
+
+    def test_sparse_overlay_rejects_invalid_plan_frames_and_changed_configuration(self):
+        import lean_release_sparse_pack as sparse
+        import lean_release_volume_remote as remote
+
+        volumes.publish(self.pool, "base", self.project, chunk_bytes=8192)
+        previous = volumes.read_snapshot(self.pool, "base")
+        stage = self.area / "stage"
+        stage.mkdir()
+        plan = {"inherit_modules": ["D5.A", "D5.B", "D5.C"], "rebuild_modules": [],
+                "restore_modules": [], "removed_modules": []}
+        def overlay(candidate, read):
+            return sparse.pack_overlay(self.project, stage, previous, candidate, 8192, self.fail, read)
+
+        for field, names in (("inherit_modules", ["D5.A", "D5.B"]), ("inherit_modules", ["D5.A"] * 2),
+                             ("restore_modules", ["unknown"]), ("rebuild_modules", ["D5.A"])):
+            with self.subTest(field=field, names=names), self.assertRaises(ValueError):
+                overlay(dict(plan, **{field: names}), self.fail)
+        duplicate = dict(previous[1], members=[dict(row, module="D5.A") for row in previous[1]["members"]])
+        with self.assertRaisesRegex(ValueError, "invalid indexed module"):
+            sparse.pack_overlay(self.project, stage, (previous[0], duplicate), plan, 8192, self.fail, self.fail)
+        for damage in ("truncated", "corrupt", "excess"):
+            def damaged(rows, output):
+                raw = io.BytesIO()
+                for key, start, size in remote.ranges(previous[1], rows):
+                    volumes.copy_range(self.pool / "volumes" / key, start, size, raw)
+                data = raw.getvalue()
+                output.write({"truncated": data[:-1], "corrupt": bytes([data[0] ^ 1]) + data[1:],
+                              "excess": data + b"x"}[damage])
+            with self.subTest(damage=damage), self.assertRaisesRegex(ValueError, "predecessor frame"):
+                overlay(plan, damaged)
+        rebuild = dict(plan, inherit_modules=["D5.A", "D5.B"], rebuild_modules=["D5.C"])
+        (self.project / ".lake/build/lib/lean/D5/C.olean").unlink()
+        with self.assertRaisesRegex(ValueError, "compiler outputs"):
+            overlay(rebuild, self.fail)
+        self.write("lakefile.toml", 'name="another"\n')
+        with self.assertRaisesRegex(ValueError, "configuration"):
+            overlay(plan, self.fail)
+
     def github_transport(self, stack, chunk_bytes):
         import lean_cache_release as release
 
