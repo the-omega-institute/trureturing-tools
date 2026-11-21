@@ -86,7 +86,7 @@ def member_groups(inventory, graph):
         yield None, batch
 
 
-def pack(root, stage, chunk_bytes, deadline):
+def pack(root, stage, chunk_bytes, deadline, *, stable_timestamps=False):
     modules = workspace_modules(root)
     graph = project_imports(root, modules)
     inventory = build_inventory(root, modules)
@@ -104,6 +104,9 @@ def pack(root, stage, chunk_bytes, deadline):
                             raise ValueError(f"Lake artifact changed during snapshot: {artifact.path}")
                         tar.uid = tar.gid = 0
                         tar.uname = tar.gname = ""
+                        if stable_timestamps:
+                            tar.mtime = 0
+                            tar.pax_headers.pop("mtime", None)
                         tar.mode = artifact.mode & 0o777
                         with source.open("rb") as data:
                             archive.addfile(tar, ArchiveInput(data, deadline))
@@ -145,10 +148,16 @@ def read_index(path, size):
     if len(encoded) > maximum:
         raise ValueError("member index exceeds maximum size")
     record = json.loads(encoded, object_pairs_hook=unique)
-    if not isinstance(record, dict) or set(record) != {"members"} or not isinstance(record["members"], list):
+    if not isinstance(record, dict) or set(record) != {"members"}:
+        raise ValueError("invalid member index")
+    return validate_members(record["members"], size)
+
+
+def validate_members(rows, size):
+    if not isinstance(rows, list):
         raise ValueError("invalid member index")
     end, modules, paths = 0, set(), set()
-    for row in record["members"]:
+    for row in rows:
         if (not isinstance(row, dict) or type(row.get("offset")) is not int or row["offset"] != end
                 or type(row.get("bytes")) is not int or row["bytes"] <= 0 or not valid_digest(row.get("sha256"))):
             raise ValueError("invalid member extent")
@@ -168,9 +177,9 @@ def read_index(path, size):
             fields |= {"source_sha256", "paths"}
         if set(row) != fields:
             raise ValueError("invalid indexed fields")
-    if end != size or not record["members"]:
+    if end != size or not rows:
         raise ValueError("member index does not cover archive")
-    return record["members"]
+    return rows
 
 
 def volume_ranges(parts, offset, length):
