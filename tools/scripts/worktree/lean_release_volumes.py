@@ -53,6 +53,10 @@ def read_snapshot(store, tag):
     path = directory / INDEX
     if path.stat().st_size > 32 * 1024 * 1024 or archive_sha(path, None) != manifest["index_sha256"]:
         raise ValueError("volume index checksum or size mismatch")
+    return manifest, read_tree(path, manifest)
+
+
+def read_tree(path, manifest):
     with gzip.open(path, "rb") as stream:
         raw = stream.read(128 * 1024 * 1024 + 1)
     if len(raw) > 128 * 1024 * 1024:
@@ -77,7 +81,7 @@ def read_snapshot(store, tag):
             raise ValueError("incomplete physical member")
     if used != sizes.keys():
         raise ValueError("unreferenced volume in snapshot")
-    return manifest, tree
+    return tree
 
 
 def store_asset(store, part, source):
@@ -105,7 +109,7 @@ def copy_range(source, offset, count, output):
             count -= len(block)
 
 
-def materialize_delta(stage, metadata, rows, previous, chunk_bytes, delta):
+def materialize_delta(stage, metadata, rows, previous, chunk_bytes, delta, deadline=None):
     """Choose exact compressed frames, then place all changed frames in bounded volumes."""
     reused = {}
     old_sizes = {}
@@ -126,7 +130,7 @@ def materialize_delta(stage, metadata, rows, previous, chunk_bytes, delta):
         staged, parts = stage, metadata["parts"]
     elif delta_bytes:
         staged = delta
-        with MultipartArchiveOutput(delta, "delta", chunk_bytes, None) as out:
+        with MultipartArchiveOutput(delta, "delta", chunk_bytes, deadline) as out:
             for row, spans in zip(rows, locations, strict=True):
                 if spans is None:
                     for part, start, count in index.volume_ranges(metadata["parts"], row["offset"], row["bytes"]):

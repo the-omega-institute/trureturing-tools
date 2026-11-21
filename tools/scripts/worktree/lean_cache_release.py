@@ -240,7 +240,9 @@ def existing_release(tag, deadline):
 
 
 def partition_prefix(partition, verification=False, *, indexed=False):
-    if indexed:
+    if indexed == "volumes":
+        namespace = "lean-cache-verify-v3-" if verification else "lean-cache-v4-"
+    elif indexed:
         namespace = "lean-cache-verify-v2-" if verification else "lean-cache-v3-"
     else:
         namespace = "lean-cache-verify-v1-" if verification else "lean-cache-v2-"
@@ -566,6 +568,9 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
             _observe("publish", "failed", phase="build",
                      error=subprocess.CalledProcessError(build.returncode, "make"))
             return build.returncode
+    if indexed and os.environ.get("LEAN_CACHE_RELEASE_VOLUMES") == "1":
+        indexed = "volumes"
+    physical = indexed == "volumes"
     report = root / ".lake/build/stratalint/raw-lean-report.json"
     content_validated = False
     preparing = False
@@ -605,7 +610,8 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
                 if indexed:
                     import lean_release_index as indexed_release
 
-                    contents = indexed_release.pack(root, stage, CHUNK_BYTES, deadline)
+                    contents = (indexed_release.pack(root, stage, CHUNK_BYTES, deadline, stable_timestamps=True)
+                                if physical else indexed_release.pack(root, stage, CHUNK_BYTES, deadline))
                 else:
                     with MultipartArchiveOutput(stage, ASSET, CHUNK_BYTES, deadline) as output:
                         with tarfile.open(stage / ASSET, "w:gz", compresslevel=1,
@@ -614,7 +620,12 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
                                         filter=lambda member: None if member.isfile()
                                         and member.name.endswith(".setup.json") else member)
                     contents = output.metadata()
-            metadata = {"schema": INDEXED_SCHEMA if indexed else "lean-release-seed-v4",
+            if physical:
+                import lean_release_volume_remote as remote
+
+                contents = remote.stage_publication(sys.modules[__name__], stage, contents, partition, cache_key,
+                                                    identity, verification is not None, deadline)
+            metadata = {"schema": ("lean-release-seed-v6" if physical else INDEXED_SCHEMA) if indexed else "lean-release-seed-v4",
                         "partition": partition, "cache_key": cache_key, **identity, **contents}
             (stage / MANIFEST).write_text(json.dumps(metadata, sort_keys=True) + "\n")
             remaining(deadline)
@@ -624,7 +635,7 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
             # The server's default branch anchors only the storage container.
             gh(deadline, "release", "create", tag, "--repo", REPO, "--draft",
                "--title", "Lean cache " + partition, "--notes", "Successful current Lean build and Inspector report; incremental seed only.")
-            entries = metadata["parts"] + ([metadata["index"]] if indexed else [])
+            entries = metadata.get("parts", []) + ([metadata["index"]] if indexed else [])
             gh(deadline, "release", "upload", tag, *(str(stage / part["name"]) for part in entries),
                str(stage / MANIFEST), "--repo", REPO)
             draft = None
@@ -708,8 +719,12 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
                 snapshot_manifest(partition, tag, confirmed, deadline, expected=metadata, metadata=current,
                                   verification=verification is not None, cache_key=cache_key)
                 if verification is None:
-                    pruned, prune_error = (prune(partition, tag, deadline, indexed=True) if indexed
-                                           else prune(partition, tag, deadline))
+                    if physical:
+                        pruned, prune_error = remote.prune(sys.modules[__name__], partition, cache_key, tag,
+                                                         identity["publication_id"], deadline)
+                    else:
+                        pruned, prune_error = (prune(partition, tag, deadline, indexed=True) if indexed
+                                               else prune(partition, tag, deadline))
         receipt("publish", "published", tag=tag, pruned=pruned, prune_error=prune_error, **metadata)
     except ImportError as error:
         receipt("publish", "skipped", reason="POSIX cache locking unavailable: " + str(error))
@@ -742,8 +757,9 @@ def snapshot_manifest(partition, tag, stage, deadline, expected=None, verificati
     if not isinstance(manifest, dict):
         raise ValueError("snapshot manifest must be an object")
     commit, publication_id = manifest.get("producer_commit_sha", ""), manifest.get("publication_id", "")
-    indexed = tag.startswith(partition_prefix(partition, verification, indexed=True))
-    schema = INDEXED_SCHEMA if indexed else "lean-release-seed-v4"
+    physical = tag.startswith(partition_prefix(partition, verification, indexed="volumes"))
+    indexed = "volumes" if physical else tag.startswith(partition_prefix(partition, verification, indexed=True))
+    schema = ("lean-release-seed-v6" if physical else INDEXED_SCHEMA) if indexed else "lean-release-seed-v4"
     if (manifest.get("schema") != schema or manifest.get("partition") != partition
             or manifest.get("cache_key") != cache_key
             or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit)
@@ -761,7 +777,15 @@ def snapshot_manifest(partition, tag, stage, deadline, expected=None, verificati
         datetime.datetime.strptime(publication_id.split("-")[2], "%Y%m%dT%H%M%S%fZ")
     if expected is not None and any(manifest.get(key) != value for key, value in expected.items()):
         raise ValueError("snapshot does not match this exact publication")
-    parts = declared_parts(manifest)
+    if physical:
+        import lean_release_volume_remote as remote
+
+        scope = remote.namespace(partition, cache_key, verification, publication_id, sys.modules[__name__])
+        if (manifest.get("volume_scope") != scope or "parts" in manifest
+                or type(manifest.get("archive_bytes")) is not int
+                or not 0 < manifest["archive_bytes"] <= CHUNK_BYTES * 100):
+            raise ValueError("invalid physical volume namespace or snapshot size")
+    parts = [] if physical else declared_parts(manifest)
     index = manifest.get("index")
     entries = parts
     if indexed:
@@ -850,7 +874,8 @@ def restore_scoped(root, partition, tag, stage, deadline, *, cache_key, producer
         expected={"producer_commit_sha": producer} if producer else None,
         verification=verification, cache_key=cache_key, metadata=release_metadata,
         expect_draft=release_metadata is not None)
-    if manifest["schema"] != INDEXED_SCHEMA:
+    physical = manifest["schema"] == "lean-release-seed-v6"
+    if not physical and manifest["schema"] != INDEXED_SCHEMA:
         raise ValueError("scoped restore requires an indexed Release")
     if lake_configuration(root) != manifest["lake_inputs_sha256"]:
         receipt("fetch", "scoped-miss", resolved=tag, reason="Lake workspace configuration changed")
@@ -861,8 +886,15 @@ def restore_scoped(root, partition, tag, stage, deadline, *, cache_key, producer
     if index_path.stat().st_size != index["bytes"] or archive_sha(index_path, deadline) != index["sha256"]:
         raise ValueError("Release index checksum or size mismatch")
     lake = (root if destination_root is None else destination_root) / ".lake"
-    rows = indexed_release.scoped_members(root,
-        indexed_release.read_index(index_path, manifest["archive_bytes"]),
+    if physical:
+        import lean_release_volume_remote as remote
+        import lean_release_volumes as volumes
+
+        tree = volumes.read_tree(index_path, manifest)
+        rows = tree["members"]
+    else:
+        rows = indexed_release.read_index(index_path, manifest["archive_bytes"])
+    rows = indexed_release.scoped_members(root, rows,
         targets, lake / "build", require_complete=require_complete)
     if lake.is_symlink() or (lake / "build").is_symlink():
         raise ValueError("scoped restore requires a private project build")
@@ -876,10 +908,15 @@ def restore_scoped(root, partition, tag, stage, deadline, *, cache_key, producer
             with tempfile.TemporaryFile(dir=unpacked) as payload:
                 start = group[0]["offset"]
                 end = group[-1]["offset"] + group[-1]["bytes"]
-                for part, offset, length in indexed_release.volume_ranges(parts, start, end - start):
-                    download_range(assets[part["name"]], offset, length, payload, deadline)
-                    requests += 1
-                    transferred += length
+                if physical:
+                    calls, count = remote.download(sys.modules[__name__], manifest, tree, group, payload, deadline, assets)
+                    requests += calls
+                    transferred += count
+                else:
+                    for part, offset, length in indexed_release.volume_ranges(parts, start, end - start):
+                        download_range(assets[part["name"]], offset, length, payload, deadline)
+                        requests += 1
+                        transferred += length
                 payload.seek(0)
                 for row in group:
                     indexed_release.extract_frame(payload, row, unpacked, extracted, deadline)
@@ -979,11 +1016,18 @@ def restore_snapshot(root, partition, tag, stage, deadline, expected=None, refre
             expected=expected if approved_producer is None else {"producer_commit_sha": approved_producer},
             verification=verification, cache_key=cache_key, metadata=release_metadata,
             expect_draft=release_metadata is not None)
-    indexed = manifest.get("schema") == INDEXED_SCHEMA
+    physical = manifest.get("schema") == "lean-release-seed-v6"
+    indexed = physical or manifest.get("schema") == INDEXED_SCHEMA
     entries = [*parts, manifest["index"]] if indexed else parts
     commit = manifest["producer_commit_sha"]
     with observed_phase("transfer", expected_bytes=manifest["archive_bytes"]):
-        if local_assets is None:
+        if physical:
+            import lean_release_volume_remote as remote
+
+            tree = remote.load_tree(sys.modules[__name__], tag, stage, manifest, deadline)
+            with deadline.pause():
+                parts = remote.download_full(sys.modules[__name__], stage, manifest, tree, operation_deadline())
+        elif local_assets is None:
             # A multi-gigabyte Release asset is a streaming transport. Its
             # duration depends on the link and must not consume the bounded
             # metadata/install operation budget. Integrity and attribution are
@@ -1042,9 +1086,10 @@ def restore_snapshot(root, partition, tag, stage, deadline, expected=None, refre
                     import lean_release_index as indexed_release
 
                     with observed_phase("extraction"):
-                        rows = indexed_release.read_index(stage / indexed_release.INDEX, manifest["archive_bytes"])
+                        rows = (tree["members"] if physical else
+                                indexed_release.read_index(stage / indexed_release.INDEX, manifest["archive_bytes"]))
                         source.mkdir()
-                        indexed_release.restore_full(stage, manifest, rows, source, deadline)
+                        indexed_release.restore_full(stage, dict(manifest, parts=parts), rows, source, deadline)
                         report_reuse.publication.validate_bundle(source / "stratalint/raw-lean-report.json")
                 else:
                     compressed = opened.enter_context((stage / ASSET).open("rb"))
@@ -1151,6 +1196,8 @@ def restore_snapshot(root, partition, tag, stage, deadline, expected=None, refre
 
 def fetch_verification(root, partition, identity, *, indexed=False):
     cache_key = release_key(root)
+    if indexed and os.environ.get("LEAN_CACHE_RELEASE_VOLUMES") == "1":
+        indexed = "volumes"
     tag = prefix(partition, cache_key, True, indexed=indexed) + "ci-" + identity["workflow_run_id"] + "-" + identity["workflow_run_attempt"]
     try:
         deadline = operation_deadline()
@@ -1182,7 +1229,7 @@ def fetch_candidate(root, partition, tag, producer, *, targets=()):
             raise ValueError("candidate fetch in CI requires a validated long producer source")
     cache_key = release_key(root)
     source, suffix, indexed = next(((part, tag.removeprefix(candidate), indexed)
-        for part in seed_partitions(root) for indexed in (False, True)
+        for part in seed_partitions(root) for indexed in (False, True, "volumes")
         if tag.startswith(candidate := prefix(part, cache_key, True, indexed=indexed))), (None, "", False))
     verification = source is not None
     if verification:
@@ -1257,13 +1304,14 @@ def fetch(root, partition, writer_owned=False, refresh_stale=False, approved_tag
 
 def snapshot_partition(root, partition, tag, cache_key, *, indexed=False):
     compatible = [partition] + [other for other in seed_partitions(root) if other != partition]
-    return next((candidate for candidate in compatible
-        if tag.startswith(prefix(candidate, cache_key, indexed=indexed))
-        and valid_publication_id(tag[len(prefix(candidate, cache_key, indexed=indexed)):])), None)
+    formats = ("volumes", True) if indexed is True else (indexed,)
+    return next((candidate for candidate in compatible for fmt in formats
+        if tag.startswith(address := prefix(candidate, cache_key, indexed=fmt))
+        and valid_publication_id(tag[len(address):])), None)
 
 
-def snapshot_candidates(root, partition, deadline, cache_key, *, indexed=False, fallback=False):
-    """Walk published Releases newest first, preferring indexed snapshots across all pages."""
+def release_tags(deadline):
+    """Enumerate GitHub Releases in creation order, including drafts."""
     owner, name = REPO.split("/", 1)
     query = """query($owner: String!, $name: String!, $after: String) {
       repository(owner: $owner, name: $name) {
@@ -1274,28 +1322,33 @@ def snapshot_candidates(root, partition, deadline, cache_key, *, indexed=False, 
       }
     }"""
     cursor_args = []
-    legacy = []
     while True:
         page = json.loads(gh(deadline, "api", "graphql", "-f", "query=" + query,
                              "-f", "owner=" + owner, "-f", "name=" + name, *cursor_args,
                              "--jq", ".data.repository.releases"))
-        for release in page["nodes"]:
-            if release["isDraft"] is not False:
-                continue
-            tag = release["tagName"]
-            source = snapshot_partition(root, partition, tag, cache_key, indexed=indexed)
-            if source is not None:
-                yield source, tag
-            elif indexed and fallback:
-                source = snapshot_partition(root, partition, tag, cache_key)
-                if source is not None:
-                    legacy.append((source, tag))
+        yield from page["nodes"]
         if not page["pageInfo"]["hasNextPage"]:
             break
         cursor = page["pageInfo"]["endCursor"]
         if not isinstance(cursor, str) or not cursor or cursor_args == ["-f", "after=" + cursor]:
             raise ValueError("invalid GitHub Release pagination cursor")
         cursor_args = ["-f", "after=" + cursor]
+
+
+def snapshot_candidates(root, partition, deadline, cache_key, *, indexed=False, fallback=False):
+    """Walk published Releases newest first, preferring indexed snapshots across all pages."""
+    legacy = []
+    for release in release_tags(deadline):
+        if release["isDraft"] is not False:
+            continue
+        tag = release["tagName"]
+        source = snapshot_partition(root, partition, tag, cache_key, indexed=indexed)
+        if source is not None:
+            yield source, tag
+        elif indexed and fallback:
+            source = snapshot_partition(root, partition, tag, cache_key)
+            if source is not None:
+                legacy.append((source, tag))
     yield from legacy
 
 

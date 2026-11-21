@@ -3,7 +3,9 @@
 import json
 import os
 from pathlib import Path
-import shutil
+from contextlib import ExitStack, redirect_stdout
+import io
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -115,6 +117,79 @@ class VolumeReleases(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checksum"):
             volumes.retire(self.pool, ["first", "repeat"])
         self.assertTrue(old_tag.exists())
+
+    def test_github_command_transport_and_retention(self):
+        import lean_cache_release as release
+
+        fixture = Path(__file__).resolve().parents[2] / "tests/StrataLint.ScriptTests/Fixtures"
+        sys.path.insert(0, str(fixture))
+        self.addCleanup(sys.path.remove, str(fixture))
+        from lean_seed_transport_fake import FAKE_GH
+
+        binary = self.area / "bin"
+        binary.mkdir()
+        gh = binary / "gh"
+        gh.write_text(FAKE_GH)
+        gh.chmod(0o755)
+        self.pool.mkdir()
+        key = {"report_format": "fixture", "execution_sha256": "e" * 64}
+        partition = "fixture/linux-arm64"
+        remote_env = {"PATH": str(binary) + os.pathsep + os.environ["PATH"],
+                      "FAKE_REMOTE": str(self.pool), "GITHUB_ACTIONS": "true",
+                      "LEAN_CACHE_RELEASE_VOLUMES": "1"}
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, remote_env))
+            stack.enter_context(patch.object(release, "REPO", "fixture/private"))
+            stack.enter_context(patch.object(release, "CHUNK_BYTES", 5000))
+            stack.enter_context(patch.object(release.report_reuse, "capture", return_value={}))
+            stack.enter_context(patch.object(release.report_reuse, "read_receipt",
+                                            return_value={"completed": release.report_reuse.CHECKED}))
+            stack.enter_context(patch.object(release.report_reuse.publication, "validate_bundle"))
+            stack.enter_context(patch.object(release.report_reuse, "record_seed_base", return_value=True))
+            stack.enter_context(patch.object(release, "partition_path", return_value=partition))
+            stack.enter_context(patch.object(release, "release_key", return_value=key))
+            identity = stack.enter_context(patch.object(release, "publication_identity"))
+            tags = []
+            uploads = []
+            for num in range(1, 7):
+                if num == 2:
+                    self.change_b()
+                author = run(self.project, "git", "rev-parse", "HEAD").strip()
+                run_id = str(100 + num)
+                suffix = f"ci-{run_id}-1"
+                identity.return_value = {"producer_commit_sha": author, "publication_id": suffix,
+                                         "workflow_run_id": run_id, "workflow_run_attempt": "1"}
+                tag = release.prefix(partition, key, indexed="volumes") + suffix
+                tags.append(tag)
+                with redirect_stdout(io.StringIO()) as output:
+                    code = release.publish(self.project, partition, build_report=False, indexed=True)
+                self.assertEqual(code, 0, output.getvalue())
+                events = output.getvalue().splitlines()
+                final = json.loads(next(x for x in events if x.startswith("LEAN_CACHE_PUBLISH ")).split(" ", 1)[1])
+                self.assertEqual(final["status"], "published", events)
+                self.assertIsNone(final["prune_error"], events)
+                self.assertEqual(set(p.name for p in (self.pool / tag).iterdir()),
+                                 {"release.json", "manifest.json", "index.json.gz"})
+                uploads.append(json.loads(next(x for x in events if x.startswith("LEAN_CACHE_VOLUME-UPLOAD "))
+                                          .split(" ", 1)[1]))
+            self.assertFalse((self.pool / tags[0]).exists())
+            self.assertTrue((self.pool / tags[1]).exists())
+            self.assertTrue(all(row["payload_bytes"] == 0 for row in uploads[2:]))
+            tag = tags[1]
+            project = self.consumer("github-full")
+            stage = self.area / "fetch"
+            stage.mkdir()
+            self.assertTrue(release.restore_snapshot(project, partition, tag, stage, release.operation_deadline(),
+                                                     cache_key=key))
+            run(project, "lake", "--no-build", "build", *[f"@fixture/+D5.{n}:olean" for n in "ABC"])
+            scoped = self.consumer("github-scoped")
+            stage = self.area / "fetch-scoped"
+            stage.mkdir()
+            amount = release.restore_scoped(scoped, partition, tag, stage, release.operation_deadline(),
+                cache_key=key, producer=author, targets=["D5.B"], verification=False)
+            self.assertEqual(amount, (1, uploads[1]["payload_bytes"]))
+            run(scoped, "lake", "--no-build", "build", "@fixture/+D5.B:olean")
+            self.assertFalse((scoped / ".lake/build/lib/lean/D5/A.olean").exists())
 
     def test_damaged_physical_member_leaves_no_partial_install(self):
         volumes.publish(self.pool, "one", self.project)

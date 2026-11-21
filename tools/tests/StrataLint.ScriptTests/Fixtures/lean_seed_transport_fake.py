@@ -31,6 +31,16 @@ if args[:2] == ["api", "graphql"]:
     print(json.dumps({"nodes": releases[start:end], "pageInfo": {
         "hasNextPage": end < len(releases), "endCursor": str(end)}}))
     sys.exit(0)
+if args[:2] == ["api", "--include"]:
+    asset_id = int(args[-1].rsplit("/", 1)[1])
+    path = next(p for p in root.glob("*/*") if p.is_file() and p.stat().st_ino == asset_id)
+    bounds = next(a for a in args if a.startswith("Range: bytes=")).removeprefix("Range: bytes=")
+    start, end = map(int, bounds.split("-"))
+    data = path.read_bytes()
+    assert 0 <= start <= end < len(data)
+    sys.stdout.buffer.write(f"HTTP/2.0 206 Partial Content\\r\\nContent-Range: bytes {bounds}/{len(data)}\\r\\n\\r\\n".encode())
+    sys.stdout.buffer.write(data[start:end+1])
+    sys.exit(0)
 if args[:2] == ["release", "list"] and "FAKE_LIST_JSON" in os.environ:
     print(os.environ["FAKE_LIST_JSON"]); sys.exit(0)
 if args[0] == "api" and args[1].endswith("/branches/dev"):
