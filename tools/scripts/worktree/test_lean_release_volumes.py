@@ -11,6 +11,7 @@ import sys
 import subprocess
 import tempfile
 import tarfile
+import zipfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -472,7 +473,7 @@ class VolumeReleases(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "configuration"):
             overlay(plan, self.fail)
 
-    def github_transport(self, stack, chunk_bytes):
+    def github_transport(self, stack, chunk_bytes, *, real_report=False):
         import lean_cache_release as release
 
         fixture = Path(__file__).resolve().parents[2] / "tests/StrataLint.ScriptTests/Fixtures"
@@ -494,15 +495,144 @@ class VolumeReleases(unittest.TestCase):
         stack.enter_context(patch.dict(os.environ, remote_env))
         stack.enter_context(patch.object(release, "REPO", "fixture/private"))
         stack.enter_context(patch.object(release, "CHUNK_BYTES", chunk_bytes))
-        stack.enter_context(patch.object(release.report_reuse, "capture", return_value={}))
-        stack.enter_context(patch.object(release.report_reuse, "read_receipt",
-                                        return_value={"completed": release.report_reuse.CHECKED}))
-        stack.enter_context(patch.object(release.report_reuse.publication, "validate_bundle"))
-        stack.enter_context(patch.object(release.report_reuse, "record_seed_base", return_value=True))
+        if not real_report:
+            stack.enter_context(patch.object(release.report_reuse, "capture", return_value={}))
+            stack.enter_context(patch.object(release.report_reuse, "read_receipt",
+                                            return_value={"completed": release.report_reuse.CHECKED}))
+            stack.enter_context(patch.object(release.report_reuse.publication, "validate_bundle"))
+            stack.enter_context(patch.object(release.report_reuse, "record_seed_base", return_value=True))
         stack.enter_context(patch.object(release, "partition_path", return_value=partition))
         stack.enter_context(patch.object(release, "release_key", return_value=key))
         identity = stack.enter_context(patch.object(release, "publication_identity"))
         return release, key, partition, identity
+
+    def test_two_generations_with_sparse_checked_report_and_empty_consumers(self):
+        import lean_release_index as index
+        import lean_release_sparse as sparse
+        import lean_cache_release as release
+        import build_inputs
+        import native
+        import scoped
+
+        with ExitStack() as stack:
+            _, key, partition, identity = self.github_transport(stack, 16384, real_report=True)
+            from lean_seed_support import prepare_release_report, write_release_report
+            self.write("Trureturing.lean", "def rootValue : Nat := 0\n")
+            prepare_release_report(self.project)
+            self.commit("report selection for the fixture")
+            with patch.object(sys, "path", list(sys.path)):
+                write_release_report(self.project)
+            base = run(self.project, "git", "rev-parse", "HEAD").strip()
+            def publish(project, commit, number):
+                suffix = f"ci-{number}-1"
+                identity.return_value = {"producer_commit_sha": commit, "publication_id": suffix,
+                    "workflow_run_id": str(number), "workflow_run_attempt": "1"}
+                with redirect_stdout(io.StringIO()) as output:
+                    code = release.publish(project, partition, build_report=False, indexed=True)
+                self.assertEqual(code, 0, output.getvalue())
+                self.assertIn('"status":"published"', output.getvalue())
+                return release.prefix(partition, key, indexed="volumes") + suffix
+
+            first = publish(self.project, base, 801)
+            self.write("D5/B.lean", "import D5.A\ndef valB : Nat := valA + 5\n")
+            self.commit("B consumes A")
+            target = run(self.project, "git", "rev-parse", "HEAD").strip()
+            rolling = self.consumer("rolling-checked")
+            stack.enter_context(patch.dict(os.environ, GITHUB_WORKSPACE=str(rolling),
+                                    LEAN_CACHE_RELEASE_SPARSE="1", GITHUB_ENV=""))
+            stack.enter_context(patch.object(release, "rolling_source", return_value=("workflow", {"push"})))
+            stack.enter_context(patch.object(release, "rolling_producer", return_value=True))
+            stack.enter_context(patch.object(release, "seed_partitions", return_value=[partition]))
+            stack.enter_context(patch.object(sparse.compiler, "production_targets", return_value={"D5.A", "D5.B", "D5.C"}))
+            args = SimpleNamespace(command="select-base", mode="production", repository=rolling, source_commit=target,
+                source_ref="refs/heads/dev", previous_commit_only=True, writer_owned=False, approved_tag=None,
+                approved_producer=None, local_assets=None, refresh_stale=False, no_build=False, indexed=False,
+                target=[], tag="", producer="", manifest_sha256="")
+            with redirect_stdout(io.StringIO()) as selected:
+                self.assertEqual(release.rolling_base(args), 0)
+            chosen = json.loads(selected.getvalue().split(" ", 1)[1])
+            self.assertEqual((chosen["tag"], chosen["producer"]), (first, base))
+            args.command, args.previous_commit_only = "install-base", False
+            args.tag, args.producer, args.manifest_sha256 = first, base, chosen["manifest_sha256"]
+            self.assertEqual(release.rolling_base(args), 0)
+            plan = sparse.read_plan(rolling)
+            self.assertEqual(plan["rebuild_modules"], ["D5.B"])
+            self.assertEqual(plan["restore_modules"], ["D5.A"])
+            self.assertFalse((rolling / ".lake/build/lib/lean/D5/C.olean").exists())
+            run(rolling, "lake", "build", "@fixture/+D5.B:olean")
+
+            # Supply small per-module extractor outputs while running the report entry
+            # through sparse row selection, aggregation, FIB comparison and receipt sealing.
+            reuse = release.report_reuse
+            pub = reuse.publication
+            report = reuse.canonical_seed(rolling)
+            prior = reuse.read_receipt(report)
+            names = pub.selection.Selection(rolling).modules()
+            modules = index.workspace_modules(rolling)
+            graph = index.project_imports(rolling, modules)
+            deps = {name: dict(module=name, source_path=path, imports=sorted(graph[name])) for name, path in names.items()}
+            def extract(entry, phase, command):
+                if phase == "utility":
+                    path = entry.temporary / "utilities.json"
+                    path.write_text("[]")
+                    return path
+                self.assertEqual((phase, command[-1]), ("report", "+D5.B:report"))
+                name = "D5.B"
+                row = dict(deps[name], source_sha256="sha256:" + pub.digest(rolling / names[name]), declarations=[])
+                raw = pub.materials.canonical_json(dict(schema=pub.materials.REPORT_SCHEMA, modules=[row]))
+                origin = dict(module=name, report_sha256=hashlib.sha256(raw).hexdigest(),
+                    input_projection=dict(schema="stratalint-judge-input-projection-v1", module=name, inputs=[]),
+                    producer_sources_sha256="a"*64, inspector_executable_sha256="b"*64)
+                artifact = native.state(rolling) / "modules/D5.B.zip"
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                empty = io.BytesIO()
+                with zipfile.ZipFile(empty, "w"):
+                    pass
+                with zipfile.ZipFile(artifact, "w") as archive:
+                    archive.writestr(pub.RAW, raw)
+                    archive.writestr(pub.RAW + ".provenance.json", pub.materials.canonical_json(origin))
+                    archive.writestr(pub.RAW + ".materials.zip", empty.getvalue())
+
+            with tempfile.TemporaryDirectory(dir=rolling / ".lake") as temporary, ExitStack() as check:
+                directory = Path(temporary)
+                check.enter_context(patch.object(build_inputs, "ROOT", rolling))
+                check.enter_context(patch.object(build_inputs, "sparse_graph", return_value=deps))
+                check.enter_context(patch.object(build_inputs, "sparse_programs", return_value={}))
+                check.enter_context(patch.object(build_inputs, "prepare"))
+                check.enter_context(patch.object(scoped.Entry, "provision"))
+                check.enter_context(patch.object(scoped.Entry, "phase", extract))
+                build_inputs.checked_report(directory, report, report, directory, directory / "work.json",
+                                            try_seed=False, plan=plan)
+            checked = reuse.read_receipt(report, reuse.capture(rolling))
+            self.assertEqual(checked["completed"], reuse.CHECKED)
+            self.assertNotEqual(prior["bundle"], checked["bundle"])
+            self.assertEqual(set(pub.selection.Selection(rolling).modules()), {r["module"] for r in
+                pub.report_rows(report, pub.materials.REPORT_SCHEMA)})
+            second = publish(rolling, target, 802)
+            manifest = json.loads((self.pool / second / volumes.MANIFEST).read_bytes())
+            previous = json.loads((self.pool / first / volumes.MANIFEST).read_bytes())
+            tree = volumes.read_tree(self.pool / second / volumes.INDEX, manifest)
+            old = volumes.read_tree(self.pool / first / volumes.INDEX, previous)
+            def location(snapshot, name):
+                return next(spans for row, spans in zip(snapshot["members"], snapshot["locations"], strict=True)
+                            if row["module"] == name)
+            self.assertEqual(location(tree, "D5.C"), location(old, "D5.C"))
+            for mode in ("full", "scoped"):
+                dest = self.consumer("checked-" + mode)
+                stage = self.area / ("download-" + mode)
+                stage.mkdir()
+                if mode == "full":
+                    self.assertTrue(release.restore_snapshot(dest, partition, second, stage, release.operation_deadline(),
+                                                             cache_key=key))
+                    self.assertEqual(reuse.read_receipt(reuse.canonical_seed(dest), reuse.capture(dest)), checked)
+                    targets = ["D5.A", "D5.B", "D5.C"]
+                else:
+                    count, _ = release.restore_scoped(dest, partition, second, stage, release.operation_deadline(),
+                        cache_key=key, producer=target, targets=["D5.B"], verification=False)
+                    self.assertEqual(count, 2)
+                    self.assertFalse((dest / ".lake/build/lib/lean/D5/C.olean").exists())
+                    targets = ["D5.B"]
+                run(dest, "lake", "--no-build", "build", *[f"@fixture/+{n}:olean" for n in targets])
 
     def test_streaming_publisher_cross_volume_frame_and_retry(self):
         import lean_release_index as index
