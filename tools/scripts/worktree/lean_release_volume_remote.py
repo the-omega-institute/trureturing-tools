@@ -123,6 +123,10 @@ def stage_publication(host, stage, contents, partition, cache_key, identity, ver
     scope = namespace(partition, cache_key, verification, identity["publication_id"], host,
                       test_id=test_id, source_ref=identity.get("source_ref"))
     previous = published_base(host, scope, partition, cache_key, verification, deadline)
+    binding = None
+    if old_tag := os.environ.get("LEAN_CACHE_VOLUME_RETIRE_TAG"):
+        binding = predecessor_binding(host, partition, cache_key, scope, test_id, identity, old_tag,
+                                      previous[0] if previous else None, deadline)
     rows = index.read_index(stage / volumes.INDEX, contents["archive_bytes"])
     delta = stage / "delta"
     delta.mkdir()
@@ -147,7 +151,8 @@ def stage_publication(host, stage, contents, partition, cache_key, identity, ver
                  payload_bytes=sum(tree["volumes"][name] for name in uploads),
                  reused_bytes=contents["archive_bytes"] - written, compacted=compact, peak_staged_payload_bytes=peak)
     return {**{k: contents[k] for k in ("lake_inputs_sha256", "archive_bytes", "archive_sha256")},
-            **({"volume_test_id": test_id} if test_id else {}), "volume_scope": scope, "index": {"name": volumes.INDEX, "bytes": (stage / volumes.INDEX).stat().st_size,
+            **({"volume_test_id": test_id} if test_id else {}),
+            **({"volume_predecessor": binding} if binding else {}), "volume_scope": scope, "index": {"name": volumes.INDEX, "bytes": (stage / volumes.INDEX).stat().st_size,
                                              "sha256": archive_sha(stage / volumes.INDEX, deadline)}}
 
 
@@ -263,45 +268,80 @@ def prune(host, partition, key, tag, identity, deadline):
         return removed, str(error)
 
 
-def retire_verification(host, partition, key, current_tag, current, old_tag, deadline):
-    """Retire solely an explicit predecessor in this integration test's isolated pool."""
+def check_workflow(host, manifest, ref, deadline):
+    run = host.publisher_run(manifest["workflow_run_id"], manifest["workflow_run_attempt"],
+                             ".github/workflows/ci-publication-verify.yml",
+                             lambda path: json.loads(host.gh(deadline, "api", path)))
+    if (run["head_sha"] != manifest["producer_commit_sha"]
+            or "refs/heads/" + run["head_branch"] != ref):
+        raise ValueError("snapshot origin differs from its protected verification run")
+
+
+def valid_binding(bound, tag):
+    if (not isinstance(bound, dict) or set(bound) != {"tag", "manifest_sha256", "archive_bytes", "volumes"}
+            or bound["tag"] != tag or not index.valid_digest(bound["manifest_sha256"])
+            or type(bound["archive_bytes"]) is not int or not 0 < bound["archive_bytes"] <= volumes.VOLUME_BYTES * volumes.MAX_VOLUMES):
+        return False
+    sizes = bound["volumes"]
+    return (isinstance(sizes, dict) and 0 < len(sizes) <= volumes.MAX_VOLUMES
+            and all(index.valid_digest(d) and type(n) is int and 0 < n <= volumes.VOLUME_BYTES
+                    for d, n in sizes.items()) and sum(sizes.values()) <= 2 * bound["archive_bytes"])
+
+
+def predecessor_binding(host, partition, key, scope, test_id, identity, old_tag, witness, deadline):
     prefix = host.prefix(partition, key, True, indexed="volumes")
-    if (os.environ.get("GITHUB_ACTIONS") != "true" or not current.get("volume_test_id")
-            or current_tag == old_tag or not old_tag.startswith(prefix + "ci-")
+    ref = identity["source_ref"]
+    if (os.environ.get("GITHUB_ACTIONS") != "true" or not test_id or not old_tag.startswith(prefix + "ci-")
             or not host.valid_publication_id(old_tag[len(prefix):])):
         raise ValueError("invalid verification volume retirement target")
-    ref = current["source_ref"]
-    scope = current["volume_scope"]
-    pool = volume_prefix(scope)
-    # Validate the predecessor before any mutation; all other namespaces are read-only.
+    run, attempt = map(int, old_tag[len(prefix + "ci-"):].split("-"))
+    if (run, attempt) >= (int(identity["workflow_run_id"]), int(identity["workflow_run_attempt"])):
+        raise ValueError("retirement requires an earlier verification publication")
+    metadata = host.existing_release(old_tag, deadline)
+    if metadata is None:
+        bound = witness.get("volume_predecessor") if witness else None
+        if (not valid_binding(bound, old_tag)
+                or witness.get("volume_scope") != scope or witness.get("volume_test_id") != test_id
+                or witness.get("source_ref") != ref):
+            raise ValueError("missing predecessor has no published binding for this verification test")
+        check_workflow(host, witness, ref, deadline)
+        return bound
     with tempfile.TemporaryDirectory(prefix="lean-volume-retire-") as temp:
         stage = Path(temp)
-        _, previous, _ = host.snapshot_manifest(partition, old_tag, stage, deadline, verification=True, cache_key=key)
-        if (previous["volume_scope"] != scope or previous.get("volume_test_id") != current["volume_test_id"]
-                or previous.get("source_ref") != ref or int(previous["workflow_run_id"]) > int(current["workflow_run_id"])
-                or (previous["workflow_run_id"] == current["workflow_run_id"] and
-                    int(previous["workflow_run_attempt"]) >= int(current["workflow_run_attempt"]))):
+        _, prior, _ = host.snapshot_manifest(partition, old_tag, stage, deadline, verification=True,
+                                             cache_key=key, metadata=metadata)
+        if prior["volume_scope"] != scope or prior.get("volume_test_id") != test_id or prior.get("source_ref") != ref:
             raise ValueError("predecessor does not belong to the same verification test and source ref")
-        historical = host.publisher_run(previous["workflow_run_id"], previous["workflow_run_attempt"],
-                                       ".github/workflows/ci-publication-verify.yml",
-                                       lambda path: json.loads(host.gh(deadline, "api", path)))
-        if (historical["head_sha"] != previous["producer_commit_sha"]
-                or "refs/heads/" + historical["head_branch"] != ref):
-            raise ValueError("retired tag's origin differs from its protected verification run")
-        old = load_tree(host, old_tag, stage, previous, deadline)
-    live = set()
-    seen = set()
+        check_workflow(host, prior, ref, deadline)
+        tree = load_tree(host, old_tag, stage, prior, deadline)
+        return {"tag": old_tag, "manifest_sha256": archive_sha(stage / host.MANIFEST, deadline),
+                "archive_bytes": prior["archive_bytes"], "volumes": tree["volumes"]}
+
+
+def retire_verification(host, partition, key, current_tag, current, old_tag, deadline):
+    """Retire a bound predecessor and recheck the surviving roots after interruptions."""
+    prefix = host.prefix(partition, key, True, indexed="volumes")
+    ref = current["source_ref"]
+    scope = current["volume_scope"]
+    bound = current.get("volume_predecessor")
+    if not valid_binding(bound, old_tag):
+        raise ValueError("predecessor is not bound to the same verification test")
+    if current_tag == old_tag or current_tag != prefix + current["publication_id"]:
+        raise ValueError("invalid current verification tag")
+    checked = predecessor_binding(host, partition, key, scope, current["volume_test_id"],
+                                  current, old_tag, current, deadline)
+    if checked != bound:
+        raise ValueError("retirement predecessor differs from the published binding")
+    pool = volume_prefix(scope)
+    live = {}
+    current_seen = False
+    preserve_orphans = False
     for entry in host.release_tags(deadline):
         name = entry["tagName"]
-        if not name.startswith(prefix + "ci-") or not host.valid_publication_id(name[len(prefix):]):
-            continue
-        if name == old_tag:
-            seen.add(name)
+        if name == old_tag or not name.startswith(prefix + "ci-") or not host.valid_publication_id(name[len(prefix):]):
             continue
         if entry["isDraft"]:
-            # An incomplete draft cannot reliably expose its test scope. Retain its
-            # possible physical volumes, while still retiring only the explicit predecessor.
-            live.update(old["volumes"])
+            preserve_orphans = True
             continue
         with tempfile.TemporaryDirectory(prefix="lean-volume-mark-") as temp:
             stage = Path(temp)
@@ -309,19 +349,26 @@ def retire_verification(host, partition, key, current_tag, current, old_tag, dea
                                                     verification=True, cache_key=key)
             if manifest["volume_scope"] == scope:
                 live.update(load_tree(host, name, stage, manifest, deadline)["volumes"])
-                seen.add(name)
-    if not {current_tag, old_tag}.issubset(seen):
-        raise ValueError("both verification tags must be visible before retirement")
-    host.gh(deadline, "release", "delete", old_tag, "--repo", host.REPO, "--yes", "--cleanup-tag")
+                if name == current_tag:
+                    if manifest != current:
+                        raise ValueError("published verification snapshot changed before retirement")
+                    check_workflow(host, manifest, ref, deadline)
+                    current_seen = True
+    if not current_seen:
+        raise ValueError("current verification snapshot must be visible before retirement")
+    for digest, size in live.items():
+        if asset_for(host, pool + digest, digest, size, deadline) is None:
+            raise ValueError("missing physical volume in retained verification snapshot")
+    existed = host.existing_release(old_tag, deadline) is not None
+    if existed:
+        host.gh(deadline, "release", "delete", old_tag, "--repo", host.REPO, "--yes", "--cleanup-tag")
     if host.existing_release(old_tag, deadline) is not None:
         raise ValueError("retired verification snapshot is still visible")
     reclaimed = 0
-    for digest, size in old["volumes"].items():
-        if digest not in live:
-            if asset_for(host, pool + digest, digest, size, deadline) is None:
-                raise ValueError("retired predecessor volume is unavailable")
+    for digest, size in bound["volumes"].items():
+        if not preserve_orphans and digest not in live and asset_for(host, pool + digest, digest, size, deadline) is not None:
             host.gh(deadline, "release", "delete", pool + digest, "--repo", host.REPO, "--yes", "--cleanup-tag")
             reclaimed += size
-    host.receipt("volume-retire", "retired", tag=old_tag, retained_tag=current_tag, source_ref=ref,
-                 test_id=current["volume_test_id"], retired_snapshot_payload_bytes=previous["archive_bytes"],
+    host.receipt("volume-retire", "retired" if existed else "already-retired", tag=old_tag, retained_tag=current_tag,
+                 source_ref=ref, test_id=current["volume_test_id"], retired_snapshot_payload_bytes=bound["archive_bytes"],
                  reclaimed_payload_bytes=reclaimed)

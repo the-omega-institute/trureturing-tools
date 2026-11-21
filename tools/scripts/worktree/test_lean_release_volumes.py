@@ -294,7 +294,7 @@ class VolumeReleases(unittest.TestCase):
             stack.enter_context(patch.dict(os.environ, {"FAKE_VERIFICATION_API": str(responses)}))
             vtags = {}
             prefix = release.prefix(partition, key, True, indexed="volumes")
-            for num, test_id in ((501, "other-test"), (502, "pair"), (503, "pair")):
+            for num, test_id in ((501, "other-test"), (502, "pair"), (503, "pair"), (504, "pair")):
                 kind = str(num)
                 vtag = prefix + f"ci-{num}-1"
                 vtags[num] = vtag
@@ -311,33 +311,54 @@ class VolumeReleases(unittest.TestCase):
                 identity.return_value = {"producer_commit_sha": author, "publication_id": f"ci-{num}-1",
                                          "source_ref": source_ref, "workflow_run_id": kind, "workflow_run_attempt": "1"}
                 options = {"LEAN_CACHE_VOLUME_TEST_ID": test_id}
-                if num == 503:
+                if num >= 503:
                     options["LEAN_CACHE_VOLUME_RETIRE_TAG"] = vtags[502]
-                with patch.dict(os.environ, options), redirect_stdout(io.StringIO()) as output:
+                original_gh = release.gh
+                def interrupted(deadline, *args):
+                    value = original_gh(deadline, *args)
+                    if num == 503 and args[:3] == ("release", "delete", vtags[502]):
+                        raise OSError("interrupted after deleting predecessor")
+                    return value
+                with patch.dict(os.environ, options), patch.object(release, "gh", side_effect=interrupted), \
+                        redirect_stdout(io.StringIO()) as output:
                     code = release.publish(self.project, partition, verification=verified, build_report=False, indexed=True)
-                self.assertEqual(code, 0, output.getvalue())
+                if num == 503:
+                    self.assertEqual(code, 1, output.getvalue())
+                    self.assertIn("interrupted after deleting predecessor", output.getvalue())
+                    self.assertFalse((self.pool / vtags[502]).exists())
+                else:
+                    self.assertEqual(code, 0, output.getvalue())
+                if num == 504:
+                    uploaded = json.loads(next(x for x in output.getvalue().splitlines()
+                                               if x.startswith("LEAN_CACHE_VOLUME-UPLOAD ")).split(" ", 1)[1])
+                    self.assertEqual(uploaded["payload_bytes"], 0)
+                    self.assertGreater(uploaded["reused_bytes"], 0)
             retired = json.loads(next(x for x in output.getvalue().splitlines()
                                       if x.startswith("LEAN_CACHE_VOLUME-RETIRE ")).split(" ", 1)[1])
             self.assertEqual((retired["tag"], retired["source_ref"], retired["test_id"]),
                              (vtags[502], source_ref, "pair"))
             self.assertGreater(retired["retired_snapshot_payload_bytes"], 0)
+            self.assertEqual(retired["status"], "already-retired")
             self.assertFalse((self.pool / vtags[502]).exists())
             self.assertTrue((self.pool / vtags[501]).exists())
-            manifest = json.loads((self.pool / vtags[503] / release.MANIFEST).read_bytes())
+            manifest = json.loads((self.pool / vtags[504] / release.MANIFEST).read_bytes())
+            with self.assertRaisesRegex(ValueError, "no published binding"):
+                remote.predecessor_binding(release, partition, key, manifest["volume_scope"], "pair", manifest,
+                                           prefix + "ci-500-1", manifest, release.operation_deadline())
             with self.assertRaisesRegex(ValueError, "same verification test"):
-                remote.retire_verification(release, partition, key, vtags[503], manifest, vtags[501],
+                remote.retire_verification(release, partition, key, vtags[504], manifest, vtags[501],
                                            release.operation_deadline())
             self.assertTrue((self.pool / vtags[501]).exists())
             second = self.consumer("verification-empty")
             stage = self.area / "fetch-verification"
             stage.mkdir()
-            self.assertTrue(release.restore_snapshot(second, partition, vtags[503], stage, release.operation_deadline(),
+            self.assertTrue(release.restore_snapshot(second, partition, vtags[504], stage, release.operation_deadline(),
                 expected={"producer_commit_sha": author}, cache_key=key))
             run(second, "lake", "--no-build", "build", *[f"@fixture/+D5.{n}:olean" for n in "ABC"])
             scoped = self.consumer("verification-scoped")
             stage = self.area / "fetch-verification-scoped"
             stage.mkdir()
-            result = original_scoped(scoped, partition, vtags[503], stage, release.operation_deadline(),
+            result = original_scoped(scoped, partition, vtags[504], stage, release.operation_deadline(),
                 cache_key=key, producer=author, targets=["D5.B"], verification=True)
             self.assertGreater(result[1], 0)
             run(scoped, "lake", "--no-build", "build", "@fixture/+D5.B:olean")
