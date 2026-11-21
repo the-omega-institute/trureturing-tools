@@ -30,6 +30,7 @@ except ImportError:
 from lean_cache import SHARED_SEED_PLATFORMS, normalized_platform, partition_path, seed_partitions
 from lean_cache_topology import checkout_topology, git_absolute_path, warm_dev_remediation
 from lean_cache_release_io import (ArchiveInput, INDEXED_ASSET, INDEXED_SCHEMA, MultipartArchiveOutput,
+                                   PRODUCTION_PREFIX, VERIFICATION_PREFIX,
                                    OperationBudget, archive_sha, copy_chunks, extract_members, remaining)
 
 # Use the report entry's declared format and execution capture, never program hashes.
@@ -240,12 +241,7 @@ def existing_release(tag, deadline):
 
 
 def partition_prefix(partition, verification=False, *, indexed=False):
-    if indexed == "volumes":
-        namespace = "lean-cache-verify-v3-" if verification else "lean-cache-v4-"
-    elif indexed:
-        namespace = "lean-cache-verify-v2-" if verification else "lean-cache-v3-"
-    else:
-        namespace = "lean-cache-verify-v1-" if verification else "lean-cache-v2-"
+    namespace = (VERIFICATION_PREFIX if verification else PRODUCTION_PREFIX)[indexed]
     return namespace + partition.replace("/", "-") + "-"
 
 

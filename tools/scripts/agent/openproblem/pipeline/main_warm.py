@@ -14,6 +14,9 @@ import tempfile
 from landing import Landing
 from common import entry, fail, main_lean_lock, main_warm_stamp, sha, uint
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'worktree'))
+from lean_cache_release_io import PRODUCTION_PREFIX
+
 
 @contextmanager
 def warm_lock(op, lock, rounds):
@@ -49,7 +52,7 @@ def selected_release(op):
     pages = json.loads(op.run('gh', 'api', 'repos/' + op.ctx.slug + '/releases?per_page=100',
                               '--paginate', '--slurp').stdout)
     releases = [r for page in pages for r in page if not r.get('draft')
-                and r['tag_name'].startswith(('lean-cache-v2-', 'lean-cache-v3-'))]
+                and r['tag_name'].startswith(tuple(PRODUCTION_PREFIX.values()))]
     if not releases:
         return None
     tag = max(releases, key=lambda release: release['created_at'])['tag_name']
@@ -61,8 +64,10 @@ def selected_release(op):
 
 
 def check_tag(tag):
-    if not re.fullmatch(r'lean-cache-v[23]-[A-Za-z0-9._-]+', tag):
-        fail(13, 'invalid cache tag')
+    for indexed, prefix in PRODUCTION_PREFIX.items():
+        if tag.startswith(prefix) and re.fullmatch(r'[A-Za-z0-9._-]+', tag[len(prefix):]):
+            return bool(indexed)
+    fail(13, 'invalid cache tag')
 
 
 def clean_dev(op):
@@ -115,7 +120,7 @@ def warm_round(op, lock_fd):
         print('MAIN_WARM_ADVANCE', head, producer, tag, flush=True)
     commands = [('restore', ['make', 'lean-cache-from-github-without-mathlib', 'REFRESH_STALE=1',
                              'LEAN_CACHE_APPROVED_TAG=' + tag, 'LEAN_CACHE_APPROVED_PRODUCER=' + producer,
-                             'LEAN_CACHE_INDEXED=' + ('1' if tag.startswith('lean-cache-v3-') else '0')], 'lean'),
+                             'LEAN_CACHE_INDEXED=' + str(int(check_tag(tag)))], 'lean'),
                 ('lean', ['make', 'lean', 'FULL_BUILD=1', 'LEAN_TARGETS=', 'STRATALINT_WARM_DONOR=1'], 'stamp')]
     for label, command, next_phase in commands:
         if phase != label:

@@ -15,6 +15,10 @@ TOOLS = Path(__file__).resolve().parents[1]
 HEAD, MERGE, LATER = ('1' * 40, '2' * 40, '3' * 40)
 
 
+def expected_warm_tag(case):
+    return {'legacy-newest': 'lean-cache-v2-old', 'volume-newest': 'lean-cache-v4-volume'}.get(case, 'lean-cache-v3-new')
+
+
 def stub(kind, args):
     root = Path(os.environ['LAND_FIXTURE'])
     case = os.environ['LAND_CASE']
@@ -26,7 +30,7 @@ def stub(kind, args):
         return
     if kind == 'make':
         if args[:1] == ['lean-cache-from-github-without-mathlib']:
-            tag = os.environ.get('LAND_PINNED_TAG') or ('lean-cache-v2-old' if case == 'legacy-newest' else 'lean-cache-v3-new')
+            tag = os.environ.get('LAND_PINNED_TAG') or expected_warm_tag(case)
             assert 'LEAN_CACHE_APPROVED_TAG=' + tag in args, args
             assert 'LEAN_CACHE_APPROVED_PRODUCER=' + LATER in args, args
             assert 'REFRESH_STALE=1' in args, args
@@ -133,11 +137,13 @@ def stub(kind, args):
     elif args[:1] == ['api']:
         assert '--paginate' in args and '--slurp' in args
         print(json.dumps([[]] if case == 'no-release' else [
-            [{'tag_name': 'lean-cache-v2-old', 'created_at': '4' if case == 'legacy-newest' else '1'},
+            [{'tag_name': 'lean-cache-v2-old', 'created_at': '5' if case == 'legacy-newest' else '1'},
              {'tag_name': 'unrelated-newest', 'created_at': '3'}],
-            [{'tag_name': 'lean-cache-v3-new', 'created_at': '2'}]]))
+            [{'tag_name': 'lean-cache-v3-new', 'created_at': '2'},
+             {'tag_name': 'lean-cache-v4-volume', 'created_at': '4' if case == 'volume-newest' else '0'},
+             {'tag_name': 'lean-cache-verify-v3-ignore', 'created_at': '8'}]]))
     elif args[:2] == ['release', 'download']:
-        assert args[2] == ('lean-cache-v2-old' if case == 'legacy-newest' else 'lean-cache-v3-new')
+        assert args[2] == expected_warm_tag(case)
         Path(args[args.index('--dir')+1], 'manifest.json').write_text(json.dumps(
             {'producer_commit_sha': HEAD if case == 'same-head' else 'invalid' if case == 'bad-manifest' else LATER}))
     else: raise AssertionError(('unexpected gh', args))
@@ -148,6 +154,9 @@ def fixture(root, case):
         (root / directory).mkdir()
     target = root / 'repo/tools/scripts/agent/openproblem'
     shutil.copytree(TOOLS, target, ignore=shutil.ignore_patterns('__pycache__'))
+    worktree = target.parents[1] / 'worktree'
+    worktree.mkdir()
+    shutil.copy2(TOOLS.parents[1] / 'worktree/lean_cache_release_io.py', worktree)
     # Inject a clock into the copied module; production time and subprocess waits stay untouched.
     warm = target/'pipeline/main_warm.py'
     warm.rename(warm.with_name('main_warm_impl.py'))
@@ -264,6 +273,7 @@ def run(mode, only=None):
               'merge-timeout': (124, 'MERGE_WAIT_TIMEOUT')}
              if mode == 'land-watch' else
              {'advance': (0, 'MAIN_WARM_ADVANCE'), 'legacy-newest': (0, 'MAIN_WARM_ADVANCE'),
+              'volume-newest': (0, 'MAIN_WARM_ADVANCE'),
               'same-head': (0, 'MAIN_WARM_KEEP'),
               'divergent': (0, 'MAIN_WARM_KEEP'), 'dirty': (0, 'MAIN_WARM_SKIP'),
               'nondev': (0, 'MAIN_WARM_SKIP'), 'no-release': (0, 'MAIN_WARM_NO_RELEASE'),
@@ -296,7 +306,7 @@ def run(mode, only=None):
                     assert not removed
             else:
                 builds = [c for c in commands if c[:2] == ['make', 'lean']]
-                advancing = case in ('advance', 'legacy-newest', 'state-overrides-xdg', 'stamp-definition-moved')
+                advancing = case in ('advance', 'legacy-newest', 'volume-newest', 'state-overrides-xdg', 'stamp-definition-moved')
                 assert bool(builds) == (advancing or case == 'lean-fail'), (case, commands)
                 assert (root/'state/main-lean.lock').exists() == (case == 'lock-busy')
                 if case == 'xdg-lock-busy': assert (root/'xdg state/trureturing-op/main-lean.lock').is_dir()
