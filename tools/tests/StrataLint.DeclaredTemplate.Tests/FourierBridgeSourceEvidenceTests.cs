@@ -39,9 +39,12 @@ public sealed class FourierBridgeSourceEvidenceTests(Xunit.Abstractions.ITestOut
             using var stderr = new MemoryStream();
             try
             {
-                var prepared = BoundedProcessRunner.Run("make",
-                    ["lean-report-prepare", $"LEAN_TARGETS={module} Reg.{module}"],
-                    root, NativeEvidenceDeadline, 4 * 1024 * 1024,
+                // The build supervisor owns the cold compiler budget. The evidence deadline
+                // applies to producing the two native report facets from those inputs.
+                var prepared = BoundedProcessRunner.Run("/bin/bash",
+                    ["tools/scripts/report/report-supervisor.sh", "--role", "source-evidence-prepare", "--",
+                        "make", "lean-report-prepare", $"LEAN_TARGETS={module} Reg.{module}"],
+                    root, Timeout.InfiniteTimeSpan, 4 * 1024 * 1024,
                     standardOutput: stdout, standardError: stderr);
                 Assert.True(prepared.ExitCode == 0, "Native source/mirror input preparation failed.");
                 var produced = BoundedProcessRunner.Run("/bin/bash",
