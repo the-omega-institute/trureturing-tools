@@ -38,21 +38,15 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: the-omega-institute/trureturing
-          ref: 4c52973daa529c0299390be32749b591f789f930
+          ref: f33221a47152141eeecb75f1bb05b297c6d37939
           path: fixture
           persist-credentials: false
       - name: Install the candidate archive in the pinned consumer
-        run: |
-          set -euo pipefail
-          python3 candidate/package_release.py
-          asset="$PWD/candidate/build/trureturing-tools.tar.gz"
-          sha=$(git -C candidate rev-parse HEAD)
-          digest=$(sha256sum "$asset" | cut -d' ' -f1)
-          jq -n --arg version "v0.0.0-ci.g$sha" --arg sha256 "$digest" \
-            '{version: $version, sha256: $sha256}' > fixture/Meta/tools-release.json
-          git -C fixture add Meta/tools-release.json
-          git -C fixture -c user.name=fixture -c user.email=fixture@invalid commit -qm 'Test candidate release'
-          python3 fixture/.github/scripts/install-tools.py --archive "$asset"
+        run: python3 candidate/.github/scripts/install-fixture.py fixture
+      - name: Test the release bootstrap and pinning
+        if: matrix.shard == 0
+        working-directory: fixture
+        run: python3 -m unittest discover -s tools/consumer/tests
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: fixture/global.json

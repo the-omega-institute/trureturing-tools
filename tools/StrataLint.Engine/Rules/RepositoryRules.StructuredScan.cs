@@ -343,7 +343,8 @@ internal static partial class RepositoryRules
         {
             var value = YamlSubsetParser.Parse(text);
             var element = JsonSerializer.SerializeToElement(value);
-            const string workflowPrefix = ".github/workflows/";
+            var workflowPrefix = path.StartsWith("tools/ci/workflows/", StringComparison.Ordinal)
+                ? "tools/ci/workflows/" : ".github/workflows/";
             var rootSlot = path.StartsWith(workflowPrefix, StringComparison.Ordinal)
                 && !path.AsSpan(workflowPrefix.Length).Contains('/')
                 ? AddressSlot.Workflow : AddressSlot.Entry;

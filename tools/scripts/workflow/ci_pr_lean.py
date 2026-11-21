@@ -153,7 +153,10 @@ if __name__ == "__main__":
                 print(" ".join(modules))
             sys.exit(0)
         if args.write_plan:
-            args.write_plan.write_text(json.dumps(plan_scope(args.manifest, args.base or args.protected_base)))
+            scope = plan_scope(args.manifest, args.base or args.protected_base)
+            # Main-repository CI selects content reports and programs. The tool
+            # repository runs its own compiled suites against the consumer fixture.
+            args.write_plan.write_text(json.dumps({**scope, "cache_suites": []}))
             sys.exit(0)
         code = check(args.manifest, args.protected_base, args.read_plan, args.base)
         sys.exit(code if code >= 0 else 128 - code)

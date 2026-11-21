@@ -33,6 +33,7 @@ class NativeReleaseSupport:
     def release_fixture(self):
         """Real publisher/Inspector/Lake with fixture transport and FIB regression target."""
         self.reg_package()
+        self.copy('tools/Makefile')
         self.copy('tools/lean-inspector/build_inputs.py')
         self.write('tools/scripts/compiled-fib-test.sh', 'echo regressions >> .lake/fib-regressions\n')
         self.write('tools/lean-inspector/LeanInformationAuditRegAnalysis/AuricFib/Main.lean',

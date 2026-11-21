@@ -73,11 +73,6 @@ def prepare_judge(data):
     return 0
 
 
-def prepare_current(data, plan):
-    judge = prepare_judge(data)
-    return judge or (prepare_unit(data["units"]["tests-declared-template"]) if plan["source-evidence"] else 0)
-
-
 def prepare_local_lean():
     # A persistent local host supplies its installed toolchain. Select the pin
     # explicitly without changing elan's global default as hosted setup does.
@@ -94,15 +89,12 @@ def unit_run(name, unit):
     return execute(name, command)
 
 
-def prepare_lean_scope(paths, scope_file, base, *, cache_suites=None):
+def prepare_lean_scope(paths, scope_file, base):
     code = execute("lean-plan", [sys.executable, "tools/scripts/workflow/ci_pr_lean.py", str(paths),
                                  *(["--base", base] if base else []), "--write-plan", str(scope_file)])
     if code:
         return code, False
     scope = json.loads(scope_file.read_text())
-    if cache_suites is not None:
-        scope["cache_suites"] = cache_suites
-        scope_file.write_text(json.dumps(scope))
     return 0, bool(scope["targets"] or scope["programs"])
 
 
@@ -122,18 +114,16 @@ def current_phase(phase, data, plan, base, paths, scope_file=None):
                 stream.write(f"source_status={prefix.status}\ncontinuation={str(prefix.allowed).lower()}\n")
         return prefix.code
     if phase == "prepare":
-        return prepare_current(data, plan)
+        return prepare_judge(data)
     if phase == "build-judge":
         return execute(phase, ["dotnet", "build", *data["current"]["judge_build_args"], "--no-restore"])
     if phase == "lean-plan":
         if scope_file is None:
             raise DetectError("Lean planning requires an output file")
-        suites = [key for _, key in READY_PHASES if plan[key]]
-        code, builds = prepare_lean_scope(paths, scope_file, base, cache_suites=suites)
-        needed = builds or bool(suites)
+        code, builds = prepare_lean_scope(paths, scope_file, base)
         if code == 0 and os.environ.get("GITHUB_OUTPUT"):
             with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
-                stream.write(f"builds_lean={str(builds).lower()}\nneeds_lean={str(needed).lower()}\n")
+                stream.write(f"builds_lean={str(builds).lower()}\nneeds_lean={str(builds).lower()}\n")
         return code
     if phase == "pr-lean":
         if not paths.is_file():
@@ -144,16 +134,6 @@ def current_phase(phase, data, plan, base, paths, scope_file=None):
                                *(["--base", base] if base and not plan["delta"] else []),
                                *(["--read-plan", str(scope_file)] if scope_file is not None else []),
                                *(["--protected-base", base] if plan["delta"] else [])])
-    if phase in ("compiled-audit", "source-evidence") and not plan[phase]:
-        result(phase, "not-applicable")
-        return 0
-    if phase == "compiled-audit":
-        return execute(phase, ["make", "compiled-judge-test"])
-    if phase == "source-evidence":
-        return execute(phase, ["make", "-C", "tools", "test",
-                              "TEST_PROJECT=tools/tests/StrataLint.DeclaredTemplate.Tests/StrataLint.DeclaredTemplate.Tests.csproj",
-                              "TEST_FILTER=FullyQualifiedName~FourierBridgeSourceEvidenceTests"],
-                       env={"CI_DOTNET_PREPARED": "1", "FOURIER_BRIDGE_SOURCE_ARTIFACTS": ""})
     if phase == "check-delta" and not plan["report"]:
         if not plan["delta"]:
             result(phase, "not-applicable")
@@ -165,14 +145,10 @@ def current_phase(phase, data, plan, base, paths, scope_file=None):
     raise DetectError(f"unknown current phase: {phase}")
 
 
-READY_PHASES = (("source-evidence", "source-evidence"), ("compiled-audit", "compiled-audit"))
-
-
 @dataclass(frozen=True)
 class Prerequisite:
     code: int
     status: str
-    judge_ready: bool
 
     @property
     def allowed(self):
@@ -182,51 +158,35 @@ class Prerequisite:
 def current_prerequisite(data, plan, base, paths):
     if not plan["hits"]["current"]:
         result("source", "not-applicable")
-        return Prerequisite(0, "not-applicable", False)
+        return Prerequisite(0, "not-applicable")
     prepared = prepare_judge(data)
     judge = prepared or (0 if os.environ.get("JUDGE_HIT") == "true" else
                          current_phase("build-judge", data, plan, base, paths))
     if judge:
         result("source", "blocked")
         status = "timeout" if judge in (124, 137) else "cancelled" if judge in (130, 143) else "judge-failed"
-        return Prerequisite(judge, status, False)
+        return Prerequisite(judge, status)
     code = current_phase("source", data, plan, base, paths)
     status = ("accepted" if code == 0 else "rejected" if code == 1 else
               "timeout" if code in (124, 137) else "cancelled" if code in (130, 143) else "infrastructure")
-    return Prerequisite(code, status, True)
+    return Prerequisite(code, status)
 
 
 def current_run(data, plan, base, paths, prefix=None):
     prefix = prefix or current_prerequisite(data, plan, base, paths)
     if not prefix.allowed:
         result("pr-lean", "blocked" if plan["report"] else "not-applicable")
-        for phase, selection_key in READY_PHASES:
-            result(phase, "blocked" if plan[selection_key] else "not-applicable")
         return prefix.code
-    failures = [prefix.code]
     if not plan["report"]:
         return prefix.code
-    restore = prepare_current(data, plan)
     scope_file = paths.with_name("current-lean-plan.json")
     planning, builds_lean = prepare_lean_scope(paths, scope_file, base)
-    needs_lean = builds_lean or any(plan[key] for _, key in READY_PHASES)
-    lean = prepare_local_lean() if not planning and needs_lean else 0
-    judge = 0 if prefix.judge_ready else prefix.code
-    # Source-only admission can still run if preparation for a selected Lean test failed.
-    report = planning or (lean if builds_lean else 0) or current_phase("pr-lean", data, plan, base, paths, scope_file)
-    if planning or builds_lean and lean:
+    preparation = planning or (prepare_local_lean() if builds_lean else 0)
+    if preparation:
         result("pr-lean", "blocked")
-    failures += [lean, restore, report]
-    for phase, selection_key in READY_PHASES:
-        if not plan[selection_key]:
-            result(phase, "not-applicable")
-        elif judge or report or lean or phase == "source-evidence" and restore:
-            result(phase, "blocked")
-        else:
-            failures.append(current_phase(phase, data, plan, base, paths))
-            if failures[-1] in (124, 130, 137, 143):
-                return failures[-1]
-    return next((code for code in failures if code), 0)
+        return prefix.code or preparation
+    report = current_phase("pr-lean", data, plan, base, paths, scope_file)
+    return prefix.code or report
 
 
 def with_budget(path, action):

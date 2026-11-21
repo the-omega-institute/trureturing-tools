@@ -24,14 +24,24 @@ class ContractTests(unittest.TestCase):
         self.env = dict(os.environ, GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.com",
                         GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.com", PYTHONDONTWRITEBYTECODE="1")
         self.git("init", "-q", "-b", "fixture")
-        for relative in ("Meta/ci-units.json", "Makefile", "tools/scripts/local-harness-gate.sh"):
-            self.put(relative, (ROOT / relative).read_bytes())
+        self.put(contract.CONTRACT, (ROOT / contract.CONTRACT).read_bytes())
+        self.put("Makefile", (ROOT / "Makefile").read_bytes())
+        gate = "tools/scripts/local-harness-gate.sh"
+        self.put(gate, (ROOT / gate).read_bytes())
         shutil.copytree(ROOT / "tools/scripts/workflow", self.root / "tools/scripts/workflow", dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("__pycache__"))
         self.put("D5/old name\nsource.lean", b"theorem old : True := trivial\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fixture base")
         self.base = self.git("rev-parse", "HEAD").strip()
+
+    def test_consumer_owns_its_registry_even_with_an_installed_release(self):
+        self.put("tools/ci/ci-units.json", b"superseded release registry")
+        self.put("Meta/tools-release.json", b'{"version":"v1.0.0","sha256":"fixture"}')
+        self.assertEqual({"filemap"}, set(contract.load(self.root)[0]["units"]))
+        (self.root / contract.CONTRACT).unlink()
+        with self.assertRaises(FileNotFoundError):
+            contract.load(self.root)
 
     def git(self, *args):
         return subprocess.check_output(["git", "-C", str(self.root), *args], env=self.env).decode()
@@ -88,17 +98,16 @@ class ContractTests(unittest.TestCase):
     def test_normal_content_uses_source_policy_without_worktree_lifecycle(self):
         self.put("Blueprint/D5/S3/Content.scribe.cs", b"// changed content\n")
         plan = self.parity()
-        self.assertTrue(plan["hits"]["tests-architecture"])
-        self.assertFalse(plan["hits"]["tests-worktree-contract"])
+        self.assertEqual(plan["hits"], {"current": True, "filemap": True})
         self.assertTrue(plan["report"])
         self.assertTrue(plan["delta"])
         data, _ = contract.load(self.root)
         path = ["Blueprint/D5/S3/Content.scribe.cs"]
         self.assertEqual(plan, contract.selection(data, path, "push"))
 
-    def test_real_infrastructure_keeps_behavioral_tests(self):
-        self.put("tools/scripts/worktree/worktree_protocol.py", b"# infrastructure\n")
-        self.assertTrue(self.parity()["hits"]["tests-worktree-contract"])
+    def test_tools_pin_checks_consumer_integration(self):
+        self.put("Meta/tools-release.json", b'{"version": "v1.0.0"}\n')
+        self.assertEqual(self.parity()["hits"], {"current": True, "filemap": True})
 
     def test_shared_compute_owner_selects_every_actual_consumer(self):
         self.put("tools/scripts/workflow/ci_compute.py", b"# changed shared compute owner\n")
@@ -134,7 +143,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(index, (self.root / ".git/index").read_bytes())
         self.assertEqual(refs, self.git("show-ref", "--head"))
         plan = self.parity()
-        self.assertFalse(plan["hits"]["tests-worktree-contract"])
+        self.assertTrue(plan["hits"]["current"])
 
     def test_staged_removal_of_ignored_tracked_file_matches_committed_candidate(self):
         retired = "tools/retired.py"
@@ -256,7 +265,7 @@ class ContractTests(unittest.TestCase):
         data["CI_UNITS"] = ["[current]", "unmatched/*", "[probe]", "probes/*"]
         data["units"] = {"probe": {"project": "", "command": 'bash -c \'exit "$PROBE_EXIT"\'',
                                    "dotnet": False, "lean": "none", "cache-dependency-path": ""}}
-        self.put("Meta/ci-units.json", json.dumps(data).encode())
+        self.put(contract.CONTRACT, json.dumps(data).encode())
         self.git("add", ".")
         self.git("commit", "-qm", "fixture contract")
         base = self.git("rev-parse", "HEAD").strip()
@@ -291,12 +300,12 @@ class ContractTests(unittest.TestCase):
     def test_contract_rejects_unknown_fields_duplicate_members_and_unit_mismatch(self):
         data, _ = contract.load(self.root)
         for altered in (dict(data, unknown=True), dict(data, units={}),
-                        dict(data, units=dict(data["units"], current=data["units"]["tests-ci-entry"])),
+                        dict(data, units=dict(data["units"], current=data["units"]["filemap"])),
                         dict(data, current=dict(data["current"], unknown=True))):
-            self.put("Meta/ci-units.json", json.dumps(altered).encode())
+            self.put(contract.CONTRACT, json.dumps(altered).encode())
             with self.assertRaises((ValueError, TypeError)):
                 contract.load(self.root)
-        self.put("Meta/ci-units.json", b'{"CI_UNITS":[],"CI_UNITS":[]}')
+        self.put(contract.CONTRACT, b'{"CI_UNITS":[],"CI_UNITS":[]}')
         with self.assertRaisesRegex(ValueError, "duplicate"):
             contract.load(self.root)
 

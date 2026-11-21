@@ -140,7 +140,6 @@ components:
     members:
       - Directory.Packages.props
       - .github/workflows/ci-current.yml
-      - .github/workflows/ci-unit.yml
       - tools/Architecture/BannedSymbols.txt
       - tools/tests/BannedApiCompileFailProof/BannedApiCompileFailProof.csproj
       - tools/tests/BannedApiCompileFailProof/BannedApiViolations.cs

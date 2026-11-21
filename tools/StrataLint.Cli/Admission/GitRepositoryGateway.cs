@@ -115,7 +115,15 @@ internal sealed partial class GitRepositoryGateway : IRepositoryGateway
         }
 
         var workflow = GitBytes("cat-file", "blob", workflowObject);
-        return AdmissionWorkflowTopology.HasRequiredBaseGate(workflow, defaultBranch)
+        (string? Pin, string? Definition) ReadReleasedGate()
+        {
+            var snapshot = GitRepositorySnapshotReader.ReadRevision(root, defaultHead,
+                [ToolsRelease.PinPath, CiWorkflowDocument.ReleaseGatePath]);
+            string? ReadText(string path) => snapshot.Entries.FirstOrDefault(entry => entry.Path == path) is { } entry
+                ? StrictUtf8.GetString(entry.Bytes.AsSpan()) : null;
+            return (ReadText(ToolsRelease.PinPath), ReadText(CiWorkflowDocument.ReleaseGatePath));
+        }
+        return AdmissionWorkflowTopology.HasRequiredBaseGate(workflow, defaultBranch, ReadReleasedGate)
             ? new AdmissionTopologyOutcome.SteadyStateActive(defaultBranch)
             : new AdmissionTopologyOutcome.BootstrapNotActive(defaultBranch);
     }
