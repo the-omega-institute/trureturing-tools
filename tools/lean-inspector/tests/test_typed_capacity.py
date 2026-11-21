@@ -50,7 +50,7 @@ class TypedCapacityTests(NativeTestSupport, unittest.TestCase):
             Path(str(utility) + '.sources.json').write_text('[]')
             output = self.root / f'{side}.zip'
             self.requests[side] = [str(self.root), name, str(self.root / path),
-                str(utility), str(self.executable), str(output), '', '']
+                str(utility), str(self.executable), str(output)]
 
     def produce(self, sides, capacity, *, success=True, label):
         calls = []
