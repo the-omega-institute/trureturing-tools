@@ -137,6 +137,7 @@ exit """ + str(failure) + '\n')
             environment['FIB_TEST_ARCHIVE'] = str(root / 'during-check.tar')
         environment.update(REGENERATE_REPORT_ARTIFACTS=str(int(regenerate)), STRATALINT_LEAN_REPORT_LOG_DIR=str(logs))
         if force_without_seed:
+            write('.github/scripts/install-tools.py', '# The fixture supplies its own tools.\n')
             for suffix in (*publication.SUFFIXES, reuse.SUFFIX):
                 publication.member(report, suffix).unlink()
             command = [shutil.which('make'), '-f', str(test_reuse.ROOT / 'Makefile'), 'check-lean-report',
