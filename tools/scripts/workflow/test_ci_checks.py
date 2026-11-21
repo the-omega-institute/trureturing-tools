@@ -344,6 +344,7 @@ class CheckTests(unittest.TestCase):
             data, _ = contract.load(ROOT)
             if report_paths is not None:
                 data["current"]["report_paths"] = report_paths
+            (root / contract.CONTRACT).parent.mkdir(exist_ok=True)
             (root / contract.CONTRACT).write_text(json.dumps(data))
             for unit in data["units"].values():
                 for lock in unit["cache-dependency-path"].splitlines():

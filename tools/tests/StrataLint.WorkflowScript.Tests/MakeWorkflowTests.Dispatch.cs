@@ -24,7 +24,7 @@ public sealed partial class MakeWorkflowTests
     [Fact]
     public void ThinDispatchCountsAnIndependentCommandAfterTheCurrentHelpContinuation()
     {
-        var makefile = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), "Makefile"));
+        var makefile = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), "tools", "consumer", "Makefile"));
         Assert.Equal(1, RecipeCount(makefile, "help"));
         Assert.Contains("\\\n\t\t", makefile, StringComparison.Ordinal);
 
@@ -35,10 +35,10 @@ public sealed partial class MakeWorkflowTests
     public void MakefileIsAThinCompleteDispatchTable()
     {
         var root = TestRepositoryLayout.FindRoot();
-        var makefile = File.ReadAllText(Path.Combine(root, "Makefile"));
+        var makefile = File.ReadAllText(Path.Combine(root, "tools", "consumer", "Makefile"));
 
         Assert.Contains(".DEFAULT_GOAL := help", makefile, StringComparison.Ordinal);
-        var targets = TestProcessRunner.Run("make", ["-pRn", "help"], root,
+        var targets = TestProcessRunner.Run("make", ["-f", "tools/consumer/Makefile", "-pRn", "help"], root,
             BoundedProcessRunner.HangDetectionBudget, 1024 * 1024);
         Assert.Equal(0, targets.ExitCode);
         var declared = Assert.Single(Encoding.UTF8.GetString(targets.StandardOutput).Split('\n'),
@@ -178,7 +178,7 @@ public sealed partial class MakeWorkflowTests
     [Fact]
     public void RootMakefileExposesOnlyThinPrOpenAndPrWatchDispatch()
     {
-        var makefile = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), "Makefile"));
+        var makefile = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), "tools", "consumer", "Makefile"));
         var openRecipe = Recipe(makefile, "pr-open");
         var watchRecipe = Recipe(makefile, "pr-watch");
 
@@ -463,7 +463,7 @@ public sealed partial class MakeWorkflowTests
         Assert.DoesNotContain("make tools-test", rootOutput, StringComparison.Ordinal);
         Assert.DoesNotContain("pr-update", rootOutput, StringComparison.Ordinal);
 
-        var makefile = File.ReadAllText(Path.Combine(root, "Makefile"));
+        var makefile = File.ReadAllText(Path.Combine(root, "tools", "consumer", "Makefile"));
         Assert.Contains("make scribe-release-fetch DIGEST=\"$(DIGEST)\" PREFIX=\"$(PREFIX)\"", Recipe(makefile, "dag"), StringComparison.Ordinal);
         Assert.Contains("--scribe-pack \"$(SCRIBE_PACK)\" --scribe-pack-digest \"$(DIGEST)\"", Recipe(makefile, "dag"), StringComparison.Ordinal);
         Assert.DoesNotContain("DIGEST", Recipe(makefile, "filemap"), StringComparison.Ordinal);

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decide which CI units a change hits from the sole unit contract.
 
---contract reads Meta/ci-units.json for hosted execution. The standalone pattern
+--contract reads the consumer CI registry for hosted execution. The standalone pattern
 test interface accepts CI_UNITS. GITHUB_OUTPUT receives
 `hits=<JSON object>` mapping each unit, in specification order, to true or false.
 

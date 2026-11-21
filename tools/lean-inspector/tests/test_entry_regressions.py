@@ -140,7 +140,7 @@ exit """ + str(failure) + '\n')
             write('.github/scripts/install-tools.py', '# The fixture supplies its own tools.\n')
             for suffix in (*publication.SUFFIXES, reuse.SUFFIX):
                 publication.member(report, suffix).unlink()
-            command = [shutil.which('make'), '-f', str(test_reuse.ROOT / 'Makefile'), 'check-lean-report',
+            command = [shutil.which('make'), '-f', str(test_reuse.ROOT / 'tools/consumer/Makefile'), 'check-lean-report',
                        'FULL_BUILD=1', 'LEAN_REPORT_CACHE_MISS_POLICY=fetch-or-fail',
                        force_without_seed + '=1', 'LEAN_REPORT=' + str(report)]
         else:

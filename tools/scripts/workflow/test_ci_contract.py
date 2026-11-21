@@ -24,14 +24,34 @@ class ContractTests(unittest.TestCase):
         self.env = dict(os.environ, GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.com",
                         GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.com", PYTHONDONTWRITEBYTECODE="1")
         self.git("init", "-q", "-b", "fixture")
-        for relative in ("Meta/ci-units.json", "Makefile", "tools/scripts/local-harness-gate.sh"):
-            self.put(relative, (ROOT / relative).read_bytes())
+        self.put(contract.CONTRACT, (ROOT / contract.CONTRACT).read_bytes())
+        self.put("Makefile", (ROOT / "tools/consumer/Makefile").read_bytes())
+        gate = "tools/scripts/local-harness-gate.sh"
+        self.put(gate, (ROOT / gate).read_bytes())
         shutil.copytree(ROOT / "tools/scripts/workflow", self.root / "tools/scripts/workflow", dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("__pycache__"))
         self.put("D5/old name\nsource.lean", b"theorem old : True := trivial\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fixture base")
         self.base = self.git("rev-parse", "HEAD").strip()
+
+    def test_release_registry_requires_every_caller_to_use_the_pinned_workflow_revision(self):
+        revision = "c" * 40
+        self.put("Meta/tools-release.json", json.dumps({"workflow_sha": revision}).encode())
+        for name in ("ci-current", "ci-publication-verify", "lean-analysis-fixtures", "lean-cache-publish",
+                     "scribe-release-publish"):
+            caller = f".github/workflows/{name}.yml"
+            self.put(caller, f"jobs:\n  checks:\n    uses: the-omega-institute/trureturing-tools/{caller}@{revision}\n".encode())
+        self.assertEqual(self.root / contract.CONTRACT, contract.registry_path(self.root))
+        self.put(caller, (self.root / caller).read_bytes().replace(revision.encode(), b"dev"))
+        with self.assertRaisesRegex(contract.DetectError, "must invoke"):
+            contract.load(self.root)
+
+    def test_historical_consumer_contract_remains_bound_to_its_own_checkout(self):
+        self.put(contract.LEGACY_CONTRACT, b"malformed historical registry")
+        self.put("Meta/tools-release.json", b'{"version":"v0.1.1","sha256":"fixture"}')
+        with self.assertRaises(json.JSONDecodeError):
+            contract.load(self.root)
 
     def git(self, *args):
         return subprocess.check_output(["git", "-C", str(self.root), *args], env=self.env).decode()
@@ -256,7 +276,7 @@ class ContractTests(unittest.TestCase):
         data["CI_UNITS"] = ["[current]", "unmatched/*", "[probe]", "probes/*"]
         data["units"] = {"probe": {"project": "", "command": 'bash -c \'exit "$PROBE_EXIT"\'',
                                    "dotnet": False, "lean": "none", "cache-dependency-path": ""}}
-        self.put("Meta/ci-units.json", json.dumps(data).encode())
+        self.put(contract.CONTRACT, json.dumps(data).encode())
         self.git("add", ".")
         self.git("commit", "-qm", "fixture contract")
         base = self.git("rev-parse", "HEAD").strip()
@@ -293,10 +313,10 @@ class ContractTests(unittest.TestCase):
         for altered in (dict(data, unknown=True), dict(data, units={}),
                         dict(data, units=dict(data["units"], current=data["units"]["tests-ci-entry"])),
                         dict(data, current=dict(data["current"], unknown=True))):
-            self.put("Meta/ci-units.json", json.dumps(altered).encode())
+            self.put(contract.CONTRACT, json.dumps(altered).encode())
             with self.assertRaises((ValueError, TypeError)):
                 contract.load(self.root)
-        self.put("Meta/ci-units.json", b'{"CI_UNITS":[],"CI_UNITS":[]}')
+        self.put(contract.CONTRACT, b'{"CI_UNITS":[],"CI_UNITS":[]}')
         with self.assertRaisesRegex(ValueError, "duplicate"):
             contract.load(self.root)
 

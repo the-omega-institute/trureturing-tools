@@ -70,7 +70,8 @@ class LocalEntryFixture:
         self.api = reuse
         self.seed = self.fixture.report
         self.output = self.root / '.lake/build/stratalint' / publication.RAW
-        for name in ('Makefile', 'tools/scripts/report/lean-report.sh',
+        shutil.copy2(ROOT / "tools/consumer/Makefile", self.root / "Makefile")
+        for name in ('tools/scripts/report/lean-report.sh',
                      'tools/lean-inspector/inspect.sh', 'tools/lean-inspector/reuse.py',
                      'tools/lean-inspector/publication.py', 'tools/lean-inspector/materials.py',
                      'tools/lean-inspector/fib_analysis.py',
@@ -467,7 +468,8 @@ class FullBuildConfirmationTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        for name in ('Makefile', 'tools/scripts/worktree/lean-cache-run.sh', 'tools/scripts/worktree/lean-cache-ensure.sh',
+        shutil.copy2(ROOT / "tools/consumer/Makefile", self.root / "Makefile")
+        for name in ('tools/scripts/worktree/lean-cache-run.sh', 'tools/scripts/worktree/lean-cache-ensure.sh',
                      'tools/scripts/worktree/warm-donor.sh', 'tools/scripts/report/lean-report.sh',
                      'tools/lean-inspector/inspect.sh'):
             destination = self.root / name

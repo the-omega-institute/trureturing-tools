@@ -1,6 +1,5 @@
 """Exercise the producer's test suites and its pinned consumer contracts."""
 
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -34,10 +33,13 @@ def standalone():
     for proof in ("banned-api-proof", "capability-proof"):
         check("make", "-C", "tools", "compile-proof", f"PROOF={proof}")
     check("bash", "tools/scripts/agent/integration-mirror-test.sh")
+    check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/lean-fork-contribute/tests")
 
 
 def contract(shard, shard_count):
-    units = json.loads(Path("Meta/ci-units.json").read_text())["units"]
+    sys.path.insert(0, str(Path("tools/scripts/workflow").resolve()))
+    from ci_contract import load
+    units = load(Path.cwd())[0]["units"]
     # The complementary Fourier source evidence requires the actual downstream Lean report.
     registered = {u["project"] for u in units.values() if u["project"]}
     for unit in units.values():

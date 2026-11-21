@@ -47,7 +47,7 @@ exit "${FAKE_BUILD_EXIT:-0}"
         for name in ("lean-cache-publish.sh", "cache_material.py", "lean_cache.py", "lean_cache_release.py", "lean_cache_release_io.py", "lean_cache_topology.py", "lean_actions.py"):
             shutil.copy2(PUBLISH.with_name(name), helper_dir / name)
         prepare_release_report(self.root)
-        shutil.copy2(ROOT / "Makefile", self.root / "Makefile")
+        shutil.copy2(ROOT / "tools/consumer/Makefile", self.root / "Makefile")
         write(self.root / ".gitignore", "*\n!untracked-input.lean\n")
         subprocess.run(["git", "init", "-q", str(self.root)], check=True, capture_output=True)
         self.commit_fixture()

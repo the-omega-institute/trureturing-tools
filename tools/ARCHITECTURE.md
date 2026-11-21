@@ -4,8 +4,8 @@ Production harness projects, scripts, manifests, and architecture material live 
 `tools/`; all harness test and compile-fail projects live under `tools/tests/`.
 `Meta/` is the data side of this boundary and contains no harness program directory.
 
-CI is one workflow, `ci-current.yml`, which consumes the sole CI_UNITS selection and execution contract in
-`Meta/ci-units.json`. Its `detect` job fetches commits and trees only, verifies the
+The consumer event workflow calls the released `ci-current.yml` at the commit in its tools lock.
+The called workflow reads the CI_UNITS selection and execution contract in `tools/ci/ci-units.json`. Its `detect` job fetches commits and trees only, verifies the
 event candidate through `ci-entry.sh` (the checked-out `GITHUB_SHA`, the complete
 event range and the pull-request merge parents), lists the changed paths, and
 `ci_detect.py` decides from the `CI_UNITS` sections in that contract which
@@ -23,7 +23,7 @@ run in parallel; steps within a job may be serial. `ci-unit.yml` supplies the co
 and optional Lean cache steps; its unit id selects the declaration consumed by
 `ci_checks.py`, which runs the canonical project/test-evidence or command implementation. The current job produces one Lean report and
 runs `check-current`, Scribe, and (for pull requests) `check-delta` against the
-first parent as data. The one required check is the `required` job:
+first parent as data. The consumer’s `required` job reports the called workflow’s result. Inside the called workflow,
 `ci_required.py` is green only when detection succeeded, the unit sections and the
 jobs it needs correspond one to one, every hit unit succeeded with its matching execution
 identity and every missed unit was skipped. Each hosted entry removes remote state after the fixed candidate and any

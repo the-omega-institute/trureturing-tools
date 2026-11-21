@@ -11,7 +11,8 @@ import sys
 
 from ci_detect import DetectError, parse, read_changed
 
-CONTRACT = Path("Meta/ci-units.json")
+CONTRACT = Path("tools/ci/ci-units.json")
+LEGACY_CONTRACT = Path("Meta/ci-units.json")
 SHA = re.compile(r"[0-9a-f]{40}")
 ZERO = "0" * 40
 PUSH_COMMIT_LIMIT = 2048
@@ -26,8 +27,29 @@ def unique(pairs):
     return result
 
 
+def registry_path(root):
+    legacy = root / LEGACY_CONTRACT
+    pin = root / "Meta/tools-release.json"
+    if pin.is_file():
+        revision = json.loads(pin.read_bytes(), object_pairs_hook=unique).get("workflow_sha")
+        if revision is None and legacy.is_file():
+            return legacy
+        if legacy.exists():
+            raise DetectError(f"{LEGACY_CONTRACT} shadows the release registry")
+        if not isinstance(revision, str) or not SHA.fullmatch(revision):
+            raise DetectError("a release-owned CI registry requires workflow_sha")
+        for name in ("ci-current", "ci-publication-verify", "lean-analysis-fixtures",
+                     "lean-cache-publish", "scribe-release-publish"):
+            file = root / ".github/workflows" / (name + ".yml")
+            references = re.findall(r"^    uses:\s*(\S+)\s*$", file.read_text(), re.MULTILINE)
+            expected = f"the-omega-institute/trureturing-tools/.github/workflows/{file.name}@{revision}"
+            if references != [expected]:
+                raise DetectError(f"{file.name} must invoke {expected}")
+    return legacy if legacy.is_file() else root / CONTRACT
+
+
 def load(root):
-    raw = (root / CONTRACT).read_bytes()
+    raw = registry_path(root).read_bytes()
     data = json.loads(raw, object_pairs_hook=unique)
     if not isinstance(data, dict) or set(data) != {"CI_UNITS", "units", "current"}:
         raise DetectError("invalid contract members")

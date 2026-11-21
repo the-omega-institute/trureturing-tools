@@ -21,7 +21,7 @@ public sealed partial class FileMapPolicyTests(CanonicalFileMapFixture fixture)
 
     [Theory]
     [InlineData("lean-report-inputs.json", "LeanReportSelection")]
-    [InlineData("Meta/ci-cache-paths.json", "NativeArchivePaths")]
+    [InlineData("tools/ci/ci-cache-paths.json", "NativeArchivePaths")]
     [InlineData("Meta/ci-units.json", "CiUnitContract")]
     public void RuntimeManifestIsAdmittedWithItsRuntimeVerifier(string path, string verifier)
     {

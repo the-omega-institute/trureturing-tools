@@ -89,8 +89,8 @@ class LifecycleTests(unittest.TestCase):
             shutil.copy2(module, inspector / module.name)
         for name in ("host-cleanup.py", "worktree-init.sh", "clean-lanes.sh", "maintenance_log.py"):
             shutil.copy2(ROOT / "tools/scripts" / name, scripts / name)
-        for name in ("Makefile", "tools/Makefile"):
-            shutil.copy2(ROOT / name, self.main / name)
+        shutil.copy2(ROOT / "tools/consumer/Makefile", self.main / "Makefile")
+        shutil.copy2(ROOT / "tools/Makefile", self.main / "tools/Makefile")
         tools = self.main / "tools"
         (tools / "Fixture.csproj").write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
             '<TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n')

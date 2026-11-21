@@ -17,7 +17,7 @@ public sealed class LeanCacheEnsureScriptTests
         if (OperatingSystem.IsWindows()) return;
         using var fixture = new TemporaryDirectory();
         var installed = InstallScript(fixture.Path);
-        File.Copy(Path.Combine(TestRepositoryLayout.FindRoot(), "Makefile"),
+        File.Copy(Path.Combine(TestRepositoryLayout.FindRoot(), "tools", "consumer", "Makefile"),
             Path.Combine(installed.Repository, "Makefile"));
         Directory.CreateDirectory(installed.Bin);
         var dotnet = Path.Combine(installed.Bin, "dotnet");

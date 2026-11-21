@@ -9,7 +9,7 @@ public sealed partial class MakeWorkflowTests
     public void PlaybookTargetsAreHelpedAndDelegateToOneCanonicalScript()
     {
         var root = TestRepositoryLayout.FindRoot();
-        var makefile = File.ReadAllText(Path.Combine(root, "Makefile"));
+        var makefile = File.ReadAllText(Path.Combine(root, "tools", "consumer", "Makefile"));
         var script = File.ReadAllText(Path.Combine(root, PlaybookWorkflowScriptPath));
 
         foreach (var target in new[] { "deposit", "deposit-uncovered" })

@@ -20,11 +20,17 @@ internal static class AdmissionWorkflowTopology
 
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
-    internal static bool HasRequiredBaseGate(ReadOnlySpan<byte> bytes, string defaultBranch)
+    internal static bool HasRequiredBaseGate(ReadOnlySpan<byte> bytes, string defaultBranch,
+        Func<(string? Pin, string? Definition)>? releasedGate = null)
     {
         try
         {
-            return CiWorkflowDocument.Parse(StrictUtf8.GetString(bytes))?.HasDeltaGate(defaultBranch) == true;
+            var caller = CiWorkflowDocument.Parse(StrictUtf8.GetString(bytes));
+            if (caller?.RunsOnBranch("pull_request", defaultBranch) != true) return false;
+            if (caller.CalledGateRevision is null) return caller.HasDeltaStep();
+            if (releasedGate is null) return false;
+            var (pin, definition) = releasedGate();
+            return caller.ResolveCalledGate(pin, definition)?.HasDeltaStep() == true;
         }
         catch (DecoderFallbackException)
         {

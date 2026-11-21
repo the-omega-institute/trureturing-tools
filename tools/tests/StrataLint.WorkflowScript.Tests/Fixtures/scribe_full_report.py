@@ -23,7 +23,8 @@ class ScribeFullReportContracts(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.root, self.report = self.fixture.root, self.fixture.report
-        for name in ('Makefile', 'tools/scripts/scribe.sh',
+        shutil.copy2(ROOT / "tools/consumer/Makefile", self.root / "Makefile")
+        for name in ('tools/scripts/scribe.sh',
                      'tools/scripts/report/report-consumer.sh',
                      'tools/lean-inspector/publication.py', 'tools/lean-inspector/materials.py',
                      'tools/lean-inspector/fib_analysis.py'):

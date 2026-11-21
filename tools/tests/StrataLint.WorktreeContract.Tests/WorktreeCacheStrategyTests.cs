@@ -10,7 +10,7 @@ public sealed class WorktreeCacheStrategyTests
     public void WorktreeToolingKeepsItsPathContractAndNeverWalksTheCacheTreePerFile()
     {
         var root = TestRepositoryLayout.FindRoot();
-        var makefile = File.ReadAllText(Path.Combine(root, "Makefile"));
+        var makefile = File.ReadAllText(Path.Combine(root, "tools", "consumer", "Makefile"));
         var init = File.ReadAllText(Path.Combine(root, "tools", "scripts", "worktree-init.sh"));
         var clean = File.ReadAllText(Path.Combine(root, "tools", "scripts", "clean-lanes.sh"));
 

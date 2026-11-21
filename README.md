@@ -40,7 +40,7 @@ gh workflow run release.yml --ref dev -f source=pr/123
 
 To refresh an expired artifact, rerun the pull request CI or use `gh workflow run ci.yml --ref my-feature` for a branch.
 
-The preview tag contains the channel, run number and source commit. Set the repository variable `TOOLS_RELEASE_SERIES` to choose the version under development (default `0.1.0`). In the downstream trial PR, pin the preview's exact tag and the SHA-256 of `trureturing-tools.tar.gz`. The release notes and the GitHub asset metadata carry that digest.
+The preview tag contains the channel, run number and source commit. Set the repository variable `TOOLS_RELEASE_SERIES` to choose the version under development (default `0.1.0`). In a downstream trial checkout, run `make install-tools`, then `python3 tools/consumer/pin.py <preview-tag>`. Commit the updated `Meta/tools-release.json` and workflow callers together. The pin command checks the public archive's SHA-256 and matches its reusable workflows to the release commit. Use the same command with a stable tag after promotion.
 
 After downstream CI accepts the candidate, promote it to `main` and run the stable workflow on that branch. Set `preview` to the tested preview tag and `version` to the stable tag.
 

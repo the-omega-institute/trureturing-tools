@@ -17,7 +17,7 @@ public sealed class CanonicalFileMapFixture
     private readonly Lazy<ImmutableArray<FileMapFinding>> findings = new(() =>
         FileMapPolicy.InspectRepository(TestRepositoryLayout.FindRoot(),
             scope: new FileMapInspectionScope(
-            ["lean-report-inputs.json", "Meta/ci-cache-paths.json", "Meta/ci-checks.json", "Meta/engineering-projects.json",
+            ["lean-report-inputs.json", "tools/ci/ci-cache-paths.json", "tools/ci/ci-checks.json", "Meta/engineering-projects.json",
                 "Blueprint/D5/S0/Carrier/Ring.md"], Actors: true, Inventory: true)).ToImmutableArray());
 
     internal ImmutableArray<FileMapFinding> Findings => findings.Value;

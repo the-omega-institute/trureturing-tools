@@ -473,7 +473,7 @@ public sealed partial class PrOpenScriptTests
             var script = Path.Combine(scriptDirectory, "pr.sh");
             File.Copy(Path.Combine(root, "tools", "scripts", "pr.sh"), script, true);
             var checkout = Path.GetFullPath(Path.Combine(scriptDirectory, "..", ".."));
-            File.Copy(Path.Combine(root, "Makefile"), Path.Combine(checkout, "Makefile"), true);
+            File.Copy(Path.Combine(root, "tools", "consumer", "Makefile"), Path.Combine(checkout, "Makefile"), true);
             var scratch = Path.Combine(temporary.Path, "temp with spaces");
             Directory.CreateDirectory(scratch);
             if (BrokerMode == "absent") File.Delete(Path.Combine(bin, "gh-app"));

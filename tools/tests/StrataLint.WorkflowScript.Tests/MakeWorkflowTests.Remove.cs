@@ -16,7 +16,7 @@ public sealed partial class MakeWorkflowTests
     [InlineData("0 1")]
     public void WorktreeRemoveUsesOneRecipeAndPassesNamesAsLiteralBytes(string? force)
     {
-        var makefile = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), "Makefile"));
+        var makefile = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), "tools", "consumer", "Makefile"));
         Assert.Equal(1, RecipeCount(makefile, "worktree-remove"));
         using var fixture = new TemporaryDirectory();
         var names = "trureturing-one\tcustom-two $(shell touch make-expanded) `touch shell-expanded` $(touch shell-substitution) \"quoted\" 'literal';\nlast";
@@ -32,7 +32,7 @@ public sealed partial class MakeWorkflowTests
     [Fact]
     public void WorktreeRemoveIgnoresCommandLineOverrideOfInternalNames()
     {
-        var makefile = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), "Makefile"));
+        var makefile = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), "tools", "consumer", "Makefile"));
         using var fixture = new TemporaryDirectory();
         var result = RunRemoveMake(fixture.Path, makefile, "wanted", 0, "WORKTREE_REMOVE_NAMES=other");
         Assert.Equal(0, result.ExitCode);
@@ -50,7 +50,7 @@ public sealed partial class MakeWorkflowTests
     [InlineData(74)]
     public void WorktreeRemoveMakeReturnsItsOwn2ForClassifiedCliFailures(int cliExit)
     {
-        var makefile = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), "Makefile"));
+        var makefile = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), "tools", "consumer", "Makefile"));
         using var fixture = new TemporaryDirectory();
         var result = RunRemoveMake(fixture.Path, makefile, "", cliExit);
         Assert.Equal(2, result.ExitCode);

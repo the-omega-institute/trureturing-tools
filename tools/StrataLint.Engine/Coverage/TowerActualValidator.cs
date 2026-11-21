@@ -126,11 +126,19 @@ internal static class TowerActualValidator
             var workflow = CiWorkflowDocument.Parse(file.Text);
             if (workflow?.RunsOnBranch("pull_request", "dev") != true
                 || !workflow.RunsOnBranch("push", "dev")) continue;
+            if (file.Path.Value == AdmissionWorkflowPath && workflow.CalledGateRevision is not null)
+            {
+                snapshot.TryGetFile(ToolsRelease.PinPath, out var pin);
+                snapshot.TryGetFile(CiWorkflowDocument.ReleaseGatePath, out var definition);
+                var called = workflow.ResolveCalledGate(pin?.Text, definition?.Text);
+                if (called is null) continue;
+                workflow = called;
+            }
             foreach (var job in workflow.Jobs.Values)
             {
                 if (job.Name == CiWorkflowDocument.DeltaJobName
                     && (file.Path.Value != AdmissionWorkflowPath
-                        || !workflow.HasDeltaGate("dev"))) continue;
+                        || !workflow.HasDeltaStep())) continue;
                 jobs[job.Name] = file.Path.Value;
             }
         }
