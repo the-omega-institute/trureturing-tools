@@ -841,12 +841,13 @@ def download_range(asset, offset, length, output, deadline):
 
 
 def restore_scoped(root, partition, tag, stage, deadline, *, cache_key, producer, targets, verification,
-                   destination_root=None, release_metadata=None, require_complete=False) -> tuple[int, int] | None:
+                   destination_root=None, release_metadata=None, require_complete=False,
+                   validated_snapshot=None) -> tuple[int, int] | None:
     """Return installed module and byte counts, or None for an incompatible workspace."""
     from lean_artifact_inventory import lake_configuration
     import lean_release_index as indexed_release
 
-    metadata, manifest, parts = snapshot_manifest(partition, tag, stage, deadline,
+    metadata, manifest, parts = validated_snapshot or snapshot_manifest(partition, tag, stage, deadline,
         expected={"producer_commit_sha": producer} if producer else None,
         verification=verification, cache_key=cache_key, metadata=release_metadata,
         expect_draft=release_metadata is not None)
@@ -972,10 +973,10 @@ def clone_local_parts(local_assets, stage, parts, deadline):
 
 def restore_snapshot(root, partition, tag, stage, deadline, expected=None, refresh_stale=False, *,
                      cache_key, approved_producer=None, require_compatible_seed=False, on_installed=None,
-                     local_assets=None, release_metadata=None, verification_tag=True):
+                     local_assets=None, release_metadata=None, verification_tag=True, validated_snapshot=None):
     verification = expected is not None and verification_tag
     with observed_phase("manifest"):
-        metadata, manifest, parts = snapshot_manifest(partition, tag, stage, deadline,
+        metadata, manifest, parts = validated_snapshot or snapshot_manifest(partition, tag, stage, deadline,
             expected=expected if approved_producer is None else {"producer_commit_sha": approved_producer},
             verification=verification, cache_key=cache_key, metadata=release_metadata,
             expect_draft=release_metadata is not None)
@@ -1255,14 +1256,15 @@ def fetch(root, partition, writer_owned=False, refresh_stale=False, approved_tag
         return 1
 
 
-def snapshot_partition(root, partition, tag, cache_key, *, indexed=False):
+def snapshot_partition(root, partition, tag, cache_key, *, indexed=False, verification=False):
     compatible = [partition] + [other for other in seed_partitions(root) if other != partition]
     return next((candidate for candidate in compatible
-        if tag.startswith(prefix(candidate, cache_key, indexed=indexed))
-        and valid_publication_id(tag[len(prefix(candidate, cache_key, indexed=indexed)):])), None)
+        if tag.startswith(prefix(candidate, cache_key, verification, indexed=indexed))
+        and valid_publication_id(tag[len(prefix(candidate, cache_key, verification, indexed=indexed)):])), None)
 
 
-def snapshot_candidates(root, partition, deadline, cache_key, *, indexed=False, fallback=False):
+def snapshot_candidates(root, partition, deadline, cache_key, *, indexed=False, fallback=False,
+                        rolling_mode=None):
     """Walk published Releases newest first, preferring indexed snapshots across all pages."""
     owner, name = REPO.split("/", 1)
     query = """query($owner: String!, $name: String!, $after: String) {
@@ -1283,13 +1285,17 @@ def snapshot_candidates(root, partition, deadline, cache_key, *, indexed=False, 
             if release["isDraft"] is not False:
                 continue
             tag = release["tagName"]
-            source = snapshot_partition(root, partition, tag, cache_key, indexed=indexed)
+            verification = rolling_mode == "verification"
+            source = snapshot_partition(root, partition, tag, cache_key, indexed=indexed, verification=verification)
             if source is not None:
                 yield source, tag
             elif indexed and fallback:
-                source = snapshot_partition(root, partition, tag, cache_key)
+                source = snapshot_partition(root, partition, tag, cache_key, verification=verification)
                 if source is not None:
-                    legacy.append((source, tag))
+                    if rolling_mode:
+                        yield source, tag
+                    else:
+                        legacy.append((source, tag))
         if not page["pageInfo"]["hasNextPage"]:
             break
         cursor = page["pageInfo"]["endCursor"]
@@ -1378,14 +1384,175 @@ def latest_snapshot(root, partition, deadline):
     return None
 
 
+def publisher_run(run, attempt, workflow, request):
+    record = request(f"repos/{REPO}/actions/runs/{run}/attempts/{attempt}")
+    if (record["id"] != int(run) or record["run_attempt"] != int(attempt)
+            or record["repository"]["full_name"] != REPO or record["path"] != workflow):
+        raise ValueError("rolling base requires the protected publisher workflow and run identity")
+    return record
+
+
+def rolling_source(args, deadline, request):
+    env = os.environ
+    verification = args.mode == "verification"
+    ref = args.source_ref
+    workflow_ref = env.get("GITHUB_REF", "")
+    manual_dev = not verification and env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    workflow = (".github/workflows/ci-publication-verify.yml" if verification
+                else ".github/workflows/lean-cache-publish.yml")
+    events = ("push", "workflow_dispatch") if verification else ("push", "schedule", "workflow_dispatch")
+    if (args.mode not in ("verification", "production") or REPO != "the-omega-institute/trureturing"
+            or env.get("GITHUB_ACTIONS") != "true" or env.get("GITHUB_REPOSITORY") != REPO
+            or env.get("GITHUB_REF_PROTECTED") != "true"
+            or env.get("GITHUB_WORKFLOW_REF") != f"{REPO}/{workflow}@{workflow_ref}"
+            or (ref != workflow_ref and not manual_dev)
+            or env.get("GITHUB_EVENT_NAME") not in events
+            or not (re.fullmatch(r"refs/heads/integration-ci-[A-Za-z0-9._/-]+-tests", ref)
+                    if verification else ref == "refs/heads/dev")):
+        raise ValueError("rolling base requires the matching protected Release publisher")
+    run, attempt = env.get("GITHUB_RUN_ID", ""), env.get("GITHUB_RUN_ATTEMPT", "")
+    if not all(re.fullmatch(r"[1-9][0-9]*", value) for value in (run, attempt)):
+        raise ValueError("rolling base requires a valid publisher run and attempt")
+    event = env["GITHUB_EVENT_NAME"]
+    record = publisher_run(run, attempt, workflow, request)
+    run_sha = record["head_sha"]
+    if (record["event"] != event or "refs/heads/" + record["head_branch"] != workflow_ref
+            or run_sha != env.get("GITHUB_SHA") or (not manual_dev and run_sha != args.source_commit)):
+        raise ValueError("publisher event commit differs from the checked-out source")
+    if manual_dev:
+        if (not re.fullmatch(r"refs/heads/(?:dev|integration-[A-Za-z0-9._/-]+)", workflow_ref)
+                or any(env.get(name) != "loning" for name in ("GITHUB_ACTOR", "GITHUB_TRIGGERING_ACTOR"))
+                or any(record[name]["login"] != "loning" for name in ("actor", "triggering_actor"))):
+            raise ValueError("manual dev Release requires the authorized actor and protected workflow ref")
+        inputs = json.loads(pathlib.Path(env["GITHUB_EVENT_PATH"]).read_bytes())["inputs"]
+        if (inputs.get("operation"), inputs.get("source_ref"), inputs.get("source_sha")) != (
+                "release", ref, args.source_commit):
+            raise ValueError("manual Release event does not select the requested dev source")
+        if workflow_ref != ref or run_sha != args.source_commit:
+            validate_source_ref(REPO, workflow_ref, run_sha, request)
+    git = ["git", "-C", str(args.repository)]
+    head = checked_run([*git, "rev-parse", "--verify", "HEAD"], deadline).stdout.strip()
+    dirty = checked_run([*git, "status", "--porcelain", "--untracked-files=normal"], deadline).stdout
+    if head != args.source_commit or dirty:
+        raise ValueError("rolling base requires a clean checkout at the specified source SHA")
+    validate_source_ref(REPO, ref, head, request)
+    return workflow, events
+
+
+def rolling_producer(manifest, args, workflow, events, request):
+    producer = manifest["producer_commit_sha"]
+    verification = args.mode == "verification"
+    if manifest.get("source_ref") != (args.source_ref if verification else None):
+        return False
+    if manifest["publication_id"].startswith("ci-"):
+        run = manifest["workflow_run_id"]
+        attempt = manifest["workflow_run_attempt"]
+        prior = publisher_run(run, attempt, workflow, request)
+        if prior["event"] not in events:
+            return False
+        prior_ref = "refs/heads/" + prior["head_branch"]
+        if not verification and prior["event"] == "workflow_dispatch":
+            if (not re.fullmatch(r"refs/heads/(?:dev|integration-[A-Za-z0-9._/-]+)", prior_ref)
+                    or any(prior[name]["login"] != "loning" for name in ("actor", "triggering_actor"))):
+                return False
+            # GitHub does not expose historical dispatch inputs in the run response.
+            # Bind its manifest to the authorized workflow and a protected dev ancestor.
+            validate_source_ref(REPO, prior_ref, prior["head_sha"], request)
+        elif prior_ref != args.source_ref:
+            return False
+        elif prior["head_sha"] != producer:
+            raise ValueError("published manifest producer differs from its workflow run")
+    elif verification:
+        return False
+    comparison = request(f"repos/{REPO}/compare/{producer}...{args.source_commit}")
+    status = comparison["status"]
+    if status in ("behind", "diverged"):
+        return False
+    if status not in ("ahead", "identical") or comparison["merge_base_commit"]["sha"] != producer:
+        raise ValueError("invalid rolling base ancestry comparison")
+    return True
+
+
+def rolling_result(args, tag="", producer="", digest="", indexed=False):
+    fields = dict(found="true" if tag else "false", tag=tag, producer=producer,
+                  manifest_sha256=digest, indexed="true" if indexed else "false")
+    if output := os.environ.get("GITHUB_OUTPUT"):
+        with open(output, "a", encoding="utf-8") as stream:
+            for name, value in fields.items():
+                print(f"{name}={value}", file=stream)
+    receipt(args.command, "hit" if tag else "miss", **fields)
+    return 0
+
+
+def rolling_base(args):
+    select = args.command == "select-base"
+    if (args.writer_owned or args.approved_tag or args.approved_producer or args.local_assets
+            or args.refresh_stale or args.no_build or args.indexed
+            or (select and (args.tag or args.producer or args.manifest_sha256 or args.target))):
+        raise ValueError("invalid option for the protected Release base reader")
+    if not select and (not args.tag or not re.fullmatch(r"[0-9a-f]{40}", args.producer)
+                       or (args.manifest_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.manifest_sha256))):
+        raise ValueError("install-base requires an exact Release tag and producer commit")
+    deadline = operation_deadline()
+    def request(path):
+        return json.loads(gh(deadline, "api", path))
+    workflow, events = rolling_source(args, deadline, request)
+    root = args.repository
+    partition = partition_path(root)
+    key = release_key(root)
+    verification = args.mode == "verification"
+    if select:
+        candidates = snapshot_candidates(root, partition, deadline, key, indexed=True,
+                                         fallback=True, rolling_mode=args.mode)
+    else:
+        source = next((part for indexed in (True, False) if (part := snapshot_partition(
+            root, partition, args.tag, key, indexed=indexed, verification=verification))), None)
+        candidates = [(source, args.tag)] if source else []
+    for source, tag in candidates:
+        with tempfile.TemporaryDirectory(prefix="lean-rolling-base-") as temporary:
+            stage = pathlib.Path(temporary)
+            metadata = existing_release(tag, deadline)
+            if metadata is None or metadata["draft"]:
+                continue
+            snapshot = snapshot_manifest(source, tag, stage, deadline, cache_key=key,
+                                         verification=verification, metadata=metadata)
+            _, manifest, _ = snapshot
+            producer = manifest["producer_commit_sha"]
+            digest = archive_sha(stage / MANIFEST, deadline)
+            if not select and (producer != args.producer or (args.manifest_sha256 and digest != args.manifest_sha256)):
+                raise ValueError("rolling base differs from the selected producer or manifest digest")
+            if not rolling_producer(manifest, args, workflow, events, request):
+                continue
+            indexed = manifest["schema"] == INDEXED_SCHEMA
+            if indexed:
+                from lean_artifact_inventory import lake_configuration
+                if manifest["lake_inputs_sha256"] != lake_configuration(root):
+                    continue
+            if not select:
+                with cache_guard(root):
+                    if args.target and indexed:
+                        result = restore_scoped(root, source, tag, stage, deadline, cache_key=key,
+                            producer=producer, targets=args.target, verification=verification, validated_snapshot=snapshot)
+                        if not result or not result[0]:
+                            continue
+                    elif not restore_snapshot(root, source, tag, stage, deadline,
+                            expected={"producer_commit_sha": producer}, verification_tag=verification,
+                            cache_key=key, require_compatible_seed=True, validated_snapshot=snapshot):
+                        raise ValueError("rolling base needs an empty private project build")
+            return rolling_result(args, tag, producer, digest, indexed)
+    return rolling_result(args)
+
+
 def _main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("address", "publish", "fetch"))
+    parser.add_argument("command", choices=("address", "publish", "fetch", "select-base", "install-base"))
     parser.add_argument("--repository", type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[3])
     parser.add_argument("--mode", choices=("production", "verification", "candidate"), default="production")
     parser.add_argument("--source-ref", default="")
     parser.add_argument("--source-commit", default="")
-    parser.add_argument("--tag", default="", help="exact local candidate Release to restore")
+    parser.add_argument("--tag", default="", help="exact candidate or rolling base Release")
+    parser.add_argument("--producer", default="", help="immutable commit of the selected rolling base")
+    parser.add_argument("--manifest-sha256", default="", help="digest returned by select-base")
     parser.add_argument("--target", action="append", default=[], help="restore the current import closure for this Lean module")
     parser.add_argument("--indexed", action="store_true", help="use indexed Release snapshot transport")
     parser.add_argument("--no-build", action="store_true", help="publish an existing FIB-checked report/build")
@@ -1407,6 +1574,10 @@ def _main():
         LOG.emit("operation_started", operation=CURRENT_OPERATION, action=CURRENT_OPERATION, mode=CURRENT_MODE)
     try:
         args.repository = args.repository.resolve()
+        if args.command in ("select-base", "install-base"):
+            return rolling_base(args)
+        if args.producer or args.manifest_sha256:
+            raise ValueError("rolling base arguments require install-base")
         if args.target and (args.command != "fetch" or args.mode == "verification"
                             or (args.mode == "production" and not args.indexed)):
             raise ValueError("--target requires an indexed production or exact indexed candidate fetch")

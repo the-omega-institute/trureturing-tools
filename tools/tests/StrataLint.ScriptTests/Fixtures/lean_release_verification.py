@@ -55,6 +55,121 @@ class ReleaseVerificationCases:
             "--source-commit", self.verification_commit, *arguments),
             **{**self.verification_environment, **environment})
 
+    def test_rolling_base_reuses_previous_published_verification_at_next_commit(self):
+        self.verification_fixture(branch="integration-ci-rolling-tests")
+        repo = "the-omega-institute/trureturing"
+        workflow = ".github/workflows/ci-publication-verify.yml"
+        old = self.verification_commit
+        old_run = self.verification_api[f"repos/{repo}/actions/runs/123/attempts/1"]
+        old_run["path"] = workflow
+        self.save_verification_api()
+        published = self.verification("publish")
+        self.assertEqual(0, published.returncode, published.stdout + published.stderr)
+        tag = next(self.remote.iterdir()).name
+        self.commit_fixture()
+        new = self.producer_commit
+        self.assertNotEqual(old, new)
+        self.verification_api.update({
+            f"repos/{repo}/actions/runs/124/attempts/1": dict(old_run, id=124, head_sha=new),
+            f"repos/{repo}/branches/integration-ci-rolling-tests": {
+                "name": "integration-ci-rolling-tests", "protected": True, "commit": {"sha": new}},
+            f"repos/{repo}/compare/{new}...{new}": {
+                "status": "identical", "merge_base_commit": {"sha": new}},
+            f"repos/{repo}/compare/{old}...{new}": {
+                "status": "ahead", "merge_base_commit": {"sha": old}},
+        })
+        self.save_verification_api()
+        env = dict(self.verification_environment, GITHUB_SHA=new, GITHUB_REF_PROTECTED="true",
+                   GITHUB_WORKFLOW_REF=f"{repo}/{workflow}@{self.verification_ref}")
+        def call(command, *extra, **changes):
+            return self.transport(command, run="124", arguments=("--mode", "verification",
+                "--source-ref", self.verification_ref, "--source-commit", new, *extra), **(env | changes))
+        picked = call("select-base")
+        self.assertEqual(0, picked.returncode, picked.stdout + picked.stderr)
+        def receipt(result):
+            return json.loads(result.stdout.strip().splitlines()[-1].split(" ", 1)[1])
+        selected = receipt(picked)
+        self.assertEqual((tag, old, "false", "true"),
+                         tuple(selected[key] for key in ("tag", "producer", "indexed", "found")))
+        pin = ("--tag", tag, "--producer", old, "--manifest-sha256", selected["manifest_sha256"])
+        shutil.rmtree(self.root / ".lake/build")
+        failed = call("install-base", *pin, FAKE_FAIL_ASSET="1")
+        self.assertNotEqual(0, failed.returncode)
+        self.assertFalse((self.root / ".lake/build").exists())
+        self.assertNotEqual(0, call("install-base", "--tag", tag, "--producer", new).returncode)
+        self.assertNotEqual(0, call("install-base", "--tag", tag, "--producer", old,
+                                    "--manifest-sha256", "f" * 64).returncode)
+        installed = call("install-base", *pin)
+        self.assertEqual(0, installed.returncode, installed.stdout + installed.stderr)
+        self.assertEqual("true", receipt(installed)["found"])
+        self.assertTrue((self.root / ".lake/build/lib/lean/D5/A.olean").is_file())
+        wrong_workflow = call("select-base", GITHUB_WORKFLOW_REF=f"{repo}/other@{self.verification_ref}")
+        self.assertNotEqual(0, wrong_workflow.returncode)
+        self.assertNotEqual(0, call("select-base", GITHUB_REF_PROTECTED="false").returncode)
+        mismatch = call("install-base", "--tag", tag.replace("lean-cache-verify-v1-", "lean-cache-v2-"),
+                        "--producer", old)
+        self.assertEqual("false", receipt(mismatch)["found"])
+        listed = call("select-base", FAKE_LIST_JSON="[]")
+        self.assertEqual(0, listed.returncode)
+        self.assertEqual("false", receipt(listed)["found"])
+        self.verification_api[f"repos/{repo}/compare/{old}...{new}"] = {
+            "status": "diverged", "merge_base_commit": {"sha": "a" * 40}}
+        self.save_verification_api()
+        self.assertEqual("false", receipt(call("select-base"))["found"])
+
+    def test_rolling_base_manual_dev_publication_from_protected_integration(self):
+        self.prepare_indexed_candidate()
+        published = self.transport("publish", arguments=("--indexed",))
+        self.assertEqual(0, published.returncode, published.stdout + published.stderr)
+        tag = next(self.remote.iterdir()).name
+        producer = self.verification_commit
+        repo = "the-omega-institute/trureturing"
+        prefix = f"repos/{repo}"
+        workflow = ".github/workflows/lean-cache-publish.yml"
+        branch = "integration-ci-rolling-tests"
+        ref = "refs/heads/" + branch
+        workflow_sha = "a" * 40
+        run = dict(id=124, run_attempt=1, event="workflow_dispatch", head_sha=workflow_sha,
+                   head_branch=branch, path=workflow, repository={"full_name": repo},
+                   actor={"login": "loning"}, triggering_actor={"login": "loning"})
+        self.verification_api.update({
+            f"{prefix}/actions/runs/123/attempts/1": dict(run, id=123),
+            f"{prefix}/actions/runs/124/attempts/1": run,
+            f"{prefix}/branches/{branch}": {"name": branch, "protected": True, "commit": {"sha": workflow_sha}},
+            f"{prefix}/compare/{workflow_sha}...{workflow_sha}": {
+                "status": "identical", "merge_base_commit": {"sha": workflow_sha}},
+            f"{prefix}/compare/{producer}...{producer}": {
+                "status": "identical", "merge_base_commit": {"sha": producer}},
+        })
+        self.save_verification_api()
+        event = self.root / "dispatch.json"
+        inputs = dict(operation="release", source_ref="refs/heads/dev", source_sha=producer)
+        write(event, json.dumps({"inputs": inputs}))
+        env = dict(self.verification_environment, GITHUB_REF=ref, GITHUB_SHA=workflow_sha,
+                   GITHUB_REF_PROTECTED="true", GITHUB_WORKFLOW_REF=f"{repo}/{workflow}@{ref}",
+                   GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_EVENT_PATH=str(event),
+                   GITHUB_ACTOR="loning", GITHUB_TRIGGERING_ACTOR="loning")
+        def call(command="select-base", *args, **changes):
+            return self.transport(command, run="124", arguments=("--mode", "production", "--source-ref",
+                "refs/heads/dev", "--source-commit", producer, *args), **(env | changes))
+        selected = call()
+        self.assertEqual(0, selected.returncode, selected.stdout + selected.stderr)
+        self.assertIn('"indexed":"true"', selected.stdout)
+        self.assertNotEqual(0, call(GITHUB_TRIGGERING_ACTOR="other").returncode)
+        write(event, json.dumps({"inputs": inputs | {"source_sha": workflow_sha}}))
+        self.assertNotEqual(0, call().returncode)
+        write(event, json.dumps({"inputs": inputs}))
+        prior = self.verification_api[f"{prefix}/actions/runs/123/attempts/1"]
+        prior["triggering_actor"] = {"login": "other"}
+        self.save_verification_api()
+        self.assertIn('"found":"false"', call().stdout)
+        prior["triggering_actor"] = {"login": "loning"}
+        self.save_verification_api()
+        shutil.rmtree(self.root / ".lake/build")
+        installed = call("install-base", "--tag", tag, "--producer", producer)
+        self.assertEqual(0, installed.returncode, installed.stdout + installed.stderr)
+        self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
+
     def verification_calls(self):
         path = self.root / "gh-calls"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
@@ -747,7 +862,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertIn("snapshot does not match this exact publication", result.stdout)
         self.assertEqual("keep current material", (self.root / ".lake/build/keep.txt").read_text())
 
-    def test_protected_producer_restores_exact_production_release_without_an_actions_seed(self):
+    def prepare_indexed_candidate(self):
         for directory in ("Reg", "tools/lean-inspector-reg", "tools/lean-inspector-interface"):
             name = pathlib.Path(directory).name
             build = pathlib.Path(*([".."] * len(pathlib.Path(directory).parts)), ".lake/build", name)
@@ -757,6 +872,9 @@ if sys.argv[0].endswith("lean_cache_release.py"):
                     'print(json.dumps({"imports":[{"errors":[],"result":{"imports":[]}} for _ in sys.stdin]}))\n')
         lean.chmod(0o755)
         self.candidate_fixture()
+
+    def test_protected_producer_restores_exact_production_release_without_an_actions_seed(self):
+        self.prepare_indexed_candidate()
         published = self.transport("publish", arguments=("--indexed",))
         self.assertEqual(0, published.returncode, published.stdout + published.stderr)
         self.assertIn('"status":"published"', published.stdout)
