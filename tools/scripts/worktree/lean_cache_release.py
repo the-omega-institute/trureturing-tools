@@ -1668,8 +1668,9 @@ def _main():
         partition = partition_path(args.repository)
         if args.command == "address":
             cache_key = release_key(args.repository)
+            physical = args.indexed and os.environ.get("LEAN_CACHE_RELEASE_VOLUMES") == "1"
             payload = {"partition": partition, "cache_key": cache_key,
-                       "release_prefix": prefix(partition, cache_key, indexed=args.indexed),
+                       "release_prefix": prefix(partition, cache_key, indexed="volumes" if physical else args.indexed),
                        "asset": INDEXED_ASSET if args.indexed else ASSET}
             _observe("address", "resolved", phase="address")
             print(json.dumps(payload))

@@ -8,6 +8,7 @@ import io
 import sys
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -190,6 +191,26 @@ class VolumeReleases(unittest.TestCase):
             self.assertEqual(amount, (1, uploads[1]["payload_bytes"]))
             run(scoped, "lake", "--no-build", "build", "@fixture/+D5.B:olean")
             self.assertFalse((scoped / ".lake/build/lib/lean/D5/A.olean").exists())
+
+            rolling = self.consumer("rolling")
+            args = SimpleNamespace(command="select-base", mode="production", writer_owned=False,
+                approved_tag=None, approved_producer=None, local_assets=None, refresh_stale=False,
+                no_build=False, indexed=False, previous_commit_only=True, tag="", producer="",
+                manifest_sha256="", target=[], repository=rolling, source_commit="f" * 40)
+            stack.enter_context(patch.object(release, "rolling_source", return_value=("workflow", {"push"})))
+            stack.enter_context(patch.object(release, "rolling_producer", return_value=True))
+            stack.enter_context(patch.object(release, "seed_partitions", return_value=[partition]))
+            with redirect_stdout(io.StringIO()) as selection:
+                self.assertEqual(release.rolling_base(args), 0)
+            chosen = json.loads(selection.getvalue().split(" ", 1)[1])
+            self.assertEqual((chosen["tag"], chosen["producer"], chosen["indexed"]), (tags[-1], author, "true"))
+            args.command, args.tag, args.producer = "install-base", chosen["tag"], chosen["producer"]
+            args.previous_commit_only, args.manifest_sha256, args.target = False, chosen["manifest_sha256"], ["D5.A"]
+            with redirect_stdout(io.StringIO()) as installed:
+                self.assertEqual(release.rolling_base(args), 0)
+            self.assertIn('"status":"hit"', installed.getvalue())
+            run(rolling, "lake", "--no-build", "build", "@fixture/+D5.A:olean")
+            self.assertFalse((rolling / ".lake/build/lib/lean/D5/B.olean").exists())
 
     def test_damaged_physical_member_leaves_no_partial_install(self):
         volumes.publish(self.pool, "one", self.project)
