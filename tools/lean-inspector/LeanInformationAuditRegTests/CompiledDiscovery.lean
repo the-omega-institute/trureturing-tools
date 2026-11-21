@@ -430,8 +430,7 @@ unsafe def readFixtures (reader : IO.Ref RawArtifacts.Store) (start limit : Nat)
   finally searchPathRef.set saved
 
 
-/-- Ordinary registration inventory and metadata are general audit inputs,
-independent of the owner's optional analysis Applications. -/
+/-- Discover the ordinary finite history registration and its source realization. -/
 unsafe def checkOrdinarySourceContract : IO Unit := do
   let owner := `Reg.D5.S3.Estimation.DataProcessing.FiniteHistoryConditionalExpectation
   let reader ← IO.mkRef ({} : RawArtifacts.Store)

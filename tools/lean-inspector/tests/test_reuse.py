@@ -128,6 +128,15 @@ class ReuseTests(unittest.TestCase):
         self.assertFalse(api.reuse(self.root, self.output, self.output)['needs_lake'])
         self.assertFalse((self.root / '.lake').exists())
 
+    def test_reuse_preserves_checked_status_of_an_ordinary_historical_report(self):
+        api = self.receipt()
+        receipt = publication.member(self.report, api.SUFFIX)
+        record = json.loads(receipt.read_bytes())
+        record['completed'] = api.LEGACY_CHECKED
+        receipt.write_text(json.dumps(record))
+        self.assertFalse(api.reuse(self.root, self.report, self.report)['needs_lake'])
+        self.assertEqual(api.read_receipt(self.report)['completed'], api.CHECKED)
+
     def test_seed_format_requires_complete_sealed_inputs(self):
         api = self.receipt()
         receipt = publication.member(self.report, '.reuse.json')
@@ -349,6 +358,19 @@ class ReuseTests(unittest.TestCase):
                          '[FAIL] guarded_reuse_preparation_invalidates_receipt')
         self.assertIsNone(api.read_seed_base(self.root))
         self.assertFalse(api.seed_format(self.report)['compatible'])
+
+    def test_rejecting_an_incoming_bundle_preserves_the_destination_receipt(self):
+        api = self.dev_repository()
+        destination = self.report
+        self.assertFalse(api.reuse(self.root, destination, self.output)['needs_lake'])
+        old_receipt = publication.member(destination, api.SUFFIX).read_bytes()
+        old_base = api.read_seed_base(self.root)
+        with patch.object(publication, 'validate_bundle', side_effect=ValueError('unsupported module fields')):
+            result = api.reuse(self.root, self.output, destination)
+        self.assertTrue(result['needs_lake'])
+        self.assertEqual(publication.member(destination, api.SUFFIX).read_bytes(), old_receipt)
+        self.assertEqual(api.read_seed_base(self.root), old_base)
+        self.assertTrue(api.seed_format(destination)['compatible'])
 
     def test_custom_source_reuse_does_not_inherit_canonical_producer(self):
         api = self.dev_repository()
@@ -798,7 +820,6 @@ class ReuseTests(unittest.TestCase):
         for relative in ('tools/lean-inspector/inspect.sh', 'tools/lean-inspector/native.py',
                          'tools/lean-inspector/reuse.py',
                          'tools/lean-inspector/publication.py', 'tools/lean-inspector/materials.py',
-                         'tools/lean-inspector/fib_analysis.py',
                          'tools/lean-inspector/build_work.py', 'tools/scripts/lib/resource-observation-lib.sh',
                          'tools/scripts/worktree/lean_cache_release.py', 'tools/scripts/worktree/lean_cache_release_io.py',
                      'tools/scripts/worktree/lean_cache_topology.py',

@@ -130,7 +130,7 @@ class NativeBatchPartitionTests:
                 def extract(rows, *, generated_index):
                     indexes.append(generated_index)
                     self.assertTrue(generated_index.is_file())
-                    self.assertEqual(rows[0][7], str(root / (rows[0][1] + '.zip')))
+                    self.assertEqual(len(rows[0]), 6)
                     self.assertEqual([Path(row[5]).read_bytes() for row in requests],
                                      [b'previous', b'previous'])
                     Path(rows[0][5]).write_bytes(rows[0][1].encode())
@@ -584,8 +584,8 @@ class NativeModuleFacetTests:
         # A required producer failure must fail both public module and package entrypoints.
         producer = self.root / 'tools/lean-inspector/native.py'
         producer.write_text(producer.read_text().replace(
-            'def module(root, name, source, utility_path, executable, output, analyzer="", previous=""):',
-            'def module(root, name, source, utility_path, executable, output, analyzer="", previous=""):\n'
+            'def module(root, name, source, utility_path, executable, output):',
+            'def module(root, name, source, utility_path, executable, output):\n'
             '    raise ValueError("required fixture producer failure")').replace(
             'def produce_batch(requests):',
             'def produce_batch(requests):\n    raise ValueError("required fixture producer failure")'))

@@ -31,13 +31,10 @@ from test_native_support import *
 
 class NativeReleaseSupport:
     def release_fixture(self):
-        """Real publisher/Inspector/Lake with fixture transport and FIB regression target."""
+        """Real publisher, Inspector and Lake with fixture transport."""
         self.reg_package()
         self.copy('tools/Makefile')
         self.copy('tools/lean-inspector/build_inputs.py')
-        self.write('tools/scripts/compiled-fib-test.sh', 'echo regressions >> .lake/fib-regressions\n')
-        self.write('tools/lean-inspector/LeanInformationAuditRegAnalysis/AuricFib/Main.lean',
-                   'def main : IO Unit := pure ()\n')
 
         for name in ('lean-cache-publish.sh', 'lean_cache_release.py', 'lean_cache_release_io.py', 'lean_cache_topology.py'):
             self.copy('tools/scripts/worktree/' + name)
@@ -581,7 +578,6 @@ class NativePackageConsumerTests(NativeReleaseSupport):
         self.assertEqual(restored_stamps, self.stamps())
         self.assertEqual({k: v[1] for k, v in stamps.items()}, {k: v[1] for k, v in self.stamps().items()})
         self.assertEqual(origins, self.origins())
-        self.assertEqual((self.root / '.lake/fib-regressions').read_text().splitlines(), ['regressions'])
         for suffix in publication.SUFFIXES:
             actual = publication.member(output, suffix).read_bytes()
             if suffix == '.provenance.json':

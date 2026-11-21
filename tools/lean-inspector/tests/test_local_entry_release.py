@@ -248,8 +248,7 @@ esac
         # Exercise the real entry, cleanup and publication with a small process
         # standing in for Lake; no project or mathematical fixture compilation.
         generated = self.root / '.lake/build/lean-inspector'
-        for name in ('modules/A.zip', 'modules/A.zip.trace', 'modules/A.zip.fib-previous',
-                     'report.zip', 'report.zip.trace'):
+        for name in ('modules/A.zip', 'modules/A.zip.trace', 'report.zip', 'report.zip.trace'):
             self.fixture.write(str((generated / name).relative_to(self.root)), 'retained incompatible report')
         for directory in ('producer', 'interface', 'reg'):
             self.fixture.write(str((generated / directory / 'lib/lean/Tool.olean').relative_to(self.root)),
@@ -307,7 +306,6 @@ PY
                                      'producer/lib/lean/Tool.olean', 'reg/lib/lean/Tool.olean'],
                               regenerate='1', artifact_cache='true', restore_artifacts='true'))
         self.assertEqual((generated / 'modules/A.zip').read_text(), 'fresh generic report leaf')
-        self.assertFalse((generated / 'modules/A.zip.fib-previous').exists())
         self.assertEqual((compiled.read_text(), compiled.stat().st_mtime_ns), ('compiled Lean input', stamp))
         self.assertEqual((self.root / '.lake/packages/dependency/.lake/build/lib/Dep.olean').read_text(),
                          'dependency input')

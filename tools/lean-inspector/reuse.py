@@ -31,7 +31,13 @@ BASE_SCHEMA = 'stratalint-lean-report-seed-base-v2'
 BASE_RECORD = '.lake/lean-report-seed-base.json'
 SUFFIX = '.reuse.json'
 COMPLETED = ['defaults', 'report', 'publication']
-CHECKED = [*COMPLETED, 'fib-inputs-checked']
+CHECKED = [*COMPLETED, 'full-report-checked']
+# Older receipts can establish ordinary report completion. Current bundle
+# admission still checks the supported fields before reuse.
+LEGACY_CHECKED = [*COMPLETED, 'fib-inputs-checked']
+CHECKED_STEPS = (CHECKED, LEGACY_CHECKED)
+
+
 INVALID_SEED = (OSError, UnicodeError, ValueError, KeyError, TypeError,
                 zipfile.BadZipFile, zlib.error, NotImplementedError, subprocess.CalledProcessError)
 if zipfile.lzma is not None:
@@ -133,8 +139,10 @@ def read_receipt(report, captured=None):
         raise ValueError('reuse receipt is absent or nonregular')
     receipt = publication.read_json(path.read_bytes())
     materials.require_keys(receipt, {'schema', 'completed', 'inputs', 'bundle'}, 'reuse receipt')
-    if receipt['schema'] != SCHEMA or receipt['completed'] not in (COMPLETED, CHECKED):
+    if receipt['schema'] != SCHEMA or receipt['completed'] not in (COMPLETED, *CHECKED_STEPS):
         raise ValueError('reuse receipt lacks complete entry success')
+    if not isinstance(receipt['inputs'], dict):
+        raise ValueError('invalid reuse inputs')
     if captured is not None and receipt['inputs'] != captured:
         raise InputMismatch(receipt['inputs'], captured)
     if receipt['bundle'] != bundle_hashes(report):
@@ -319,25 +327,26 @@ def _reuse(repository, report, output):
     maintenance = (maintain_unknown_seed_base(repository)
                    if canonical and canonical_source and base is None else None)
     try:
-        # The receipt binds bundle bytes that were validated when produced; like
-        # a restored olean they are reused as is. Publication still stages a
-        # private snapshot that must match the receipt and current inputs.
+        # The receipt binds bundle bytes that were validated when produced.
+        # Publication checks that the private snapshot matches those bytes,
+        # current inputs and the report contract.
         receipt = read_receipt(report, captured)
         coordinates = publication.coordinates(repository)
-        if canonical and not canonical_source:
-            invalidate_seed_base(repository)
-        # Prepare the output under the writer guard before changing its report.
-        publication.member(output, SUFFIX).unlink(missing_ok=True)
+        same_path = report.resolve() == output.resolve()
+        if same_path:
+            publication.member(output, SUFFIX).unlink(missing_ok=True)
         publication.publish(report, output, coordinates, repository, mode='cached',
                             expected_hashes=receipt['bundle'], validate=False)
-        # Rebind source evidence after publication; a same-path republish may
-        # only change publication mode, not the report or its material bytes.
-        if Path(report).resolve() != Path(output).resolve():
+        if not same_path:
+            # A rejected source must leave the previous destination generation intact.
+            if canonical:
+                invalidate_seed_base(repository)
+            publication.member(output, SUFFIX).unlink(missing_ok=True)
             if receipt != read_receipt(report, captured):
                 raise ValueError('reuse receipt changed during publication')
         if capture(repository) != captured:
             raise ValueError('registered inputs changed during reuse')
-        write_receipt(output, captured, checked=receipt['completed'] == CHECKED)
+        write_receipt(output, captured, checked=receipt['completed'] in CHECKED_STEPS)
         if canonical and base is not None and not record_seed_base(repository, base):
             invalidate_seed_base(repository)
     except INVALID_SEED as error:
@@ -368,7 +377,7 @@ def seed_format(report):
             raise ValueError('missing reuse receipt')
         receipt = publication.read_json(path.read_bytes())
         materials.require_keys(receipt, {'schema', 'completed', 'inputs', 'bundle'}, 'reuse receipt')
-        if receipt['schema'] != SCHEMA or receipt['completed'] not in (COMPLETED, CHECKED):
+        if receipt['schema'] != SCHEMA or receipt['completed'] not in (COMPLETED, *CHECKED_STEPS):
             raise ValueError('reuse receipt lacks complete entry success')
         inputs = receipt['inputs']
         fields = {'eligible', 'report_format', 'files', 'execution'}

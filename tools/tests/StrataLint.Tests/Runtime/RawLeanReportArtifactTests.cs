@@ -23,21 +23,20 @@ public sealed class RawLeanReportArtifactTests
         + "\"schema\": \"stratalint-raw-lean-report-v3\"}\n";
 
     [Fact]
-    public void DownstreamFibPartitionSurvivesWithoutChangingProofInputs()
+    public void ReportRoundTripPreservesDeclarationsAndRegistrationEvidence()
     {
-        const string partition = "{\"applications\": [], \"schema_version\": 1}";
-        var bytes = Encoding.UTF8.GetBytes(CanonicalReport.Replace("\"imports\": []",
-            "\"fib_analysis\": " + partition + ", \"imports\": []", StringComparison.Ordinal));
-        var read = RawLeanReportArtifact.Read(bytes, Snapshot());
+        const string templates = "{\"inventory\": [], \"records\": [], \"registered\": [], \"schema_version\": 1}";
+        const string registrationError = "fixture registration error";
+        var bytes = Encoding.UTF8.GetBytes(CanonicalReport.Replace("\"information_registration_errors\": [], ",
+            $"\"information_registration_errors\": [\"{registrationError}\"], \"information_templates\": {templates}, ",
+            StringComparison.Ordinal));
+        var snapshot = Snapshot();
+        var read = RawLeanReportArtifact.Read(bytes, snapshot);
         var file = read.Files.Single().Value;
-        Assert.Equal(partition, file.FibAnalysis!.Value.GetRawText());
-        Assert.Null(file.InformationTemplates);
-        Assert.Empty(file.InformationRegistrationErrors!.Value);
+        Assert.Equal(templates, file.InformationTemplates!.Value.GetRawText());
+        Assert.Equal(registrationError, Assert.Single(file.InformationRegistrationErrors!.Value));
         Assert.Equal("probe", Assert.Single(file.Declarations).Name);
-        var rewritten = RawLeanReportArtifact.Write(Snapshot(), read);
-        var reread = RawLeanReportArtifact.Read(rewritten.AsSpan(), Snapshot());
-        Assert.Equal(file.FibAnalysis.Value.GetProperty("schema_version").GetInt32(),
-            reread.Files.Single().Value.FibAnalysis!.Value.GetProperty("schema_version").GetInt32());
+        Assert.Equal(bytes, RawLeanReportArtifact.Write(snapshot, read).ToArray());
     }
 
     [Fact]

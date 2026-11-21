@@ -657,7 +657,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         failed = self.transport("publish", FAKE_BUILD_EXIT="41")
         self.assertEqual(41, failed.returncode, failed.stdout + failed.stderr)
         report = report_reuse.canonical_seed(self.root)
-        # Standalone analysis seals its produced bundle without checking FIB inputs.
+        # Standalone analysis seals its produced bundle with an unchecked receipt.
         report_reuse.seal(self.root, report, report_reuse.capture(self.root),
                           report_reuse.publication.bundle_identity(report))
         self.assertTrue(report_reuse.seed_format(report)["compatible"])

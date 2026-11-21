@@ -100,10 +100,7 @@ def preparation_targets(scope):
     names = {row['module'] for row in dependencies}
     # A bare Lake target can name an entire library with the same name.
     targets = {'+' + name for name in (names - imported) | set(roots)}
-    # These tools are possible runtime inputs only for scopes importing
-    # their contract types. The extractor checks the actual compiled types.
-    if 'LeanInformationAuditInterface.Contract.AuricFib' in names:
-        targets.add('regInspector/auricFibAnalysis')
+    # The registry is needed by scopes with typed audit inputs.
     if names.intersection({'LeanInformationAuditInterface.Contract.Catalog',
                            'LeanInformationAuditInterface.Contract.Registration'}):
         targets.add('+LeanInformationAudit.TemplateEnrollment')

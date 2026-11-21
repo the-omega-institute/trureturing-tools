@@ -77,17 +77,11 @@ public sealed partial class MakeWorkflowTests
         "gate-plan",
         "ci-unit",
         "compiled-judge-test",
-        "compiled-fib-test",
         "require-full-build",
     ];
 
     private static readonly string[] ToolsTargets =
     [
-        "auric-fib-analysis-build",
-        "auric-fib-analysis",
-        "auric-fib-analysis-test",
-        "auric-fib-report",
-        "auric-fib-universal-test",
         "research-readouts",
         "research-readouts-test",
         "compiled-dependencies",
@@ -104,7 +98,6 @@ public sealed partial class MakeWorkflowTests
         "selftest",
         "compile-proof",
         "compiled-judge-test",
-        "compiled-fib-test",
         "filemap-conform",
         "capacity-audit",
         "update-renderer-contract",

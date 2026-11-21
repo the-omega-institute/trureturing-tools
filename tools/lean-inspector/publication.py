@@ -22,7 +22,7 @@ import tempfile
 import zipfile
 
 import materials
-import fib_analysis
+from materials import read_json, unique_object
 
 _selection_spec = importlib.util.spec_from_file_location('report_selection',
     Path(__file__).resolve().parent.parent / 'scripts/report/lean-report-selection.py')
@@ -50,22 +50,9 @@ HEX = re.compile(r'[0-9a-f]{64}')
 KINDS = {'axiom', 'def', 'theorem', 'opaque', 'quotient', 'constructor', 'recursor', 'inductive'}
 
 
-def unique_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f'duplicate JSON field: {key}')
-        result[key] = value
-    return result
-
-
-def read_json(data):
-    return json.loads(data, object_pairs_hook=unique_object)
-
-
 def report_rows(report, schema, *, canonical=False):
     """Consume one module at a time; only the current JSON value is buffered."""
-    expected = hashlib.sha256(b'{"modules": [')
+    expected = hashlib.sha256(b'{"modules": [') if canonical else None
     count = 0
     with Path(report).open(encoding='utf-8') as source:
         buffered = ''
@@ -119,9 +106,10 @@ def report_rows(report, schema, *, canonical=False):
                         row = value(c)
                         if not isinstance(row, dict):
                             raise ValueError('invalid report module')
-                        if count:
-                            expected.update(b', ')
-                        expected.update(materials.canonical_json(row)[:-1])
+                        if expected is not None:
+                            if count:
+                                expected.update(b', ')
+                            expected.update(materials.canonical_json(row)[:-1])
                         count += 1
                         yield row
                         del row
@@ -138,7 +126,7 @@ def report_rows(report, schema, *, canonical=False):
                 raise ValueError('invalid report field separator')
         if fields != {'modules', 'schema'} or token():
             raise ValueError('invalid raw report schema')
-    if canonical:
+    if expected is not None:
         expected.update(b'], "schema": ' + materials.canonical_json(schema)[:-1] + b'}\n')
         if expected.hexdigest() != digest(report):
             raise ValueError('noncanonical raw report bytes')
@@ -203,8 +191,7 @@ def validate_input_projection(projection, module):
     for entry in projection['inputs']:
         materials.require_keys(entry, {'type', 'owner', 'name'}, 'judge input projection entry')
         if (entry['type'] not in {'LeanInformationAudit.Contract.' + name for name in
-                ('Registration', 'TemplateEnrollment', 'RootCatalog', 'Seal')} |
-                {'LeanInformationAudit.AuricFib.Contract.Application'}
+                ('Registration', 'TemplateEnrollment', 'RootCatalog', 'Seal')}
                 or entry['owner'] != module or not isinstance(entry['name'], str)
                 or not entry['name'] or entry['name'] in names):
             raise ValueError('contract.discovery:invalid_projection_entry:' + module)
@@ -244,12 +231,16 @@ def write_sidecars(report, inputs, origins, mode='produced'):
     member(report, '.provenance.json').write_text(json.dumps(provenance, separators=(',', ':')) + '\n', encoding='utf-8')
 
 
+def require_module_keys(row):
+    keys = {'module', 'source_path', 'source_sha256', 'imports', 'declarations'}
+    keys.update(key for key in ('information_registration_errors', 'information_templates', 'utility_refutation') if key in row)
+    materials.require_keys(row, keys, 'module')
+
+
 def _validate_row(row, archive, available, verified_materials, identities):
     """All certificate and declaration references die at this call boundary."""
     references = {}
-    keys = {'module', 'source_path', 'source_sha256', 'imports', 'declarations'}
-    keys.update(key for key in ('information_registration_errors', 'information_templates', 'fib_analysis', 'utility_refutation') if key in row)
-    materials.require_keys(row, keys, 'module')
+    require_module_keys(row)
     name, path, sha = row['module'], row['source_path'], row['source_sha256']
     if (not isinstance(name, str) or not name
             or not isinstance(path, str) or not path
@@ -260,10 +251,6 @@ def _validate_row(row, archive, available, verified_materials, identities):
         materials.require_sorted_strings(row['information_registration_errors'], 'registration errors')
     if 'information_templates' in row:
         materials.validate_template_evidence(row['information_templates'])
-    if 'fib_analysis' in row:
-        value = fib_analysis.validate(row['fib_analysis'])
-        if any(x['owner'] != name for x in value['applications']):
-            raise ValueError('fib.application_owner_mismatch')
     if 'utility_refutation' in row:
         evidence = materials.require_keys(row['utility_refutation'], {'claim_gid', 'claim_source_path',
             'claim_source_sha256', 'result_gid', 'is_closed_negation'}, 'utility refutation')
@@ -386,18 +373,19 @@ def verify_inputs(report, repository):
         provenance['module_origins'], repository)
 
 
-def check_aggregate_rows(rows, origins, repository=None):
+def check_aggregate_rows(rows, origins, repository=None, *, check_report=True):
     inputs = selection.Selection(repository) if repository is not None else None
     modules = inputs.modules() if inputs is not None else None
     seen = set()
     previous = None
     for row in rows:
+        require_module_keys(row)
         name = row['module']
         if name in seen or name not in origins or previous is not None and name <= previous:
             raise ValueError('aggregate production origins has unexpected fields')
         previous = name
         seen.add(name)
-        check_origin(origins[name], row)
+        check_origin(origins[name], row, check_report=check_report)
         if modules is not None:
             if name not in modules:
                 raise ValueError('report source membership mismatch')
@@ -419,7 +407,7 @@ def _require_bundle_files(report):
 
 def validate_bundle(report, expected=None, repository=None, verified_materials=None, *, identities=True,
                     check_rows=True):
-    """check_rows=False checks the bundle envelope and currency, not the accepted rows."""
+    """Check the bundle and its supported fields, with optional material validation."""
     report = Path(report)
     _require_bundle_files(report)
     sha = digest(report)
@@ -452,6 +440,8 @@ def validate_bundle(report, expected=None, repository=None, verified_materials=N
         if any(provenance[k] != v for k, v in wanted.items()) or lines[1] != 'repository_input_sha256=' + expected['repository']:
             raise ValueError('stale input/provenance')
     if not check_rows:
+        check_aggregate_rows(report_rows(report, materials.REPORT_SCHEMA),
+            provenance['module_origins'], check_report=False)
         return None
     check_aggregate_rows(validated_rows(report, member(report, '.materials.zip'),
         verified_materials, identities=identities), provenance['module_origins'], repository)
@@ -495,9 +485,9 @@ def publish(report, destination, expected, repository=None, *, mode=None, expect
             validate=True, validator=None):
     """Stage, validate and atomically publish a bundle.
 
-    validate=False is only for bundle bytes whose acceptance is already
-    recorded by content address: the envelope and input currency are still
-    checked, the accepted rows are not replayed.
+    validate=False uses prior content-addressed acceptance for material and
+    declaration validation. The envelope, input currency and module shape
+    still have to be current.
     """
     report, destination = Path(report), Path(destination)
     _require_bundle_files(report)
