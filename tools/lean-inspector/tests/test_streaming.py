@@ -1,5 +1,4 @@
 """Byte and failure regressions for the statement-v1 stream contract."""
-import hashlib
 import io
 import json
 import os
@@ -17,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import materials
 import publication
 import native
-import fib_analysis
 
 
 def manifest_fixture(root):
@@ -36,51 +34,6 @@ def evidence_fixture():
 
 
 class EvidenceFormatTests(unittest.TestCase):
-    def test_fib_partition_is_optional_unversioned_and_strict(self):
-        with tempfile.TemporaryDirectory() as directory:
-            with patch.object(fib_analysis.subprocess, 'run', side_effect=AssertionError('unexpected analysis')):
-                self.assertIsNone(fib_analysis.produce({'module': 'X'}, Path(directory) / 'absent.zip', None))
-            value = {'applications': []}
-            self.assertEqual(fib_analysis.validate(value), value)
-            for bad in (None, {}, {'applications': None}, dict(value, schema_version=1),
-                        dict(value, extra=True), {'applications': [{}]}):
-                with self.subTest(value=bad), self.assertRaisesRegex(ValueError, 'fib.invalid_'):
-                    fib_analysis.validate(bad)
-
-    def test_fib_reuses_only_unchanged_compiled_inputs_and_rejects_old_partition(self):
-        leaf = dict(application='Reg.X.application', owner='Reg.X', target='X.theorem',
-            target_module='X', target_type_identity='a' * 64, input_identity='b' * 64,
-            request={'arena': 'other'}, unavailable_reason='', reading=fib_analysis.unavailable('fixture'))
-        sibling = dict(leaf, application='Reg.X.sibling')
-        old = {'module': 'Reg.X', 'fib_analysis': {'applications': [leaf, sibling]}}
-        with tempfile.TemporaryDirectory() as directory:
-            previous = Path(directory) / 'previous.zip'
-            def write_old():
-                with zipfile.ZipFile(previous, 'w') as bundle:
-                    bundle.writestr('raw-lean-report.json', json.dumps(
-                        {'schema': materials.REPORT_SCHEMA, 'modules': [old]}))
-                    bundle.writestr('raw-lean-report.json.provenance.json', '{}')
-            write_old()
-            row = {'module': 'Reg.X', 'fib_analysis': {'applications': [dict(leaf, reading=None)]}}
-            with patch.object(publication, 'check_origin'), patch.object(fib_analysis.subprocess, 'run') as run:
-                stats = fib_analysis.produce(row, previous, 'unused')
-                self.assertEqual(stats, dict(extracted=1, generated=0, reused=1, unavailable=0,
-                    **{'analysis-invocations': 0, 'analysis-ns': 0}))
-                run.assert_not_called()
-                changed = dict(leaf, input_identity='c' * 64, reading=None)
-                run.return_value = subprocess.CompletedProcess([], 0, json.dumps([leaf['reading']]), '')
-                row['fib_analysis']['applications'] = [changed, dict(sibling, reading=None)]
-                with patch.object(fib_analysis.time, 'monotonic_ns', side_effect=[100, 157]):
-                    stats = fib_analysis.produce(row, previous, 'analyzer')
-                self.assertEqual(stats, dict(extracted=2, generated=1, reused=1, unavailable=0,
-                    **{'analysis-invocations': 1, 'analysis-ns': 57}))
-                run.assert_called_once()
-                self.assertEqual(json.loads(run.call_args.kwargs['input']), [leaf['request']])
-                old['fib_analysis']['schema_version'] = 1
-                write_old()
-                with self.assertRaisesRegex(ValueError, '^fib.invalid_partition$'):
-                    fib_analysis.produce(row, previous, 'analyzer')
-
     def test_module_evidence_has_no_global_versions(self):
         with tempfile.TemporaryDirectory() as directory:
             manifest = manifest_fixture(Path(directory))
@@ -373,30 +326,6 @@ class StreamingTests(unittest.TestCase):
                     self.assertEqual(entry.compress_size, len(data))
                     self.assertEqual(native.compressed_member(archive, entry), data)
                     self.assertEqual(archive.read(entry), payload)
-
-    def test_compiler_digest_frames_preserve_material_sequence(self):
-        payload = bytes(range(256)) * 513
-        frames = (b'sha256 0\n' + f'sha256 {len(payload)}\n'.encode() + payload
-                  + b'chunks\n3\nabc0\nsha256 3\nabc' + b'done\n')
-        with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run([sys.executable, '-I', materials.__file__,
-                                     'stream', directory], input=frames, capture_output=True,
-                                    check=False, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.decode().splitlines(), [
-                hashlib.sha256(b'').hexdigest(), hashlib.sha256(payload).hexdigest(),
-                'ok', hashlib.sha256(b'abc').hexdigest(), 'done'])
-            self.assertEqual(sorted(p.name for p in Path(directory).iterdir()), ['0.statement.gz'])
-            self.assertEqual(materials.read_material(Path(directory) / '0.statement.gz'), b'abc')
-
-    def test_truncated_compiler_digest_frame_fails_without_material(self):
-        with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run([sys.executable, '-I', materials.__file__,
-                                     'stream', directory], input=b'sha256 4\nabc',
-                                    capture_output=True, check=False, timeout=30)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn(b'truncated compiler digest frame', result.stderr)
-            self.assertEqual(list(Path(directory).iterdir()), [])
 
     def test_chunked_spool_preserves_material_bytes(self):
         data = ('λ😀' * 40000).encode()
@@ -894,7 +823,7 @@ raise SystemExit(37)
             path.chmod(0o755)
             return path
 
-        for name in ['inspect.sh', 'native.py', 'reuse.py', 'materials.py', 'fib_analysis.py', 'publication.py']:
+        for name in ['inspect.sh', 'native.py', 'reuse.py', 'materials.py', 'publication.py']:
             path = 'tools/lean-inspector/' + name
             write(path, (repository / path).read_text())
         write('tools/scripts/lib/resource-observation-lib.sh', 'resource_observe() { :; }\n')
@@ -998,7 +927,7 @@ class EntryPointTests(unittest.TestCase):
                     path.chmod(0o755)
                 repository = Path(publication.__file__).resolve().parents[2]
                 for name in ['tools/lean-inspector/inspect.sh', 'tools/lean-inspector/reuse.py',
-                             'tools/lean-inspector/materials.py', 'tools/lean-inspector/fib_analysis.py',
+                             'tools/lean-inspector/materials.py',
                              'tools/lean-inspector/build_work.py', 'tools/lean-inspector/publication.py',
                              'tools/scripts/report/lean-report-selection.py']:
                     write(name, (repository / name).read_text())

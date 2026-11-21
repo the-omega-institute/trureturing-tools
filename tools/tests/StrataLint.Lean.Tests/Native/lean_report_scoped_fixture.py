@@ -63,11 +63,11 @@ class ScopedContracts(unittest.TestCase):
                 dict(module='D5.Utility', imports=['D5.B'])]
         scope = dict(roots=['D5.A'], dependencies=rows)
         self.assertEqual(producer.preparation_targets(scope), ['+D5.A', '+D5.Utility'])
-        for contract, tool in [('AuricFib', 'regInspector/auricFibAnalysis'),
-                               ('Catalog', '+LeanInformationAudit.TemplateEnrollment')]:
-            name = 'LeanInformationAuditInterface.Contract.' + contract
-            scope['dependencies'] = [*rows, dict(module=name, imports=[])]
-            self.assertIn(tool, producer.preparation_targets(scope))
+        scope['dependencies'] = [*rows,
+            dict(module='LeanInformationAuditInterface.Contract.Catalog', imports=[])]
+        self.assertEqual(producer.preparation_targets(scope), [
+            '+D5.A', '+D5.Utility', '+LeanInformationAudit.TemplateEnrollment',
+            '+LeanInformationAuditInterface.Contract.Catalog'])
 
     def test_selected_utility_discovery_uses_production_reader(self):
         producer = api(self)

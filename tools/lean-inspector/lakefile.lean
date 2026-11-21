@@ -194,8 +194,8 @@ remain free to extract and cache evidence from the resulting artifacts. -/
 private def prebuilt (input : FetchM (Job α)) : FetchM (Job α) :=
   withTheReader BuildContext (fun ctx => {ctx with noBuild := true}) input
 
-/-- Input classification is a compiler fact. Report formats and producer
-program traces do not invalidate it. Read only the target's own olean parts. -/
+/-- Input classification traces the compiler exports and the supported input
+types. Read only the target's own olean parts. -/
 module_facet judgeInputs (mod : Module) : FilePath := withCurrPackage mod.pkg do
   let pkg := (← getWorkspace).root
   discard <| (← fetch <| pkg.facet `reportInputs).await
@@ -212,6 +212,9 @@ module_facet judgeInputs (mod : Module) : FilePath := withCurrPackage mod.pkg do
     observePhase "lake-compiler-continuation" "finish" mod.name.toString "compiler-continuation"
     observePhase "lake-compiler-inputs" "finish" mod.name.toString "compiler-inputs"
     addTrace (info.allArtsTrace.mix info.legacyTransTrace)
+    -- Refresh classification after a change in supported types. Report
+    -- artifacts keep tracing their own compiler exports and source files.
+    addTrace (BuildTrace.ofHash (Hash.ofString "stratalint-judge-input-types-v2"))
     let file := root / ".lake/build/lean-inspector" / "judge-inputs" / s!"{mod.name}.json"
     buildFileUnlessUpToDate' file do
       observePhase "lake-input-discovery" "start"
@@ -328,16 +331,8 @@ private def prepareNativeModuleReport (mod : Module) : FetchM (Job PreparedArtif
     let inputs ← readJson projectionPath
     observePhase "lake-module-inputs" "finish"
     let ownInputs ← IO.ofExcept (inputs.getObjValAs? (Array Json) "inputs")
-    let fibInputs := ownInputs.filter fun entry =>
-      (entry.getObjValAs? String "type").toOption ==
-        some "LeanInformationAudit.AuricFib.Contract.Application"
-    let fibAnalysis ← IO.ofExcept (config.getObjValAs? Bool "fib_analysis")
-    let skipFib := !fibAnalysis && !fibInputs.isEmpty
-    let analyzer ← if !fibAnalysis || fibInputs.isEmpty then pure "" else do
-      let some executable ← findLeanExe? `auricFibAnalysis | error "fib.analysis_program_missing"
-      pure executable.file.toString
     let mut deps := deps
-    unless ownInputs.size == fibInputs.size do
+    unless ownInputs.isEmpty do
       let some registry := (← getWorkspace).findModule? `LeanInformationAudit.TemplateEnrollment
         | error "IE-C050 reason=incomplete_closure rule=dtr.report_producer"
       let enrollment ← reportState.graphFetch.atomically fun _ =>
@@ -348,9 +343,8 @@ private def prepareNativeModuleReport (mod : Module) : FetchM (Job PreparedArtif
     -- Await without mixing: the compiled tool must be current, but its implementation
     -- identity is not a report-semantic dependency.
     observePhase "lake-report-programs" "start"
-    let workspace ← getWorkspace
-    let env := workspace.augmentedEnvVars
-    let file := root / ".lake/build/lean-inspector" / "modules" / s!"{mod.name}.zip"
+    let env := (← getWorkspace).augmentedEnvVars
+    let file := root / ".lake/build/lean-inspector/modules" / s!"{mod.name}.zip"
     -- Schedule the format input before the callback. Waiting on a freshly
     -- created job inside every callback makes the runtime spawn spare workers.
     let format ← inputBinFile (root / ".lake/build/lean-inspector" / "report-format")
@@ -364,13 +358,11 @@ private def prepareNativeModuleReport (mod : Module) : FetchM (Job PreparedArtif
         let info ← exportJob.await
         addTrace (info.allArtsTrace.mix info.legacyTransTrace)
       addTrace format.getTrace
-      if skipFib then addTrace (BuildTrace.ofHash (Hash.ofString "omit-auric-fib"))
       let executable ← inspector.await
       observePhase "lake-report-inspector" "ready"
       observePhase "lake-report-programs" "finish"
       let args := #[root.toString, mod.name.toString, (← IO.FS.realPath mod.leanFile).toString,
-        utility.toString, executable.toString, file.toString,
-        analyzer]
+        utility.toString, executable.toString, file.toString]
       let build := do
         prepareProduction
         proc { (← nativeCommand pkg (#["module"] ++ args)) with env }
@@ -413,48 +405,12 @@ private def buildNativeModuleReport (mod : Module) : FetchM (Job ReportArtifact)
     if let some row := request.artifact? then
       setTrace row.outputTrace
       return row
-    -- Lake removes a stale output before invoking the build callback. Retain
-    -- the existing module transaction only for FIB leaves that can reuse it.
-    -- This is a transient rename, never a second cache or a freshness key.
-    let previous := request.file.addExtension "fib-previous"
-    if !request.args[6]!.isEmpty && (← previous.pathExists) && !(← request.file.pathExists) then
-      IO.FS.rename previous request.file
-    if batch?.isSome && request.args[6]!.isEmpty then
+    if batch?.isSome then
       return ← commitPendingReport mod request
-    let preserve := !request.args[6]!.isEmpty && (← request.file.pathExists)
-    if preserve then IO.FS.rename request.file previous
-    let args := request.args.push (if preserve then previous.toString else "")
-    let build := do
-        request.prepareProduction
-        if request.args[6]!.isEmpty then
-          proc { (← nativeCommand pkg (#["module"] ++ args)) with env := request.env }
-        else IO.FS.withTempDir fun directory => do
-          let staged := args.push directory.toString
-          proc { (← nativeCommand pkg (#["module-stage"] ++ staged)) with env := request.env }
-          let work ← readJson (directory / "fib-work.json")
-          let work ← IO.ofExcept work.getArr?
-          unless work.size == 1 do error "fib.analysis_incomplete"
-          let generated ← IO.ofExcept (work[0]!.getObjValAs? Nat "generated")
-          let staged ← if generated > 0 then do
-            let workspace ← getWorkspace
-            let some analyzer := workspace.findLeanExe? `auricFibAnalysis
-              | error "fib.analysis_program_missing"
-            observePhase "lake-analyzer-await" "start"
-            let analyzerJob ← reportState.graphFetch.atomically fun _ =>
-              JobM.runFetchM (prebuilt analyzer.fetch)
-            let executable ← analyzerJob.await
-            observePhase "lake-analyzer-await" "finish"
-            pure (staged.set! 6 executable.toString)
-          else pure staged
-          proc { (← nativeCommand pkg (#["module-finish"] ++ staged)) with env := request.env }
-        pure PUnit.unit
-    try
-      let result ← buildArtifact request.file build
-      if preserve then removeFileIfExists previous
-      return result
-    catch error =>
-      if preserve then IO.FS.rename previous request.file
-      throw error
+    buildArtifact request.file do
+      request.prepareProduction
+      proc { (← nativeCommand pkg (#["module"] ++ request.args)) with env := request.env }
+      pure PUnit.unit
 
 private def nativeModuleReport (mod : Module) : FetchM (Job ReportArtifact) := do
   let key := (mod.facet `inspectorModuleReport).key
@@ -571,7 +527,7 @@ private def collectNativeReports (pkg : Package) (config : Json) :
     observePhase "lake-prepare" "finish"
     try observePhase "lake-source-whitelists" "start" catch _ => pure ()
     let requests := (artifacts.filter fun request =>
-      request.artifact?.isNone && request.args[6]!.isEmpty).qsort fun a b => a.args[1]! < b.args[1]!
+      request.artifact?.isNone).qsort fun a b => a.args[1]! < b.args[1]!
     -- Keep bounded native batches, committing each successful chunk before
     -- starting the next. Compiler/projection preparation above is complete.
     let mut start := 0
@@ -613,14 +569,12 @@ package_facet report (owner : Package) : FilePath := withCurrPackage owner do
   observePhase "lake-inputs" "finish"
   let rows ← collectNativeReports pkg config
   let membership ← inputBinFile inputs
-  (rows.zipWith (fun artifacts _ => artifacts) membership).mapM fun artifacts => do
-    let root ← repositoryDir pkg
-    let file := root / ".lake/build/lean-inspector" / "report.zip"
+  (rows.add membership).mapM fun artifacts => do
+    let file := root / ".lake/build/lean-inspector/report.zip"
     let mut trace := BuildTrace.nil "<collection>"
     for row in artifacts do
       trace := trace.mix row.outputTrace.withoutInputs
     setTrace (mixTrace trace membership.getTrace)
-    -- Concatenating traced, production-validated rows needs no further check.
     let build := do
       runBatch pkg #[("aggregate", #[root.toString, file.toString] ++ artifacts.map (·.path.toString))]
       pure PUnit.unit

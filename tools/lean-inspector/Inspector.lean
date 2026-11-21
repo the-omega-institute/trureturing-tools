@@ -8,7 +8,6 @@ import Lean.Elab.Term
 import LeanInformationAudit.RawArtifacts
 import LeanInformationAudit.CompiledAxioms
 import LeanInformationAudit.ArtifactAssessment
-import LeanInformationAudit.Contract.FibApplications
 
 namespace LeanInformationAudit.InspectorProducer
 
@@ -188,7 +187,6 @@ structure ModuleReport where
   refutation : Option RefutationReport := none
   informationRegistrationErrors : Array String := #[]
   informationTemplates : Json := Json.null
-  fibApplications : Json := Json.null
 
 def includeInStatement (name : Name) : ConstantInfo → Bool
   | .thmInfo _ => !(privateToUserName name).isInternalDetail
@@ -240,19 +238,6 @@ elab "informationMaterialWriterProgram" : term => do
 
 abbrev MaterialWriter := IO.Process.Child {
   stdin := .piped, stdout := .piped, stderr := .inherit }
-
-/-- Hash exact compiler bytes through the existing material writer. Digest
-frames create no material, alter no statement index and carry no authority. -/
-def digestBytes (writer : MaterialWriter) (bytes : ByteArray) : IO String := do
-  writer.stdin.putStr s!"sha256 {bytes.size}\n"
-  writer.stdin.write bytes
-  writer.stdin.flush
-  let line ← writer.stdout.getLine
-  let digest := line.trimAscii.toString
-  unless digest.length == 64 && digest.toList.all (fun c =>
-      ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f')) do
-    throw <| IO.userError "material writer returned an invalid compiler digest"
-  return digest
 
 def writeMaterial (writer : MaterialWriter) (info : ConstantInfo) : IO Unit := do
   writer.stdin.putStr "chunks\n"
@@ -387,8 +372,6 @@ def renderModule (report : ModuleReport) : String :=
     ++ ", \"information_registration_errors\": " ++ renderStrings report.informationRegistrationErrors
     ++ (if report.informationTemplates == Json.null then "" else
       ", \"information_templates\": " ++ report.informationTemplates.compress)
-    ++ (if report.fibApplications == Json.null then "" else
-      ", \"fib_analysis\": " ++ report.fibApplications.compress)
     ++ ", \"module\": " ++ jsonString report.moduleName
     ++ ", \"source_path\": " ++ jsonString report.sourcePath
     ++ ", \"source_sha256\": " ++ jsonString report.sourceSha256
@@ -461,9 +444,7 @@ private def withReportWriter (reportOutput materialSpool : System.FilePath)
   RawArtifacts.loadModule target state
   for utility in utilities do RawArtifacts.loadModule utility.claimModule.toName state
   let targetData ← (← state.get).getModule target
-  let hasFib := !statementOnly && targetData.constants.any FibApplications.isInput
-  if !statementOnly && (RawArtifacts.hasTypedInputs targetData ||
-      hasFib) then
+  if !statementOnly && RawArtifacts.hasTypedInputs targetData then
     RawArtifacts.loadModule `LeanInformationAudit.TemplateEnrollment state
   let store ← state.get
   RawArtifacts.checkBatchConstants base store seen
@@ -471,7 +452,7 @@ private def withReportWriter (reportOutput materialSpool : System.FilePath)
 
 -- No target store, assessment, expression cache or report row escapes this frame.
 @[noinline] private unsafe def produceTarget (base : RawArtifacts.Store)
-    (state : IO.Ref RawArtifacts.Store) (statementOnly profiling withoutFib : Bool)
+    (state : IO.Ref RawArtifacts.Store) (statementOnly profiling : Bool)
     (input : ModuleInput) (utilities : Array UtilityInput)
     (generated : IO.Ref (Std.HashMap String String))
     (seen : IO.Ref (NameMap Name))
@@ -515,17 +496,13 @@ private def withReportWriter (reportOutput materialSpool : System.FilePath)
     (closedNegation (fun name => current.modules.find? name.toName)
       (current.constants.find?) input)
     cache writer counter utilities generatedNames binding input
-  let fib ← if !withoutFib && !statementOnly && data.constants.any FibApplications.isInput then
-    FibApplications.extract target data.constants current (digestBytes writer)
-    else pure Json.null
   let row := { row with
-    fibApplications := fib
     informationRegistrationErrors := sortedUnique (row.informationRegistrationErrors ++ enrollmentErrors) }
   out.putStr (renderModule row)
   out.flush
 
 private unsafe def produceCompiled (reportOutput materialSpool : System.FilePath)
-    (statementOnly checkConstantsOnly withoutFib : Bool)
+    (statementOnly checkConstantsOnly : Bool)
     (generatedIndex : Option System.FilePath)
     (inputs : Array ModuleInput) (utilities : Array UtilityInput) : IO Unit := do
   let start ← IO.monoNanosNow
@@ -575,7 +552,7 @@ private unsafe def produceCompiled (reportOutput materialSpool : System.FilePath
       let selected := utilities.filter (·.modulePath == input.sourcePath)
       if index > 0 then out.putStr ", "
       try
-        produceTarget base targetState statementOnly profiling withoutFib input selected generated seen writer out counter
+        produceTarget base targetState statementOnly profiling input selected generated seen writer out counter
       finally
         RawArtifacts.release targetState
       if profiling then
@@ -595,8 +572,6 @@ unsafe def main (args : List String) : IO Unit := do
     | _ => pure args
   -- Statement-only output deliberately has no binding fields and cannot meet
   -- the declared-template admission consumer. It serves standalone encoders.
-  let withoutFib := args.head? == some "--without-fib"
-  let args := if withoutFib then args.drop 1 else args
   let statementOnly := args.head? == some "--statements-only"
   let args := if statementOnly then args.drop 1 else args
   let checkConstantsOnly := args.head? == some "--check-batch-constants"
@@ -618,7 +593,7 @@ unsafe def main (args : List String) : IO Unit := do
       | .error message => throw <| IO.userError s!"invalid utility input: {message}"
   let selectedUtilities := utilities.filter fun utility =>
     inputs.any (·.sourcePath == utility.modulePath)
-  produceCompiled reportOutput materialSpool statementOnly checkConstantsOnly withoutFib generatedIndex inputs selectedUtilities
+  produceCompiled reportOutput materialSpool statementOnly checkConstantsOnly generatedIndex inputs selectedUtilities
 
 end LeanInformationAudit.InspectorProducer
 

@@ -428,21 +428,6 @@ def run(tool):
             os.environ.clear();os.environ.update(saved)
         print('BRIEF_SELFTEST tool='+tool.name+' failed=0')
         return 0
-    if tool.stem == 'purge_stale_fib':
-        import zipfile
-        with tempfile.TemporaryDirectory(prefix='cache fixture __tokens__ ') as tmp:
-            directory=Path(tmp)/'.lake/build/lean-inspector/modules'
-            directory.mkdir(parents=True)
-            fixture=json.loads((DATA/'cache.json').read_text())
-            for name, payload in fixture['archives'].items():
-                with zipfile.ZipFile(directory/name,'w') as archive:
-                    archive.writestr('raw-lean-report.json',json.dumps(payload))
-            result=subprocess.run([sys.executable,str(tool),tmp,'--delete'],capture_output=True,text=True)
-            assert result.returncode==0,result.stderr
-            assert result.stdout==fixture['expected']
-            assert sorted(p.name for p in directory.iterdir())==['current.zip']
-        print('BRIEF_SELFTEST tool='+tool.name+' failed=0')
-        return 0
     if tool.stem in ('gen_stage_briefs', 'gen_review'):
         import importlib.util
         from common import BriefError
@@ -495,13 +480,6 @@ def run(tool):
             rejected(11)
             assert (root/'head.md').read_text()==original
         elif tool.stem=='implb_head':
-            import importlib.util
-            import shlex
-            spec=importlib.util.spec_from_file_location('implb_fixture',tool)
-            module=importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            path=root/'repository with spaces/briefgen/purge_stale_fib.py'
-            assert shlex.split(module.purge_command(path))[:2]==['python3',str(path)]
             (root/'scratch/lanes/sample.json').unlink()
             rejected(11)
         elif tool.stem=='rework_brief':
@@ -545,7 +523,7 @@ if __name__=='__main__':
     if sys.argv[1:2]==['--stub']:
         stub(sys.argv[2],sys.argv[3:])
     elif sys.argv[1:]==['--selftest']:
-        for name in sorted({key.split(':')[0] for key in json.loads((DATA/'golden.json').read_text())} | {'common.py','purge_stale_fib.py'}):
+        for name in sorted({key.split(':')[0] for key in json.loads((DATA/'golden.json').read_text())} | {'common.py'}):
             tool=HERE/name
             run(tool if tool.exists() else TOOLS/name)
     else:

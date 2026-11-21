@@ -42,7 +42,6 @@ CLAUDE.md §3.6 的操作面。长任务使用宿主作业句柄，检查结果�
 | `briefgen/exclusions_compact.py [--preregistrations] [YYMM-YYMM]` | 压缩 `briefs/search-exclusions.md` 中的 arXiv、OEIS 和具名排除项；可并入 open 预登记 issue，按窗口补入 dev 的已有文献标识。 |
 | `render-search-brief.sh --codex LETTER ROUND [deep|quick] [WINDOW]` | 通过原 renderer 生成 codex 只读搜题 brief；实现为 `briefgen/codex_search.py`，与原深浅轨共用模板、dev SHA 和 open 预登记查询。 |
 | `add_base_blocks.py [--base SOURCE] FILE…` | 从唯一 tracked 基底模板补入 public-surface/import/provenance 三块；显式 SOURCE 支持已有基底。 |
-| `briefgen/purge_stale_fib.py WORKTREE [--delete]` | Stage B head 引用的缓存工具；仅列出或删除形态过期的模块报告 zip 及其 trace/hash，不改 Lean。 |
 
 `OP_PROVENANCE_MD` 是实施基底或 Stage B head 的调用者产地文本；工具不内置会话身份。搜题另须显式给 `OP_SEARCH_WORKTREE`、`OP_SEARCH_OUTPUT_DIR`；深度轨还需 `OP_CODEX_EXCLUSIONS` 指向排除项文字文件。`OP_NAME_PREFIX` 进入 codex 搜题 seat 名称。
 

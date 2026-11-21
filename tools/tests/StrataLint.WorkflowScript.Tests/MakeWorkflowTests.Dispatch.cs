@@ -168,7 +168,7 @@ public sealed partial class MakeWorkflowTests
         Assert.Contains(PrOpenScriptPath, Recipe(makefile, "pr-open"), StringComparison.Ordinal);
         Assert.Contains("--head \"$(HEAD)\"", Recipe(makefile, "pr-open"), StringComparison.Ordinal);
         Assert.DoesNotContain("pr-update", makefile, StringComparison.Ordinal);
-        var forwarded = new[] { "filemap-conform", "compiled-judge-test", "compiled-fib-test" };
+        var forwarded = new[] { "filemap-conform", "compiled-judge-test" };
         foreach (var target in forwarded)
         {
             Assert.Contains($"$(MAKE) -C tools {target}", Recipe(makefile, target), StringComparison.Ordinal);

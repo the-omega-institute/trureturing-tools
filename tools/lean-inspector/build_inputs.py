@@ -1,4 +1,4 @@
-"""Explicit compilation and regression checks for consumers that request a built report."""
+"""Explicit compilation and checked publication for consumers that request a built report."""
 import argparse
 import json
 import os
@@ -48,8 +48,6 @@ def prepare(roots, directory, need_inputs=True):
         targets = programs
         if need_inputs:
             targets = [*targets, *TOOLS]
-            if publication.selection.Selection(ROOT).full_report_fib:
-                targets.append('regInspector/auricFibAnalysis')
         commands = [['bash', 'tools/scripts/worktree/lean-cache-run.sh', '--build-report-programs',
                      *sorted(set(targets))]]
     if not roots and need_inputs:
@@ -96,14 +94,11 @@ def checked_report(directory, output, seed, program_logs, work_file, *, try_seed
             prepare('', program_logs)
     if not reused:
         env = dict(os.environ, STRATALINT_LEAN_REPORT_LOG_DIR=str(logs),
-                   STRATALINT_LEAN_BUILD_WORK_FILE=str(directory / 'analysis-work.json'))
+                   STRATALINT_LEAN_BUILD_WORK_FILE=str(directory / 'report-work.json'))
         subprocess.run(['make', 'lean-report', 'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build',
                         'LEAN_REPORT=' + str(candidate)], cwd=ROOT, env=env, check=True)
-    if not publication.selection.Selection(ROOT).full_report_fib:
-        with reuse.publication_guard(ROOT, output):
-            publish_checked(candidate, output, captured, reused, seed_commit)
-    else:
-        check_fib_and_publish(directory, candidate, output, captured, reused, seed, seed_commit)
+    with reuse.publication_guard(ROOT, output):
+        publish_checked(candidate, output, captured, reused, seed_commit)
     try:
         logs.mkdir(parents=True, exist_ok=True)
         for path in program_logs.glob('programs.*.log'):
@@ -114,51 +109,6 @@ def checked_report(directory, output, seed, program_logs, work_file, *, try_seed
         build_work.record(ROOT, logs, work_file, *phases)
     except (OSError, ValueError, TypeError, KeyError) as error:
         print('LEAN_BUILD_WORK_UNKNOWN ' + str(error), file=sys.stderr)
-
-
-def check_fib_and_publish(directory, candidate, output, captured, reused, seed, seed_commit):
-    # Keep stable comparison data across regressions that build transient Lean fixtures.
-    previous = directory / 'previous' / publication.RAW
-    previous.parent.mkdir()
-    observed_members = ('', '.provenance.json', reuse.SUFFIX)
-    copied_members = set()
-    with reuse.publication_guard(ROOT, output):
-        try:
-            checked_previous = reuse.read_receipt(output)['completed'] == reuse.CHECKED
-        except reuse.INVALID_SEED:
-            checked_previous = False
-        for suffix in observed_members:
-            path = publication.member(output, suffix)
-            if path.exists():
-                snapshot = publication.member(previous, suffix)
-                if path.stat().st_dev == directory.stat().st_dev:
-                    os.link(path, snapshot)
-                else:
-                    shutil.copyfile(path, snapshot)
-                    copied_members.add(suffix)
-    selected = os.environ.get('STRATALINT_FIB_REGRESSIONS_SELECTED', 'false')
-    if selected not in ('true', 'false'):
-        raise ValueError('invalid FIB regression selection')
-    same = (checked_previous and reused and seed == output and previous.exists()
-            and publication.digest(previous) == publication.digest(candidate))
-    if not same or selected == 'true':
-        subprocess.run([sys.executable, '-B', 'tools/lean-inspector/fib_analysis.py', str(candidate),
-                        '--regressions', str(ROOT), '--previous', str(previous),
-                        '--selected', selected, *([] if checked_previous else ['--unverified-previous'])], cwd=ROOT, check=True)
-    else:
-        print('LEAN_INSPECTOR_FIB_REGRESSIONS changed=false selected=false', flush=True)
-    with reuse.publication_guard(ROOT, output):
-        for suffix in observed_members:
-            observed = publication.member(previous, suffix)
-            current = publication.member(output, suffix)
-            if not current.exists() and not observed.exists():
-                continue
-            unchanged = current.exists() and observed.exists() and (
-                publication.digest(current) == publication.digest(observed) if suffix in copied_members
-                else current.samefile(observed))
-            if not unchanged:
-                raise ValueError('published report changed during regression check')
-        publish_checked(candidate, output, captured, reused, seed_commit)
 
 
 def publish_checked(candidate, output, captured, reused, seed_commit):
@@ -209,8 +159,7 @@ def main():
         program_logs = Path(logs)
         prepare(args.targets, program_logs, need_inputs)
         if args.action == 'check':
-            # Release publishers may archive the build directory while FIB checks run.
-            # Keep all candidate bytes and prior-generation links outside that archive.
+            # Keep candidate bytes outside the build archive read by release publishers.
             staging_parent = ROOT / '.lake' if output.is_relative_to(ROOT / '.lake/build') else output.parent
             staging_parent.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix='.lean-report-build.', dir=staging_parent) as staging:

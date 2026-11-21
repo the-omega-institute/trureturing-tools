@@ -89,12 +89,6 @@ class ContractTests(unittest.TestCase):
             self.assertEqual({k: json.loads(values[k]) for k in expected}, expected)
         return expected
 
-    def test_ordinary_ci_has_no_fib_suite(self):
-        self.put("tools/scripts/compiled-fib-test.sh", b"# changed FIB suite\n")
-        plan = self.parity()
-        self.assertNotIn("tests-fib", plan["hits"])
-        self.assertNotIn("fib-regressions", plan)
-
     def test_normal_content_uses_source_policy_without_worktree_lifecycle(self):
         self.put("Blueprint/D5/S3/Content.scribe.cs", b"// changed content\n")
         plan = self.parity()

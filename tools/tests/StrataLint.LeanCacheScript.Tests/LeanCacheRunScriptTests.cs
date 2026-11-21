@@ -28,7 +28,7 @@ public sealed class LeanCacheRunScriptTests
         WriteExecutable(Path.Combine(bin, "dotnet"),
             "#!/bin/bash\nprintf '%s\\n' call \"$@\" >> \"$CALLS\"\nexit \"$BUILD_EXIT\"\n");
         var result = TestProcessRunner.Run("/bin/bash",
-            ["-c", "PATH=\"$1:$PATH\" CALLS=\"$2\" BUILD_EXIT=\"$3\" LEAN_SKIP_LOCK=1 exec bash \"$4\" --build leanInspector/reportInspector regInspector/compiledJudgeTests regInspector/auricFibAnalysis",
+            ["-c", "PATH=\"$1:$PATH\" CALLS=\"$2\" BUILD_EXIT=\"$3\" LEAN_SKIP_LOCK=1 exec bash \"$4\" --build leanInspector/reportInspector regInspector/compiledJudgeTests",
                 "shared-programs", bin, calls, failBuild ? "97" : "0", script],
             fixture.Path, TestBudgets.ScriptProcessHangGuard, 64 * 1024);
         Assert.Equal(failBuild ? 97 : 0, result.ExitCode);
@@ -39,7 +39,6 @@ public sealed class LeanCacheRunScriptTests
         Assert.DoesNotContain(arguments, value => value.StartsWith("--fail-level", StringComparison.Ordinal));
         Assert.Contains("leanInspector/reportInspector", arguments);
         Assert.Contains("regInspector/compiledJudgeTests", arguments);
-        Assert.Contains("regInspector/auricFibAnalysis", arguments);
     }
 
     [Fact]
