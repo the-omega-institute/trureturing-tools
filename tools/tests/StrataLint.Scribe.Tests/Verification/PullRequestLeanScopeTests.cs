@@ -41,14 +41,14 @@ public sealed class PullRequestLeanScopeTests
         if (expected == 2)
         {
             Assert.Contains("no matching .scribe.cs source", error.ToString(), StringComparison.Ordinal);
-            Assert.Throws<InvalidDataException>(() => PullRequestLeanChecks.CreatePlan(temporary.Path, snapshot, [markdown, script]));
+            Assert.Throws<InvalidDataException>(() => PullRequestLeanChecks.CreatePlan(temporary.Path, snapshot, RawChangeSet.Create([markdown, script])));
         }
         else
         {
             using var plan = System.Text.Json.JsonDocument.Parse(output.ToString());
             Assert.Empty(plan.RootElement.GetProperty("paths").EnumerateArray());
             Assert.Empty(plan.RootElement.GetProperty("targets").EnumerateArray());
-            var admission = PullRequestLeanChecks.CreatePlan(temporary.Path, snapshot, [markdown, script]);
+            var admission = PullRequestLeanChecks.CreatePlan(temporary.Path, snapshot, RawChangeSet.Create([markdown, script]));
             Assert.Empty(admission.Paths);
             Assert.Empty(admission.Targets);
         }

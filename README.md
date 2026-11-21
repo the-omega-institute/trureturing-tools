@@ -19,10 +19,8 @@ exact candidate and pins its SHA-256 in a fixed consumer checkout. The real
 consumer installer verifies and installs the archive before CI runs the
 registered units and additional candidate test projects.
 
-The consuming repository checks its own current source, FILEMAP and compiled
-Lean evidence against the actual PR or push. Its FIB unit acknowledges the
-corresponding current job. These checks establish acceptance of that consumer
-revision.
+The consuming repository checks its own current source, FILEMAP and scoped
+Lean evidence against the actual PR or push.
 
 ## Package and release
 

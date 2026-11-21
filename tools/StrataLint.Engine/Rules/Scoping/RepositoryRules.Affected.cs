@@ -7,7 +7,7 @@ internal static partial class RepositoryRules
     private static bool RegistrationImportsAffected(DeltaRuleContext context) =>
         Changed(context, static path => path.EndsWith(".lean", StringComparison.Ordinal)
             || path == "Reg/lakefile.toml")
-        || Changed(context, path => IsLeanReportProducerInput(path, context.RegisteredRuleBuildInputs));
+        || LeanReportProducerAffected(context);
 
     private static bool CapacityAffected(DeltaRuleContext context) =>
         CapacityAffected(context.Changes);
@@ -21,7 +21,7 @@ internal static partial class RepositoryRules
             || FrozenStatePath.IsUnderRoot(path)
             || path.StartsWith("D5/", StringComparison.Ordinal)
                 && path.EndsWith(".lean", StringComparison.Ordinal))
-        || Changed(context, path => IsLeanReportProducerInput(path, context.RegisteredRuleBuildInputs));
+        || LeanReportProducerAffected(context);
 
     private static bool LiteratureAffected(DeltaRuleContext context) =>
         Changed(context, static path => path == "Library/queries.yaml")
@@ -32,7 +32,7 @@ internal static partial class RepositoryRules
         || Changed(context, static path => path == "Trureturing.lean"
             || path.StartsWith("D5/", StringComparison.Ordinal)
                 && path.EndsWith(".lean", StringComparison.Ordinal))
-        || Changed(context, path => IsLeanReportProducerInput(path, context.RegisteredRuleBuildInputs));
+        || LeanReportProducerAffected(context);
 
     private static bool BootstrapAffected(DeltaRuleContext context) =>
         context.Changes.Paths.Any(BootstrapGate.IsProtected);
@@ -53,6 +53,9 @@ internal static partial class RepositoryRules
         Func<string, bool> predicate) =>
         context.Changes.Paths.Any(path => predicate(path.Value));
 
+    internal static bool LeanReportProducerAffected(DeltaRuleContext context) =>
+        context.RuleInputChanges.Paths.Any(path => IsLeanReportProducerInput(path.Value, context.RegisteredRuleBuildInputs));
+
     internal static bool IsLeanReportProducerInput(string path, IReadOnlySet<string> registeredInputs) =>
         path == "lean-report-inputs.json"
         || path.StartsWith("tools/", StringComparison.Ordinal)
@@ -66,7 +69,7 @@ internal static partial class RepositoryRules
         RepoPath source) =>
         LeanImportClosure.RepositoryPaths(context.Lean.Report, source)
             .Any(path => context.IsBaseFactAffected(path.Value))
-        || Changed(context, path => IsLeanReportProducerInput(path, context.RegisteredRuleBuildInputs));
+        || LeanReportProducerAffected(context);
     private static bool LiteratureReferenceChanged(DeltaRuleContext context)
     {
         if (!context.Current.TryGetFile("Library/queries.yaml", out var file))

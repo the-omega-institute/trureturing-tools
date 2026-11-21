@@ -256,13 +256,15 @@ public sealed class DeltaRuleContext
         RawChangeSet changes,
         MetaEvaluationProfile metaEvaluation,
         VerifiedScribeEmissions? verifiedScribeEmissions,
-        CandidateCommonResults? commonResults)
+        CandidateCommonResults? commonResults,
+        RawChangeSet? ruleInputChanges)
     {
         Current = current;
         Baseline = baseline;
         Policy = policy;
         Lean = lean;
         Changes = changes;
+        RuleInputChanges = ruleInputChanges ?? changes;
         if (lean.Report.IsScoped)
         {
             foreach (var change in changes.Entries)
@@ -277,7 +279,7 @@ public sealed class DeltaRuleContext
             }
         }
         RegisteredRuleBuildInputs = EngineeringProjectRegistry.ReadRuleBuildInputs(current);
-        RuleImplementationChanged = BaseFactImpact.RuleImplementationChanged(changes, RegisteredRuleBuildInputs);
+        RuleImplementationChanged = BaseFactImpact.RuleImplementationChanged(RuleInputChanges, RegisteredRuleBuildInputs);
         MetaEvaluation = metaEvaluation;
         VerifiedScribeEmissions = verifiedScribeEmissions;
         CommonResults = commonResults;
@@ -299,6 +301,10 @@ public sealed class DeltaRuleContext
     internal AcceptedLeanClosure Lean { get; }
 
     internal RawChangeSet Changes { get; }
+
+    // Scoped checks can match implementation inputs against verified release members while
+    // retaining the physical lock change for rules that inspect repository metadata.
+    internal RawChangeSet RuleInputChanges { get; }
 
     internal bool RuleImplementationChanged { get; }
 
@@ -336,7 +342,8 @@ public sealed class DeltaRuleContext
         RawChangeSet changes,
         MetaEvaluationProfile metaEvaluation,
         VerifiedScribeEmissions? verifiedScribeEmissions = null,
-        CandidateCommonResults? commonResults = null) =>
+        CandidateCommonResults? commonResults = null,
+        RawChangeSet? ruleInputChanges = null) =>
         new(
             current,
             baseline,
@@ -345,7 +352,8 @@ public sealed class DeltaRuleContext
             changes,
             metaEvaluation,
             verifiedScribeEmissions,
-            commonResults);
+            commonResults,
+            ruleInputChanges);
 }
 
 internal sealed class RepositoryRule(
