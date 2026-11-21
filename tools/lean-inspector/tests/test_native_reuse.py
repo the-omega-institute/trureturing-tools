@@ -73,7 +73,7 @@ class NativeLocalReportConsumerTests:
 
         reused = run(*report, PARTIAL_INDEXED_PROJECT='false')
         self.assertEqual(0, reused.returncode, reused.stdout + reused.stderr)
-        self.assertIn('complete-entry-reused', reused.stdout)
+        self.assertFalse(compiler.exists(), 'reading the report must leave the evicted compiler artifact missing')
         rejected = run(*shards, 'prepare', '--anchor', anchor)
         self.assertIn('project snapshot is missing compiler or report outputs', rejected.stderr)
         self.assertNotEqual(0, rejected.returncode)
