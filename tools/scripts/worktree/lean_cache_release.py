@@ -30,7 +30,7 @@ except ImportError:
 from lean_cache import SHARED_SEED_PLATFORMS, normalized_platform, partition_path, seed_partitions
 from lean_cache_topology import checkout_topology, git_absolute_path, warm_dev_remediation
 from lean_cache_release_io import (ArchiveInput, INDEXED_ASSET, INDEXED_SCHEMA, MultipartArchiveOutput,
-                                   PRODUCTION_PREFIX, VERIFICATION_PREFIX,
+                                   PRODUCTION_PREFIX, SPARSE_PLAN, VERIFICATION_PREFIX,
                                    OperationBudget, archive_sha, copy_chunks, extract_members, remaining)
 
 # Use the report entry's declared format and execution capture, never program hashes.
@@ -554,12 +554,14 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
     # Build/content and local archive failures remain failures. Remote transport is optional;
     # explicit verification succeeds only after the uploaded bytes restore.
     # A caller's LEAN_REPORT override must not move publication outside buildDir.
-    import lean_release_sparse as sparse
-
     if indexed and os.environ.get("LEAN_CACHE_RELEASE_VOLUMES") == "1":
         indexed = "volumes"
     physical = indexed == "volumes"
-    plan = sparse.read_plan(root)
+    plan = None
+    if os.environ.get("LEAN_CACHE_SPARSE_PLAN") or os.path.lexists(root / SPARSE_PLAN):
+        import lean_release_sparse as sparse
+
+        plan = sparse.read_plan(root)
     if plan and (not physical or (not build_report and plan.get("restoring_full"))):
         raise ValueError("a sparse project build requires completed volume Release preparation")
     if build_report:

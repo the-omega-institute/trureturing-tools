@@ -6,6 +6,7 @@ import time
 
 INDEXED_SCHEMA = "lean-release-seed-v5"
 INDEXED_ASSET = "lean-members"
+SPARSE_PLAN = ".lake/lean-release-sparse-plan.json"
 
 PRODUCTION_PREFIX = {False: "lean-cache-v2-", True: "lean-cache-v3-", "volumes": "lean-cache-v4-"}
 VERIFICATION_PREFIX = {False: "lean-cache-verify-v1-", True: "lean-cache-verify-v2-", "volumes": "lean-cache-verify-v3-"}

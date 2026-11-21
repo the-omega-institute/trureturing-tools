@@ -11,6 +11,7 @@ import tempfile
 from lean_artifact_inventory import import_closure, lake_configuration, project_imports, workspace_modules
 import lean_compile_layers as compiler
 import lean_release_index as index
+from lean_cache_release_io import SPARSE_PLAN
 
 
 SCHEMA = "lean-release-sparse-plan-v1"
@@ -57,7 +58,7 @@ def sparse_plan(root, tag, manifest, digest, tree, target, *, extra_roots=()):
                 inherit_modules=sorted(compatible))
 
 def plan_path(root):
-    return root / ".lake/lean-release-sparse-plan.json"
+    return root / SPARSE_PLAN
 
 
 def native_fallback(build, paths, tree, plan):
