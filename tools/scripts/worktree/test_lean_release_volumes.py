@@ -26,6 +26,55 @@ def run(root, *args):
 
 
 class VolumeDownloads(unittest.TestCase):
+    def test_sparse_report_make_failure_requires_a_bound_compatibility_signal(self):
+        from contextlib import nullcontext
+        import lean_release_sparse as sparse
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            run(root, "git", "init", "-q")
+            (root / ".gitignore").write_text(".lake/\n")
+            # Make maps both command statuses to 2, so the outer publisher must bind the reason.
+            (root / "Makefile").write_text(
+                "check:\n\t@if test -n \"$$LEAN_CACHE_SPARSE_PLAN\"; then "
+                "test -z \"$$SIGNAL\" || echo \"$$SIGNAL\" > \"$$LEAN_CACHE_SPARSE_FALLBACK_FILE\"; "
+                "exit 75; fi\n")
+            run(root, "git", "add", ".")
+            run(root, "git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.org", "commit", "-qm", "base")
+            head = run(root, "git", "rev-parse", "HEAD").strip()
+            plan = dict(schema=sparse.SCHEMA, target_commit=head, base_commit=head, base_tag="previous",
+                        base_manifest_sha256="a"*64, rebuild_modules=[])
+            marker = sparse.plan_path(root)
+            marker.parent.mkdir()
+            marker.write_text(json.dumps(plan))
+            build = root / ".lake/build"
+            build.mkdir()
+            host = Mock()
+            host.cache_guard.side_effect = lambda unused: nullcontext()
+            with patch.object(sparse, "workspace_modules", return_value={}), \
+                 patch.object(sparse.compiler, "compile_roots"), \
+                 patch.object(sparse, "bound_snapshot", return_value=("remote", "manifest", [])), \
+                 patch.dict(os.environ, GITHUB_ACTIONS="true", GITHUB_WORKSPACE=str(root), GITHUB_ENV="",
+                            LEAN_CACHE_SPARSE_PLAN=str(marker), SIGNAL=""):
+                def check(current):
+                    return sparse.check_report(host, root, ["make", "check"], "fixture", True, current).returncode
+                self.assertEqual(check(plan), 2)
+                self.assertTrue(build.exists())
+                reason = dict(target_commit="0"*40, base_manifest_sha256=plan["base_manifest_sha256"], reason="regenerate")
+                os.environ["SIGNAL"] = json.dumps(reason)
+                with self.assertRaisesRegex(ValueError, "unbound"):
+                    check(plan)
+                self.assertTrue(build.exists())
+                os.environ["SIGNAL"] = json.dumps(dict(reason, target_commit=head))
+                host.restore_snapshot.side_effect = [OSError("interrupted full restore"), True]
+                with self.assertRaisesRegex(OSError, "interrupted"):
+                    check(plan)
+                pending = sparse.read_plan(root)
+                self.assertTrue(pending["restoring_full"])
+                self.assertEqual(check(pending), 0)
+                self.assertFalse(marker.exists())
+                self.assertEqual(host.restore_snapshot.call_count, 2)
+
     def test_resume_only_the_unique_empty_starter_in_a_serialized_physical_draft(self):
         import lean_release_volume_remote as remote
 
@@ -137,6 +186,111 @@ class VolumeReleases(unittest.TestCase):
         target = self.area / name
         run(self.area, "git", "clone", "-q", "--local", str(self.project), str(target))
         return target
+
+    def test_sparse_seed_installs_only_the_build_prerequisites_and_residuals(self):
+        import lean_release_sparse as sparse
+        import lean_release_volume_remote as remote
+
+        self.write("D5/B.lean", "import D5.A\ndef valB : Nat := valA + 1\n")
+        self.build()
+        self.commit("record the project dependency")
+        base = run(self.project, "git", "rev-parse", "HEAD").strip()
+        report = self.project / ".lake/build/stratalint/raw-lean-report.json"
+        report.parent.mkdir(parents=True)
+        report.write_text("{}")
+        volumes.publish(self.pool, "base", self.project, chunk_bytes=4096)
+        manifest, tree = volumes.read_snapshot(self.pool, "base")
+        host = Mock()
+        host.prefix.return_value = "test-volume-"
+        scope = remote.namespace("fixture", {}, False, "ci-1", host)
+        manifest.update(schema=remote.SCHEMA, partition="fixture", cache_key={}, volume_scope=scope)
+        self.write("D5/B.lean", "import D5.A\ndef valB : Nat := valA + 2\n")
+        self.commit("change B")
+        target = run(self.project, "git", "rev-parse", "HEAD").strip()
+        clone = self.consumer("sparse")
+        host.report_reuse.CHECKED = ["checked"]
+        host.report_reuse.read_receipt.return_value = {"completed": ["checked"]}
+        host.report_reuse.seed_identity.return_value = "1" * 64
+
+        def download(unused_host, metadata, checked_tree, rows, output, deadline, cache):
+            size = calls = 0
+            for digest, start, count in remote.ranges(checked_tree, rows):
+                with (self.pool / "volumes" / digest).open("rb") as stream:
+                    stream.seek(start)
+                    output.write(stream.read(count))
+                size += count
+                calls += 1
+            return calls, size
+
+        with patch.object(sparse.compiler, "production_targets", return_value={"D5.B", "D5.C"}), \
+             patch.object(remote, "load_tree", return_value=tree), patch.object(remote, "download", side_effect=download), \
+             patch.dict(os.environ, {"GITHUB_ENV": "", "LEAN_CACHE_VOLUME_TEST_ID": ""}):
+            self.assertTrue(sparse.install(host, clone, self.area, "base", manifest, "2"*64, target,
+                                           "refs/heads/dev", False, None))
+            plan = sparse.read_plan(clone)
+            self.assertEqual(plan["base_commit"], base)
+            self.assertEqual(plan["rebuild_modules"], ["D5.B"])
+            self.assertEqual(plan["restore_modules"], ["D5.A"])
+            self.assertEqual(plan["inherit_modules"], ["D5.A", "D5.C"])
+            self.assertEqual(plan["base_report_sha256"], "1" * 64)
+            restored = clone / ".lake/build"
+            self.assertTrue((restored / "lib/lean/D5/A.olean").is_file())
+            self.assertFalse((restored / "lib/lean/D5/B.olean").exists())
+            self.assertFalse((restored / "lib/lean/D5/C.olean").exists())
+            self.assertTrue((restored / "stratalint/raw-lean-report.json").is_file())
+            # Rerunning the same protected install also recovers a partially rebuilt workspace.
+            with patch.dict(os.environ, GITHUB_ACTIONS="true", GITHUB_WORKSPACE=str(clone)):
+                leftover = restored / "interrupted"
+                leftover.touch()
+                with self.assertRaisesRegex(ValueError, "different publisher or snapshot"):
+                    sparse.install(host, clone, self.area, "other", manifest, "2"*64, target,
+                                   "refs/heads/dev", False, None)
+                self.assertTrue(leftover.exists())
+                self.assertTrue(sparse.install(host, clone, self.area, "base", manifest, "2"*64, target,
+                                               "refs/heads/dev", False, None))
+                self.assertFalse(leftover.exists())
+            self.write("external-build-input.txt", "global input")
+            self.commit("change an unevaluated build input")
+            self.assertIsNone(sparse.sparse_plan(self.project, "base", manifest, "2"*64, tree,
+                              run(self.project, "git", "rev-parse", "HEAD").strip()))
+
+    def test_native_residuals_and_full_fallback_index(self):
+        import lean_release_sparse as sparse
+        import lean_release_volume_remote as remote
+
+        tree = {"members": [{"module": "D5.B", "paths": ["ir/D5/B.c"]}]}
+        changed = {"rebuild_modules": ["D5.B"], "removed_modules": []}
+        added = dict(changed, rebuild_modules=["D5.New"])
+        root = self.project / ".lake/build"
+        def fallback(paths, plan=changed):
+            return sparse.native_fallback(root, [Path(p) for p in paths], tree, plan)
+
+        self.assertEqual(fallback(["ir/D5/B.c.o.export.trace"]), "ir/D5/B.c.o.export.trace")
+        self.assertIsNone(fallback(["ir/D5/A.c.o.export"]))
+        self.assertIsNone(fallback(["ir/D5/A.c.o.export", "bin/tool"], added))
+        self.assertEqual(fallback(["lib/lean/libD5.so.1"], added), "lib/lean/libD5.so.1")
+        self.assertEqual(fallback(["bin/tool"]), "bin/tool")
+        self.write(".lake/build/bin/tool.rsp", '"/old/.lake/build/ir/D5/B.c.o.export"\n')
+        self.assertEqual(fallback(["bin/tool"]), "bin/tool")
+        self.write(".lake/build/bin/tool.rsp", '"/old/.lake/build/ir/D5/A.c.o.export"\n')
+        self.assertIsNone(fallback(["bin/tool"]))
+        self.assertIsNone(fallback(["lib/libD5.a"], dict(changed, rebuild_modules=[])))
+
+        # gh refuses to overwrite a downloaded index on an ordinary full fallback.
+        host = Mock()
+        host.prefix.return_value = "test-volume-"
+        manifest = {"partition": "fixture", "cache_key": {}, "volume_scope":
+                    remote.namespace("fixture", {}, False, "ci-1", host)}
+        def load_tree(host, tag, stage, manifest, deadline):
+            with (stage / volumes.INDEX).open("xb") as out:
+                out.write(b"index")
+            return tree
+        clone = self.consumer("fallback")
+        stage = self.area / "downloads"
+        stage.mkdir()
+        with patch.object(remote, "load_tree", side_effect=load_tree), patch.object(sparse, "sparse_plan", return_value=None):
+            self.assertFalse(sparse.install(host, clone, stage, "base", manifest, "a"*64, "b"*40, "", False, None))
+            load_tree(host, "base", stage, manifest, None)
 
     def test_changed_member_only_and_full_and_scoped_after_retirement(self):
         first = volumes.publish(self.pool, "first", self.project, chunk_bytes=5000)
@@ -510,6 +664,10 @@ class VolumeReleases(unittest.TestCase):
                 self.assertEqual(release.rolling_base(args), 0)
             chosen = json.loads(selection.getvalue().split(" ", 1)[1])
             self.assertEqual((chosen["tag"], chosen["producer"], chosen["indexed"]), (tags[-1], author, "true"))
+            args.source_ref = "refs/heads/dev"
+            with patch.dict(os.environ, LEAN_CACHE_RELEASE_SPARSE_ONLY="1"), redirect_stdout(io.StringIO()) as probe:
+                self.assertEqual(release.rolling_base(args), 0)
+            self.assertEqual(json.loads(probe.getvalue().split(" ", 1)[1]), chosen)
             args.command, args.tag, args.producer = "install-base", chosen["tag"], chosen["producer"]
             args.previous_commit_only, args.manifest_sha256, args.target = False, chosen["manifest_sha256"], ["D5.A"]
             with redirect_stdout(io.StringIO()) as installed:

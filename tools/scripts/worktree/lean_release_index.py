@@ -296,16 +296,9 @@ def restore_full(stage, manifest, rows, destination, deadline):
         raise ValueError("Release archive checksum mismatch")
 
 
-def scoped_members(root, rows, targets, target_build, *, require_complete=False):
-    modules = workspace_modules(root)
-    graph = project_imports(root, modules)
-    unknown = set(targets) - modules.keys()
-    if unknown:
-        raise ValueError("unknown Lean cache targets: " + ", ".join(sorted(unknown)))
-    requested = import_closure(graph, targets)
+def compatible_modules(root, rows, modules, graph, requested):
     by_name = {row["module"]: row for row in rows if row["module"] in requested}
     compatible = set()
-    needed = set()
     for name in TopologicalSorter({name: graph[name] for name in requested}).static_order():
         row = by_name.get(name)
         module = modules[name]
@@ -321,8 +314,19 @@ def scoped_members(root, rows, targets, target_build, *, require_complete=False)
         if not required_compiler_paths(name, module).issubset(paths):
             continue
         compatible.add(name)
-        if any(not os.path.lexists(target_build / path) for path in paths):
-            needed.add(name)
+    return compatible
+
+
+def scoped_members(root, rows, targets, target_build, *, require_complete=False):
+    modules = workspace_modules(root)
+    graph = project_imports(root, modules)
+    unknown = set(targets) - modules.keys()
+    if unknown:
+        raise ValueError("unknown Lean cache targets: " + ", ".join(sorted(unknown)))
+    requested = import_closure(graph, targets)
+    compatible = compatible_modules(root, rows, modules, graph, requested)
+    needed = {row["module"] for row in rows if row["module"] in compatible
+              and any(not os.path.lexists(target_build / path) for path in row["paths"])}
     if require_complete and needed != requested:
         raise ValueError("scoped verification did not cover the requested import closure: "
                          + ", ".join(sorted(requested - needed)))
@@ -358,11 +362,12 @@ def valid_artifact_description(outputs):
             and all(isinstance(outputs.get(field), str) and outputs[field] for field in ("i", "c")))
 
 
-def adjacent_members(rows):
+def adjacent_members(rows, *, max_bytes=None):
     group = []
     end = 0
     for row in rows:
-        if group and row["offset"] != end:
+        if group and (row["offset"] != end or
+                      (max_bytes is not None and end - group[0]["offset"] + row["bytes"] > max_bytes)):
             yield group
             group = []
         group.append(row)

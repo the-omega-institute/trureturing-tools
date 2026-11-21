@@ -43,6 +43,7 @@ REPO = os.environ.get("STRATALINT_CACHE_REPO", "the-omega-institute/trureturing"
 # Issue #6194, run 34119746844: Release assets must be strictly below 2 GiB.
 # Keep dev's 1.5 GiB headroom and two-digit, at-most-100-part inventory.
 CHUNK_BYTES = 1610612736
+VERIFICATION_TARGETS = ("D5.S0.Tower.GoldenGapWord",)
 # Optional operation policy (#5985): a thirty-minute default budget for metadata,
 # local validation and installation, with an explicitly selected finite extension
 # for large multipart Release work. The asset stream itself is outside this
@@ -553,20 +554,28 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
     # Build/content and local archive failures remain failures. Remote transport is optional;
     # explicit verification succeeds only after the uploaded bytes restore.
     # A caller's LEAN_REPORT override must not move publication outside buildDir.
+    import lean_release_sparse as sparse
+
+    if indexed and os.environ.get("LEAN_CACHE_RELEASE_VOLUMES") == "1":
+        indexed = "volumes"
+    physical = indexed == "volumes"
+    plan = sparse.read_plan(root)
+    if plan and (not physical or (not build_report and plan.get("restoring_full"))):
+        raise ValueError("a sparse project build requires completed volume Release preparation")
     if build_report:
         if os.environ.get("FULL_BUILD") != "1":
             print("cache production requires explicit FULL_BUILD=1", file=sys.stderr)
             return 2
-        build = subprocess.run(["make", "check-lean-report",
-            "LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build",
-            "LEAN_REPORT=.lake/build/stratalint/raw-lean-report.json"], cwd=root)
+        command = ["make", "check-lean-report", "LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build",
+                   "LEAN_REPORT=.lake/build/stratalint/raw-lean-report.json"]
+        if plan:
+            build = sparse.check_report(sys.modules[__name__], root, command, partition, verification is not None, plan)
+        else:
+            build = subprocess.run(command, cwd=root)
         if build.returncode:
             _observe("publish", "failed", phase="build",
                      error=subprocess.CalledProcessError(build.returncode, "make"))
             return build.returncode
-    if indexed and os.environ.get("LEAN_CACHE_RELEASE_VOLUMES") == "1":
-        indexed = "volumes"
-    physical = indexed == "volumes"
     report = root / ".lake/build/stratalint/raw-lean-report.json"
     content_validated = False
     preparing = False
@@ -664,7 +673,7 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
                         transport.mkdir()
                         modules, transferred = restore_scoped(root, partition, tag, transport, deadline,
                             cache_key=cache_key, producer=identity["producer_commit_sha"],
-                            targets=["D5.S0.Tower.GoldenGapWord"], verification=True,
+                            targets=VERIFICATION_TARGETS, verification=True,
                             destination_root=control, release_metadata=draft, require_complete=True) or (0, 0)
                         if not modules or not 0 < transferred < metadata["archive_bytes"]:
                             raise ValueError("indexed verification did not restore a strict subset")
@@ -1550,6 +1559,12 @@ def rolling_base(args):
     partition = partition_path(root)
     key = release_key(root)
     verification = args.mode == "verification"
+    preferred_scope = None
+    if select and os.environ.get("LEAN_CACHE_RELEASE_SPARSE_ONLY") == "1":
+        import lean_release_volume_remote as remote
+
+        preferred_scope = remote.namespace(partition, key, verification, "ci-publisher", sys.modules[__name__],
+            test_id=os.environ.get("LEAN_CACHE_VOLUME_TEST_ID") or None, source_ref=args.source_ref)
     if select:
         candidates = snapshot_candidates(root, partition, deadline, key, indexed=True,
                                          fallback=True, rolling_mode=args.mode)
@@ -1558,6 +1573,8 @@ def rolling_base(args):
             root, partition, args.tag, key, indexed=indexed, verification=verification))), None)
         candidates = [(source, args.tag)] if source else []
     for source, tag in candidates:
+        if preferred_scope and (source != partition or not tag.startswith(prefix(partition, key, verification, indexed="volumes"))):
+            continue
         with tempfile.TemporaryDirectory(prefix="lean-rolling-base-") as temporary:
             stage = pathlib.Path(temporary)
             metadata = existing_release(tag, deadline)
@@ -1566,6 +1583,8 @@ def rolling_base(args):
             snapshot = snapshot_manifest(source, tag, stage, deadline, cache_key=key,
                                          verification=verification, metadata=metadata)
             _, manifest, _ = snapshot
+            if preferred_scope and (manifest["schema"] != remote.SCHEMA or manifest["volume_scope"] != preferred_scope):
+                continue
             producer = manifest["producer_commit_sha"]
             if args.previous_commit_only and producer == args.source_commit:
                 continue
@@ -1581,6 +1600,14 @@ def rolling_base(args):
                     continue
             if not select:
                 with cache_guard(root):
+                    if (not args.target and manifest["schema"] == "lean-release-seed-v6" and source == partition
+                            and os.environ.get("LEAN_CACHE_RELEASE_SPARSE") == "1"):
+                        import lean_release_sparse as sparse
+
+                        if sparse.install(sys.modules[__name__], root, stage, tag, manifest, digest,
+                                          args.source_commit, args.source_ref,
+                                          verification, deadline):
+                            return rolling_result(args, tag, producer, digest, indexed)
                     if args.target and indexed:
                         result = restore_scoped(root, source, tag, stage, deadline, cache_key=key,
                             producer=producer, targets=args.target, verification=verification, validated_snapshot=snapshot)

@@ -121,7 +121,15 @@ def stage_publication(host, root, stage, partition, cache_key, identity, verific
         raise ValueError("retiring an integration snapshot requires a test volume scope")
     scope = namespace(partition, cache_key, verification, identity["publication_id"], host,
                       test_id=test_id, source_ref=identity.get("source_ref"))
-    previous = published_base(host, scope, partition, cache_key, verification, deadline)
+    import lean_release_sparse as sparse
+
+    plan = sparse.read_plan(root)
+    if plan is not None:
+        prior_stage = stage / "sparse-base"
+        prior_stage.mkdir()
+        previous = sparse.overlay_base(host, root, prior_stage, partition, cache_key, verification, scope, plan, deadline)
+    else:
+        previous = published_base(host, scope, partition, cache_key, verification, deadline)
     binding = None
     if old_tag := os.environ.get("LEAN_CACHE_VOLUME_RETIRE_TAG"):
         binding = predecessor_binding(host, partition, cache_key, scope, test_id, identity, old_tag,
@@ -137,15 +145,28 @@ def stage_publication(host, root, stage, partition, cache_key, identity, verific
             uploads.append(digest)
         confirmed.add(digest)
 
-    contents, tree, written, compact, peak = volumes.pack_volumes(
-        root, stage, previous, host.CHUNK_BYTES, save_part, deadline)
+    prior_requests = prior_bytes = 0
+    if plan is None:
+        contents, tree, written, compact, peak = volumes.pack_volumes(
+            root, stage, previous, host.CHUNK_BYTES, save_part, deadline)
+    else:
+        from lean_release_sparse_pack import pack_overlay
+        prior_assets = {}
+        def read_prior(rows, output):
+            nonlocal prior_requests, prior_bytes
+            requests, size = download(host, previous[0], previous[1], rows, output, deadline, prior_assets)
+            prior_requests += requests
+            prior_bytes += size
+        contents, tree, written, compact, peak = pack_overlay(
+            root, stage, previous, plan, host.CHUNK_BYTES, save_part, read_prior, deadline)
     for digest, size in tree["volumes"].items():
         if digest not in confirmed:
             ensure_asset(host, pool + digest, digest, size, None, deadline, serialized=serialized)
     volumes.write_tree(stage / volumes.INDEX, tree)
     host.receipt("volume-upload", "saved", new_volumes=uploads,
                  payload_bytes=sum(tree["volumes"][name] for name in uploads),
-                 reused_bytes=contents["archive_bytes"] - written, compacted=compact, peak_staged_payload_bytes=peak)
+                 reused_bytes=contents["archive_bytes"] - written, compacted=compact, peak_staged_payload_bytes=peak,
+                 predecessor_requests=prior_requests, predecessor_bytes_read=prior_bytes)
     return {**contents,
             **({"volume_test_id": test_id} if test_id else {}),
             **({"volume_predecessor": binding} if binding else {}), "volume_scope": scope, "index": {"name": volumes.INDEX, "bytes": (stage / volumes.INDEX).stat().st_size,
