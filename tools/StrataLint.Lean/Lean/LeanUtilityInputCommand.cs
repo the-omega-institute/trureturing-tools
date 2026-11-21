@@ -19,10 +19,10 @@ internal static class LeanUtilityInputCommand
 
     internal static ExplicitCommandResult Run(Func<RawRepositorySnapshot> readCurrent, IReadOnlyList<string> arguments)
     {
-        var scopeOnly = arguments.Count > 0 && arguments[0] == "--scope";
-        var remaining = scopeOnly ? arguments.Skip(1).ToArray() : arguments.ToArray();
-        if (remaining.Length != 0 && (remaining.Length != 2 || remaining[0] != "--targets"))
-            return new(2, string.Empty, "USAGE: StrataLint lean-utility-input [--scope] [--targets MODULES]\n");
+        var mode = arguments.FirstOrDefault();
+        var remaining = mode is "--scope" or "--modules" ? arguments.Skip(1).ToArray() : arguments.ToArray();
+        if (remaining.Length == 0 ? mode == "--modules" : remaining is not ["--targets", _])
+            return new(2, string.Empty, "USAGE: StrataLint lean-utility-input [--scope] [--targets MODULES] | --modules --targets MODULES\n");
         try
         {
             var snapshot = SnapshotDecoder.Decode(readCurrent()) switch
@@ -33,6 +33,9 @@ internal static class LeanUtilityInputCommand
             var selected = remaining.Length == 0 ? null : LeanReportScope.Create(snapshot,
                 remaining[1].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
                     .Select(static module => RepoPath.CreateKnown(module.Replace('.', '/') + ".lean")));
+            if (mode == "--modules" && selected is not null)
+                return new(0, JsonSerializer.Serialize(selected.Paths.Select(LeanImportClosure.ModuleName)
+                    .Order(StringComparer.Ordinal)), string.Empty);
             var obligations = new List<object>();
             foreach (var (path, file) in snapshot.Files.OrderBy(static item => item.Key.Value, StringComparer.Ordinal))
             {
@@ -42,7 +45,7 @@ internal static class LeanUtilityInputCommand
                     || !UtilitySyntax.TryParse(header.Utility, out var declaration, out _)
                     || declaration is null)
                     continue;
-                if (scopeOnly)
+                if (mode == "--scope")
                 {
                     var inputModules = UtilityDeclarationValidator.DeclarationReferences(declaration)
                         .Select(static gid => LeanImportClosure.ModuleName(gid.Path))

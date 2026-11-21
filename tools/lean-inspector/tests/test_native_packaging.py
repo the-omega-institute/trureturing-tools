@@ -59,9 +59,10 @@ with (root.parent / 'gh-calls.jsonl').open('a') as log:
     log.write(json.dumps(a) + '\\n')
 def metadata(directory):
     return json.loads((directory / 'release.json').read_text())
-if a[:2] == ['release', 'list']:
-    print(json.dumps([dict(tagName=p.name, createdAt=str(p.stat().st_mtime_ns),
-        isDraft=metadata(p)['draft']) for p in root.iterdir()]))
+if a[:2] in (['release', 'list'], ['api', 'graphql']):
+    rows = [dict(tagName=p.name, createdAt=str(p.stat().st_mtime_ns), isDraft=metadata(p)['draft'])
+            for p in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime_ns, reverse=True)]
+    print(json.dumps(rows if a[0] == 'release' else dict(nodes=rows, pageInfo=dict(hasNextPage=False))))
 elif a[:2] == ['release', 'create']:
     destination = root / a[2]
     destination.mkdir()
@@ -538,9 +539,8 @@ class NativePackageConsumerTests(NativeReleaseSupport):
         missed = self.release_run('fetch', success=False)
         self.assertIn('"status":"miss"', missed.stdout)
         self.assertFalse((self.root / '.lake/build').exists())
-        self.assertEqual([['release', 'list', '--repo', 'fixture/cache', '--limit', '100',
-            '--json', 'tagName,createdAt,isDraft']],
-            [json.loads(line) for line in (self.root / 'gh-calls.jsonl').read_text().splitlines()])
+        self.assertEqual([['api', 'graphql']],
+            [json.loads(line)[:2] for line in (self.root / 'gh-calls.jsonl').read_text().splitlines()])
         first = self.guarded_command(['make', 'lean-cache-to-github-without-mathlib'],
             env=dict(self.env, STRATALINT_ACCEPT_COLD_BUILD='1'))
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr

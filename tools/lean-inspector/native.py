@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import lru_cache
 import io
 import os
@@ -28,6 +28,10 @@ ROW_SUFFIXES = ('', '.materials.zip', '.provenance.json')
 NATIVE_BATCH_MODULES = 100
 UTILITY_FIELDS = {'modulePath', 'claimGid', 'claimModule', 'claimSelector', 'claimSourcePath',
                   'claimSourceSha256', 'resultGid', 'resultModule', 'resultSelector'}
+
+
+UTILITY_BINDINGS = [('claimGid', 'claim_gid'), ('claimSourcePath', 'claim_source_path'),
+                    ('claimSourceSha256', 'claim_source_sha256'), ('resultGid', 'result_gid')]
 
 
 def check_workspace_producer(root):
@@ -407,8 +411,7 @@ def row_binding(rows, root, module_name, utility_path, *, template_inputs=None):
     else:
         utility = obligations[0]
         evidence = row.get('utility_refutation', {})
-        for raw, field in [('claimGid', 'claim_gid'), ('claimSourcePath', 'claim_source_path'),
-                           ('claimSourceSha256', 'claim_source_sha256'), ('resultGid', 'result_gid')]:
+        for raw, field in UTILITY_BINDINGS:
             if evidence.get(field) != utility[raw]:
                 raise ValueError('native utility binding mismatch')
 
@@ -633,21 +636,26 @@ def aggregate_module(name, artifact, report_stream, material_spool, material_off
         # Produced materials matched their content addresses; move their
         # deflated bytes without decompressing or compressing again.
         with zipfile.ZipFile(io.BytesIO(data['.materials.zip'])) as archive:
-            for entry in archive.infolist():
-                shape = (entry.CRC, entry.file_size)
-                if entry.filename in material_offsets:
-                    if material_offsets[entry.filename][2:] != shape:
-                        raise ValueError('statement material address collision')
-                    continue
-                data = compressed_member(archive, entry)
-                material_spool.seek(0, os.SEEK_END)
-                material_offsets[entry.filename] = (material_spool.tell(), len(data), *shape)
-                material_spool.write(data)
+            spool_materials(archive, archive.infolist(), material_spool, material_offsets)
     return origin, declarations
 
 
+def spool_materials(archive, entries, material_spool, material_offsets):
+    """Share compressed material frames across native and inherited rows."""
+    for entry in entries:
+        shape = (entry.CRC, entry.file_size)
+        if entry.filename in material_offsets:
+            if material_offsets[entry.filename][2:] != shape:
+                raise ValueError('statement material address collision')
+            continue
+        data = compressed_member(archive, entry)
+        material_spool.seek(0, os.SEEK_END)
+        material_offsets[entry.filename] = (material_spool.tell(), len(data), *shape)
+        material_spool.write(data)
+
+
 def aggregate(root, output, *artifacts, config=None, schema=materials.REPORT_SCHEMA,
-              write_sidecars=public.write_sidecars):
+              write_sidecars=public.write_sidecars, inherited=None):
     """Concatenate module artifacts that were validated when produced."""
     root, output = Path(root), Path(output)
     if config is None:
@@ -655,7 +663,8 @@ def aggregate(root, output, *artifacts, config=None, schema=materials.REPORT_SCH
     if len(artifacts) != len(config['modules']):
         raise ValueError('native aggregate membership mismatch')
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='.aggregate.', dir=output.parent) as directory, \
+    with ExitStack() as inherited_files, \
+            tempfile.TemporaryDirectory(prefix='.aggregate.', dir=output.parent) as directory, \
             tempfile.TemporaryFile(dir=output.parent) as material_spool, \
             (Path(directory) / public.RAW).open('wb') as report_stream:
         directory = Path(directory)
@@ -664,10 +673,29 @@ def aggregate(root, output, *artifacts, config=None, schema=materials.REPORT_SCH
         report_stream.write(b'{"modules": [')
         declarations = 0
         origins = {}
+        if inherited is not None:
+            prior_origins = public.read_json(public.member(inherited, '.provenance.json').read_bytes())['module_origins']
+            kept = {name for name, artifact in zip(config['modules'], artifacts) if artifact is None}
+            prior_rows = (row for row in public.report_rows(inherited, materials.REPORT_SCHEMA)
+                          if row['module'] in kept)
+            prior_materials = inherited_files.enter_context(zipfile.ZipFile(public.member(inherited, '.materials.zip')))
         for name, artifact in zip(config['modules'], artifacts):
             if name != config['modules'][0]:
                 report_stream.write(b', ')
-            origin, count = aggregate_module(name, artifact, report_stream, material_spool, material_offsets)
+            if artifact is None and inherited is not None:
+                row = next(prior_rows, None)
+                if row is None or row['module'] != name:
+                    raise ValueError('incomplete inherited report membership')
+                origin = prior_origins[name]
+                public.check_origin(origin, row)
+                report_stream.write(materials.canonical_json(row)[:-1])
+                count = len(row['declarations'])
+                addresses = {'sha256/' + decl['type_sha256'][7:] for decl in row['declarations']}
+                spool_materials(prior_materials, (prior_materials.getinfo(key) for key in addresses),
+                                material_spool, material_offsets)
+                del row
+            else:
+                origin, count = aggregate_module(name, artifact, report_stream, material_spool, material_offsets)
             origins[name] = origin
             declarations += count
         report_stream.write(b'], "schema": ' + materials.canonical_json(schema)[:-1] + b'}\n')

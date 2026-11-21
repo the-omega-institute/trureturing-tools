@@ -1,0 +1,4 @@
+{
+  "integer-character": "D5/S3/Fourier/IntegerCharacterCoercivity.lean",
+  "primitive-bridge": "D5/S3/TotalVariation/PrimitiveBridgeCancellation.lean"
+}

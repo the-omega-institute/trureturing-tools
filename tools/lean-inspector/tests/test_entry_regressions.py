@@ -1,7 +1,9 @@
 """Checked publication behavior for ordinary full reports."""
+import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -11,6 +13,7 @@ import zipfile
 
 import test_reuse
 import build_inputs
+import materials
 import publication
 import reuse
 
@@ -198,6 +201,169 @@ exec bash "$PWD/tools/lean-inspector/inspect.sh" --repository "$PWD" \\
                 self.assertEqual(calls, ['compile', 'report'])
                 self.assertEqual(before, {suffix: publication.member(report, suffix).read_bytes()
                                           for suffix in before})
+
+
+
+class SparseReportEntryTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = test_reuse.ReuseTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.root = self.fixture.root
+        for name in ('Keep', 'Successor', 'ClaimConsumer', 'Deleted'):
+            self.fixture.write('D5/' + name + '.lean', 'def x := 1\n')
+        self.fixture.dev_repository()
+        self.seed = self.fixture.report
+        rows = list(publication.report_rows(self.seed, materials.REPORT_SCHEMA))
+        origins = publication.read_json(publication.member(self.seed, '.provenance.json').read_bytes())['module_origins']
+        with zipfile.ZipFile(publication.member(self.seed, '.materials.zip'), 'w', zipfile.ZIP_DEFLATED) as archive:
+            for row in rows:
+                if row['module'] in ('D5.Keep', 'D5.Deleted'):
+                    material = row['module'] + ' type'
+                    key = 'x'
+                    address = materials.statement_address(material.encode())
+                    row['declarations'] = [dict(axioms=[], include_in_statement=True, kind='theorem', name='x',
+                        name_key=key, type_sha256=address, statement_id=materials.declaration_statement_id(
+                            row['source_path'], 'theorem', key, material))]
+                    archive.writestr('sha256/' + address[7:], material)
+                    origins[row['module']]['report_sha256'] = hashlib.sha256(materials.canonical_json(
+                        dict(modules=[row], schema=materials.REPORT_SCHEMA))).hexdigest()
+        self.seed.write_bytes(materials.canonical_json(dict(modules=rows, schema=materials.REPORT_SCHEMA)))
+        publication.write_sidecars(self.seed, publication.coordinates(self.root), origins)
+        reuse.write_receipt(self.seed, reuse.capture(self.root), checked=True)
+        self.base = reuse._git(self.root, 'rev-parse', 'HEAD')
+        self.plan = dict(schema='lean-release-sparse-plan-v1', base_commit=self.base, target_commit=self.base,
+                         base_tag='previous', base_manifest_sha256='a' * 64,
+                         base_report_sha256=reuse.seed_identity(self.seed),
+                         rebuild_modules=[], removed_modules=[], restore_modules=[])
+        root = patch.object(build_inputs, 'ROOT', self.root)
+        root.start()
+        self.addCleanup(root.stop)
+        self.wd = self.root / '.lake/work'
+        self.wd.mkdir()
+        self.modules = publication.selection.Selection(self.root).modules()
+        self.graph = {name: dict(module=name, source_path=path, imports=[]) for name, path in self.modules.items()}
+
+    def commit(self):
+        command = ['git', '-C', str(self.root), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                   '-c', 'commit.gpgsign=false']
+        subprocess.run([*command, 'add', '-A'], check=True)
+        subprocess.run([*command, 'commit', '-qm', 'target'], check=True)
+        self.plan['target_commit'] = reuse._git(self.root, 'rev-parse', 'HEAD')
+
+    def test_private_fallback_marker_is_bound_and_reserved_for_compatibility(self):
+        plan_file = self.wd / 'plan.json'
+        plan_file.write_text(json.dumps(self.plan))
+        marker = self.wd / 'fallback.json'
+        environment = dict(LEAN_CACHE_SPARSE_PLAN=str(plan_file), LEAN_CACHE_SPARSE_FALLBACK_FILE=str(marker),
+                           REGENERATE_REPORT_ARTIFACTS='1', FULL_BUILD='1')
+        with patch.dict(os.environ, environment), patch.object(sys, 'argv', ['build_inputs.py', 'check']):
+            with self.assertRaises(build_inputs.SparseFallback):
+                build_inputs.main()
+            value = publication.read_json(marker.read_bytes())
+            self.assertEqual(value['target_commit'], self.plan['target_commit'])
+            self.assertEqual(value['base_manifest_sha256'], self.plan['base_manifest_sha256'])
+            self.assertIn('full regeneration', value['reason'])
+            marker.unlink()
+            plan_file.write_text(json.dumps(dict(self.plan, target_commit='0' * 40)))
+            with self.assertRaisesRegex(ValueError, 'HEAD'):
+                build_inputs.main()
+            self.assertFalse(marker.exists())
+
+    def test_sparse_target_ancestry_digest_and_completion_are_separate(self):
+        file = self.wd / 'plan.json'
+        file.write_text(json.dumps(self.plan))
+        self.assertEqual(build_inputs.sparse_plan(file), self.plan)
+        file.write_text(json.dumps(dict(self.plan, target_commit='0' * 40)))
+        with self.assertRaisesRegex(ValueError, 'HEAD'):
+            build_inputs.sparse_plan(file)
+        with self.assertRaisesRegex(ValueError, 'authenticated predecessor'):
+            build_inputs.sparse_candidate(self.wd, self.seed, self.wd, reuse.capture(self.root),
+                                          dict(self.plan, base_report_sha256='0' * 64))
+        reuse.write_receipt(self.seed, reuse.capture(self.root))
+        with self.assertRaisesRegex(build_inputs.SparseFallback, 'checked full report'):
+            build_inputs.sparse_rows(self.plan, self.seed, reuse.capture(self.root), self.modules, self.graph, [])
+
+    def test_global_inputs_request_cold_without_changing_published_receipt(self):
+        self.fixture.write('Audit.lean', 'def audit := 2\n')
+        self.commit()
+        with self.assertRaisesRegex(build_inputs.SparseFallback, 'global'):
+            build_inputs.sparse_rows(self.plan, self.seed, reuse.capture(self.root), self.modules, self.graph, [])
+        self.assertEqual(reuse.seed_identity(self.seed), self.plan['base_report_sha256'])
+
+    def test_full_sparse_candidate_replaces_rename_and_preserves_materials_and_checks_report(self):
+        import native
+        import scoped
+
+        self.fixture.write('D5/A.lean', 'def a := 2\n')
+        (self.root / 'D5/Deleted.lean').rename(self.root / 'D5/Renamed.lean')
+        self.commit()
+        self.plan.update(removed_modules=['D5.Deleted'], rebuild_modules=['D5.A', 'D5.Renamed', 'D5.Successor'])
+        modules = publication.selection.Selection(self.root).modules()
+        self.graph = {name: dict(module=name, source_path=path, imports=[]) for name, path in modules.items()}
+        self.graph['Bridge'] = dict(module='Bridge', source_path='Audit.lean', imports=['D5.A'])
+        self.graph['D5.Successor']['imports'] = ['Bridge']
+        utilities = [dict(modulePath=modules['D5.ClaimConsumer'], claimGid='claim', claimModule='D5.Successor',
+            claimSelector='claim', claimSourcePath=modules['D5.Successor'],
+            claimSourceSha256='sha256:' + publication.digest(self.root / modules['D5.Successor']),
+            resultGid='result', resultModule='D5.ClaimConsumer', resultSelector='result')]
+        expected = sorted(set(modules) - {'D5.Keep'})
+
+        def phase(entry, kind, command):
+            if kind == 'utility':
+                path = self.wd / 'utility.json'
+                path.write_text(json.dumps(utilities))
+                return path
+            self.assertEqual(kind, 'report')
+            self.assertEqual(command[-len(expected):], ['+' + name + ':report' for name in expected])
+            for name in expected:
+                path = modules[name]
+                row = dict(module=name, source_path=path, source_sha256='sha256:' + publication.digest(self.root / path),
+                           imports=self.graph[name]['imports'], declarations=[])
+                if name == 'D5.ClaimConsumer':
+                    row['utility_refutation'] = {field: utilities[0][key] for key, field in native.UTILITY_BINDINGS}
+                    row['utility_refutation']['is_closed_negation'] = True
+                raw = materials.canonical_json(dict(modules=[row], schema=materials.REPORT_SCHEMA))
+                origin = dict(module=name, report_sha256=hashlib.sha256(raw).hexdigest(),
+                    input_projection=dict(schema='stratalint-judge-input-projection-v1', module=name, inputs=[]),
+                    producer_sources_sha256='c' * 64, inspector_executable_sha256='d' * 64)
+                artifact = native.state(self.root) / 'modules' / (name + '.zip')
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                material = self.wd / 'empty.zip'
+                with zipfile.ZipFile(material, 'w'):
+                    pass
+                with zipfile.ZipFile(artifact, 'w') as archive:
+                    archive.writestr(publication.RAW, raw)
+                    archive.writestr(publication.RAW + '.provenance.json', materials.canonical_json(origin))
+                    archive.write(material, publication.RAW + '.materials.zip')
+
+        for name in ('materials.py', 'publication.py'):
+            target = self.root / 'tools/lean-inspector' / name
+            target.parent.mkdir(exist_ok=True)
+            shutil.copyfile(test_reuse.HERE / name, target)
+        self.commit()
+        logs = self.wd / 'logs'
+        program_logs = self.wd / 'programs'
+        program_logs.mkdir()
+        before = reuse.read_receipt(self.seed)
+        with patch.object(scoped.Entry, 'provision'), patch.object(scoped.Entry, 'phase', phase), \
+                patch.object(build_inputs, 'sparse_graph', return_value=self.graph), \
+                patch.object(build_inputs, 'sparse_programs', return_value={}), \
+                patch.object(build_inputs, 'prepare') as prepare, \
+                patch.dict(os.environ, STRATALINT_LEAN_REPORT_LOG_DIR=str(logs)):
+            build_inputs.checked_report(self.wd, self.seed, self.seed, program_logs, self.wd / 'work.json',
+                                        try_seed=False, plan=self.plan)
+        self.assertEqual(prepare.call_args.args[0], ' '.join(expected))
+        receipt = reuse.read_receipt(self.seed, reuse.capture(self.root))
+        self.assertEqual(receipt['completed'], reuse.CHECKED)
+        self.assertNotEqual(receipt['bundle'], before['bundle'])
+        publication.validate_bundle(self.seed, publication.coordinates(self.root), self.root)
+        provenance = publication.read_json(publication.member(self.seed, '.provenance.json').read_bytes())
+        with zipfile.ZipFile(publication.member(self.seed, '.materials.zip')) as archive:
+            self.assertEqual(archive.namelist(), ['sha256/' + materials.statement_address(b'D5.Keep type')[7:]])
+        self.assertEqual(set(provenance['module_origins']), set(modules))
+        self.assertEqual(provenance['module_origins']['D5.Keep']['producer_sources_sha256'], 'a' * 64)
+        self.assertEqual(provenance['module_origins']['D5.Renamed']['producer_sources_sha256'], 'c' * 64)
 
 
 if __name__ == '__main__':

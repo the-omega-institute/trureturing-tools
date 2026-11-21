@@ -290,6 +290,13 @@ internal sealed class LeanCacheChunkFixture : IDisposable
             return [{"name": p.name, "size": p.stat().st_size,
                      "digest": "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()}
                     for p in directory.iterdir() if p.name != "release.json"]
+        if args[:2] == ["api", "graphql"]:
+            assert "owner=fixture" in args and "name=cache" in args
+            rows = [dict(tagName=p.parent.name, createdAt=read(p.parent)["created_at"], isDraft=read(p.parent)["draft"])
+                    for p in (root / "releases").glob("*/release.json")]
+            rows.sort(key=lambda row: row["createdAt"], reverse=True)
+            print(json.dumps(dict(nodes=rows, pageInfo=dict(hasNextPage=False))))
+            sys.exit(0)
         if args[0] == "api":
             if args[1].endswith("/branches/dev"):
                 print(json.dumps({"name":"dev", "protected":True, "commit":{"sha":"0123456789abcdef0123456789abcdef01234567"}}))

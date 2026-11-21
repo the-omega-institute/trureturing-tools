@@ -91,6 +91,15 @@ def check_scope(repository, scope, roots=None):
     return selection
 
 
+def runtime_targets(names):
+    targets = set()
+    # The registry is needed by scopes with typed audit inputs.
+    if names.intersection({'LeanInformationAuditInterface.Contract.Catalog',
+                           'LeanInformationAuditInterface.Contract.Registration'}):
+        targets.add('+LeanInformationAudit.TemplateEnrollment')
+    return targets
+
+
 def preparation_targets(scope):
     roots = scope['roots']
     # Lake builds imports transitively. Keep external utility roots even when
@@ -100,10 +109,7 @@ def preparation_targets(scope):
     names = {row['module'] for row in dependencies}
     # A bare Lake target can name an entire library with the same name.
     targets = {'+' + name for name in (names - imported) | set(roots)}
-    # The registry is needed by scopes with typed audit inputs.
-    if names.intersection({'LeanInformationAuditInterface.Contract.Catalog',
-                           'LeanInformationAuditInterface.Contract.Registration'}):
-        targets.add('+LeanInformationAudit.TemplateEnrollment')
+    targets.update(runtime_targets(names))
     return sorted(targets)
 
 

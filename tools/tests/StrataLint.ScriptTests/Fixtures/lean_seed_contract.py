@@ -1,4 +1,5 @@
 """Release transport behavior contracts using private local fixtures."""
+import io
 import json
 import hashlib
 import os
@@ -11,6 +12,7 @@ import shutil
 import sys
 import tarfile
 import unittest
+from unittest.mock import patch
 
 from lean_seed_support import REPORT_BUILD, INPUT, OTHER, PUBLISH, REV, ROOT, PartitionFixture, digest, write
 from lean_seed_transport import FAKE_GH, ReleaseTransportCases
@@ -20,6 +22,234 @@ from lean_release_legacy import ReleaseLegacyCases
 
 class TransportTests(ReleaseLegacyCases, ReleaseVerificationCases, ReleaseTransportCases, unittest.TestCase):
     """Release transport cases exposed under their existing test identity."""
+
+    def test_module_inventory_reads_installed_inspector_sources_from_the_pin(self):
+        from lean_artifact_inventory import workspace_modules
+
+        root = self.root / "installed"
+        write(root / ".gitignore", "/tools/\n/build/\n")
+        write(root / "lakefile.toml", 'name = "project"\n')
+        write(root / "Reg/lakefile.toml", 'name = "reg"\nbuildDir = "../.lake/build/reg"\n')
+        for directory in ("lean-inspector-interface", "lean-inspector-reg"):
+            write(root / "tools" / directory / "lakefile.toml",
+                  f'name = "{directory}"\nbuildDir = "../../.lake/build/{directory}"\n'
+                  '[[lean_lib]]\nroots = ["Tests"]\n')
+        sources = {"tools/lean-inspector/Inspector/Program.lean": "def program := 1\n",
+                   "tools/lean-inspector/Tests/Case.lean": "def testCase := 0\n",
+                   "tools/lean-inspector-interface/Core.lean": "def core := 0\n"}
+        packed = io.BytesIO()
+        with tarfile.open(fileobj=packed, mode="w:gz") as archive:
+            for path, body in sources.items():
+                write(root / path, body)
+                archive.add(root / path, arcname=path)
+        data = packed.getvalue()
+        sha = digest(data)
+        archive = root / "build/tools-releases" / (sha + ".tar.gz")
+        archive.parent.mkdir(parents=True)
+        archive.write_bytes(data)
+        write(root / "Meta/tools-release.json", json.dumps({"version": "v0.1.0", "sha256": sha}))
+        write(root / "tools/lean-inspector/.lake/packages/Other/Extra.lean", "def extra := 1\n")
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        modules = workspace_modules(root)
+        self.assertEqual({m.source.as_posix() for m in modules.values()}, set(sources))
+        self.assertEqual(modules["Tests.Case"].package, "lean-inspector-reg")
+        write(root / "tools/lean-inspector/Inspector/Program.lean", "def program := 2\n")
+        with self.assertRaisesRegex(ValueError, "differs from its pin"):
+            workspace_modules(root)
+
+    def test_indexed_release_promotes_after_the_restore_outlives_the_pack_budget(self):
+        import lean_cache_release as release
+        import lean_release_index as indexed
+
+        root = self.root
+        write(root / ".lake/build/lib/lean/D5/A.olean", "fixture")
+        partition = "fixture/linux-arm64"
+        cache_key = {"report_format": "fixture", "execution_sha256": "a" * 64}
+        identity = {"producer_commit_sha": "b" * 40, "publication_id": "ci-123-1",
+                    "workflow_run_id": "123", "workflow_run_attempt": "1", "source_ref": "refs/heads/integration-fixture"}
+        budget = release.OperationBudget(10)
+        clock = 0
+        promotions = []
+
+        def restore(target, *args, **kwargs):
+            nonlocal clock
+            write(target / ".lake/build/lib/lean/D5/A.olean", "fixture")
+            clock = 12
+            return True
+
+        def transport(deadline, *args):
+            release.remaining(deadline)
+            if args[:2] == ("release", "view"):
+                return json.dumps({"databaseId": 1, "isDraft": True, "tagName": args[2]})
+            if args[:2] == ("release", "edit"):
+                promotions.append(args[2])
+            return "{}"
+
+        archive = {"archive_bytes": 2, "parts": [], "index": {"name": "index.json.gz"}}
+        with patch.object(release.time, "monotonic", side_effect=lambda: clock), \
+                patch.object(release, "operation_deadline", side_effect=[budget, release.OperationBudget(22)]), \
+                patch.object(release, "partition_path", return_value=partition), \
+                patch.object(release, "release_key", return_value=cache_key), \
+                patch.object(release, "publication_identity", return_value=identity), \
+                patch.object(release.report_reuse, "capture"), \
+                patch.object(release.report_reuse, "read_receipt", return_value={"completed": release.report_reuse.CHECKED}), \
+                patch.object(release.report_reuse.publication, "validate_bundle"), \
+                patch.object(indexed, "pack", return_value=archive), \
+                patch.object(release, "gh", side_effect=transport), \
+                patch.object(release, "existing_release", side_effect=[None, {"draft": False}]), \
+                patch.object(release, "snapshot_manifest"), \
+                patch.object(release, "restore_scoped", return_value=(1, 1)), \
+                patch.object(release, "restore_snapshot", side_effect=restore), \
+                patch.object(release, "receipt") as receipt:
+            self.assertEqual(0, release.publish(root, partition, identity, build_report=False, indexed=True))
+        self.assertEqual(1, len(promotions))
+        self.assertEqual(("publish", "published"), receipt.call_args.args)
+
+    def test_indexed_release_members_roundtrip_across_volumes(self):
+        from lean_artifact_inventory import Module
+        import lean_release_index as indexed
+
+        module = "D5.Fixture"
+        source = pathlib.Path("D5/Fixture.lean")
+        producer = self.root / "indexed-producer"
+        write(producer / source, "def fixture : Nat := 1\n")
+        build = producer / ".lake/build"
+        artifacts = {
+            "lib/lean/D5/Fixture.olean": random.Random(20).randbytes(2331),
+            "lib/lean/D5/Fixture.olean.hash": b"olean-hash\n",
+            "lib/lean/D5/Fixture.trace": b'{"outputs":{"m":false,"o":["aa.olean"],"i":"bb.ilean","c":"cc.c"}}',
+            "lib/lean/D5/Fixture.ilean": b"ilean bytes",
+            "ir/D5/Fixture.c": b"compiler output\n",
+            "bin/inspector": b"full restore only\n",
+        }
+        for name, data in artifacts.items():
+            path = build / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        (build / "bin/inspector").chmod(0o755)
+        write(build / "ir/D5/Fixture.setup.json", "not portable")
+        stage = self.root / "stage"
+        stage.mkdir()
+        with patch.object(indexed, "workspace_modules", return_value={module: Module("fixture", source, pathlib.Path("."))}), \
+                patch.object(indexed, "project_imports", return_value={module: set()}):
+            manifest = indexed.pack(producer, stage, 512, None)
+        rows = indexed.read_index(stage / indexed.INDEX, manifest["archive_bytes"])
+        self.assertGreater(len(manifest["parts"]), 1)
+        target = self.root / "full"
+        indexed.restore_full(stage, manifest, rows, target, None)
+        self.assertEqual(artifacts, {path.relative_to(target).as_posix(): path.read_bytes()
+                                   for path in target.rglob("*") if path.is_file()})
+        self.assertEqual(0o755, (target / "bin/inspector").stat().st_mode & 0o777)
+        partial = self.root / "partial"
+        row = rows[0]
+        ranges = list(indexed.volume_ranges(manifest["parts"], row["offset"], row["bytes"]))
+        self.assertGreater(len(ranges), 1)
+        encoded = b"".join((stage / part["name"]).read_bytes()[start:start + length]
+                           for part, start, length in ranges)
+        indexed.extract_frame(io.BytesIO(encoded), row, partial, set(), None)
+        indexed.check_compiler_outputs(partial, row)
+        incomplete = {**row, "paths": [path for path in row["paths"] if not path.endswith(".olean")]}
+        with self.assertRaisesRegex(ValueError, "omits Lake compiler outputs"):
+            indexed.check_compiler_outputs(partial, incomplete)
+        self.assertEqual({name: data for name, data in artifacts.items() if name != "bin/inspector"},
+                         {path.relative_to(partial).as_posix(): path.read_bytes()
+                          for path in partial.rglob("*") if path.is_file()})
+        with self.assertRaises((ValueError, EOFError)):
+            indexed.extract_frame(io.BytesIO(encoded[:-1]), row, self.root / "truncated", set(), None)
+
+    def test_scoped_release_probe_requires_the_entire_requested_closure(self):
+        from lean_artifact_inventory import Module
+        import lean_release_index as indexed
+
+        root = self.root / "probe-source"
+        build = self.root / "probe-build"
+        modules = {"D5.Base": Module("fixture", pathlib.Path("D5/Base.lean"), pathlib.Path(".")),
+                   "D5.Probe": Module("fixture", pathlib.Path("D5/Probe.lean"), pathlib.Path("."))}
+        for module in modules.values():
+            write(root / module.source, "fixture source")
+        graph = {"D5.Base": set(), "D5.Probe": {"D5.Base"}}
+        indexed_base = {
+            "module": "D5.Base", "paths": [
+                "lib/lean/D5/Base.olean", "lib/lean/D5/Base.ilean",
+                "lib/lean/D5/Base.trace", "ir/D5/Base.c",
+            ],
+            "source_sha256": digest((root / modules["D5.Base"].source).read_bytes()),
+        }
+        with patch.object(indexed, "workspace_modules", return_value=modules), \
+                patch.object(indexed, "project_imports", return_value=graph):
+            subset = indexed.scoped_members(root, [indexed_base], ["D5.Probe"], build)
+            self.assertEqual([indexed_base], subset)
+            with self.assertRaisesRegex(ValueError, "D5.Probe"):
+                indexed.scoped_members(root, [indexed_base], ["D5.Probe"], build, require_complete=True)
+
+    def test_scoped_rollback_removes_only_directories_it_created(self):
+        from lean_cache_release import install_scoped
+
+        target = self.root / "scoped-build"
+        staged = self.root / "scoped-staging"
+        path = pathlib.PurePosixPath("lib/lean/D5/Fixture.olean")
+        write(staged / path, "artifact")
+        link = os.link
+
+        def interrupted(source, destination):
+            link(source, destination)
+            raise OSError("interrupted after link")
+
+        with patch("lean_cache_release.os.link", side_effect=interrupted):
+            with self.assertRaisesRegex(OSError, "interrupted after link"):
+                install_scoped(target, staged, {path}, None)
+        self.assertFalse(target.exists())
+        self.assertTrue((staged / path).is_file())
+        (target / "lib").mkdir(parents=True)
+        with patch("lean_cache_release.os.link", side_effect=interrupted):
+            with self.assertRaises(OSError):
+                install_scoped(target, staged, {path}, None)
+        self.assertEqual([target / "lib"], list(target.iterdir()))
+        self.assertEqual([], list((target / "lib").iterdir()))
+
+    def test_scoped_release_rejects_changed_lake_configuration_before_transfer(self):
+        from lean_artifact_inventory import lake_configuration
+        from lean_cache_release import restore_scoped
+        from lean_release_index import SCHEMA
+
+        config = self.root / "lakefile.toml"
+        write(config, '[leanOptions]\nmaxRecDepth = 1000\n')
+        manifest = {"schema": SCHEMA, "lake_inputs_sha256": lake_configuration(self.root)}
+        write(config, '[leanOptions]\nmaxRecDepth = 2000\n')
+        with patch("lean_cache_release.snapshot_manifest", return_value=({}, manifest, [])), \
+                patch("lean_cache_release.gh") as transport:
+            result = restore_scoped(self.root, "fixture", "tag", self.root, None,
+                                    cache_key={}, producer="", targets=["D5.Fixture"], verification=True)
+        self.assertIsNone(result)
+        transport.assert_not_called()
+
+    def test_rolling_scoped_fetch_chooses_the_first_applicable_snapshot(self):
+        import lean_cache_release as release
+
+        tags = [("partition", f"tag-{index}") for index in range(7)]
+        # A compatible snapshot may have zero missing modules on a warm checkout.
+        cases = (([None, (0, 0)], 2, 0), ([None, (3, 123)], 2, 0),
+                 ([(0, 0)], 1, 0), ([None] * 7, 5, 0),
+                 ([None, ValueError("corrupt index")], 2, 1))
+        for outcomes, expected_attempts, expected_status in cases:
+            with self.subTest(outcomes=outcomes), \
+                    patch.object(release, "release_key", return_value={}), \
+                    patch.object(release, "snapshot_candidates", return_value=tags[:len(outcomes)]), \
+                    patch.object(release, "restore_scoped", side_effect=outcomes) as restore:
+                status = release.fetch_locked(self.root, "partition", None, indexed=True, targets=["D5.A"])
+                self.assertEqual(expected_status, status)
+                self.assertEqual([tag for _, tag in tags[:expected_attempts]],
+                                 [call.args[2] for call in restore.call_args_list])
+
+        with patch.object(release, "release_key", return_value={}), \
+                patch.object(release, "snapshot_partition", return_value="partition"), \
+                patch.object(release, "snapshot_candidates") as listing, \
+                patch.object(release, "restore_scoped", return_value=None) as restore:
+            status = release.fetch_locked(self.root, "partition", None, approved_tag="pinned",
+                                          approved_producer="a" * 40, indexed=True, targets=["D5.A"])
+            self.assertEqual(0, status)
+            self.assertEqual(["pinned"], [call.args[2] for call in restore.call_args_list])
+            listing.assert_not_called()
 
     def local_environment(self, **changes):
         return dict(GITHUB_ACTIONS="false", GITHUB_EVENT_NAME="", GITHUB_REF="", GITHUB_REPOSITORY="",
@@ -248,7 +478,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
     def assert_manifest_only_downloaded(self, log):
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual("api", calls[0][0])
-        self.assertFalse(any(call[:2] == ["release", "list"] for call in calls))
+        self.assertFalse(any(call[:2] == ["api", "graphql"] for call in calls))
         downloads = [call for call in calls if call[:2] == ["release", "download"]]
         self.assertEqual(1, len(downloads))
         self.assertEqual(["manifest.json"], [downloads[0][i + 1] for i, arg in enumerate(downloads[0])
@@ -657,6 +887,26 @@ ctypes.CDLL = cdll
         self.assertEqual("stratalint-raw-lean-report-test", changed["cache_key"]["report_format"])
         self.assertIn("-report-stratalint-raw-lean-report-test-env-", changed["release_prefix"])
 
+    def test_release_pagination_prefers_older_indexed_snapshot_and_stops_after_a_hit(self):
+        import lean_cache_release as release
+
+        partition = release.partition_path(self.root)
+        key = {"report_format": "fixture", "execution_sha256": "a" * 64}
+        legacy = release.prefix(partition, key) + "ci-1-1"
+        indexed = release.prefix(partition, key, indexed=True) + "ci-2-1"
+        def page(tags, cursor=None):
+            return json.dumps({"nodes": [{"tagName": tag, "isDraft": draft} for tag, draft in tags],
+                               "pageInfo": {"hasNextPage": cursor is not None, "endCursor": cursor}})
+        pages = [page([(legacy, False), (indexed, True)], "first"),
+                 page([(indexed, False)], "second"), page([])]
+        with patch.object(release, "gh", side_effect=pages) as gh:
+            candidates = release.snapshot_candidates(self.root, partition, None, key, indexed=True, fallback=True)
+            self.assertEqual((partition, indexed), next(candidates))
+            self.assertEqual(2, gh.call_count)
+            self.assertIn("after=first", gh.call_args.args)
+            self.assertEqual([(partition, legacy)], list(candidates))
+            self.assertIn("after=second", gh.call_args.args)
+
     def test_mismatched_key_is_never_selected_or_downloaded(self):
         # Selection filters incompatible names before any snapshot request.
         published = self.transport("publish")
@@ -671,12 +921,16 @@ ctypes.CDLL = cdll
         log = self.root / "key-gh-calls"
         missed = self.transport("fetch", FAKE_LIST_JSON=json.dumps(releases), FAKE_GH_LOG=str(log))
         self.assertEqual(1, missed.returncode, missed.stdout + missed.stderr)
-        self.assertEqual(["list"], [json.loads(line)[1] for line in log.read_text().splitlines()])
+        self.assertEqual([["api", "graphql"]], [json.loads(line)[:2] for line in log.read_text().splitlines()])
+        releases.extend(dict(tagName=f"unrelated-{i}", createdAt="2", isDraft=False) for i in range(100))
         releases.append(dict(tagName=original, createdAt="1", isDraft=False))
         log.unlink()
         restored = self.transport("fetch", FAKE_LIST_JSON=json.dumps(releases), FAKE_GH_LOG=str(log))
         self.assertEqual(0, restored.returncode, restored.stdout + restored.stderr)
         calls = [json.loads(line) for line in log.read_text().splitlines()]
+        listings = [call for call in calls if call[:2] == ["api", "graphql"]]
+        self.assertEqual(2, len(listings))
+        self.assertIn("after=100", listings[1])
         self.assertTrue(all(tag not in call for tag in wrong for call in calls[1:]))
         self.assertIn(original, restored.stdout)
 
