@@ -91,6 +91,15 @@ class ReleaseVerificationCases:
         selected = receipt(picked)
         self.assertEqual((tag, old, "false", "true"),
                          tuple(selected[key] for key in ("tag", "producer", "indexed", "found")))
+        concurrent = self.transport("publish", run="124", arguments=("--mode", "verification",
+            "--source-ref", self.verification_ref, "--source-commit", new), **env)
+        self.assertEqual(0, concurrent.returncode, concurrent.stdout + concurrent.stderr)
+        current_tag = next(path.name for path in self.remote.iterdir() if path.name != tag)
+        self.assertEqual(current_tag, receipt(call("select-base"))["tag"])
+        self.assertEqual(tag, receipt(call("select-base", "--previous-commit-only"))["tag"])
+        only_current = json.dumps([{"tagName": current_tag, "createdAt": "2", "isDraft": False}])
+        self.assertEqual("false", receipt(call("select-base", "--previous-commit-only",
+                                               FAKE_LIST_JSON=only_current))["found"])
         pin = ("--tag", tag, "--producer", old, "--manifest-sha256", selected["manifest_sha256"])
         shutil.rmtree(self.root / ".lake/build")
         failed = call("install-base", *pin, FAKE_FAIL_ASSET="1")
@@ -115,7 +124,7 @@ class ReleaseVerificationCases:
         self.verification_api[f"repos/{repo}/compare/{old}...{new}"] = {
             "status": "diverged", "merge_base_commit": {"sha": "a" * 40}}
         self.save_verification_api()
-        self.assertEqual("false", receipt(call("select-base"))["found"])
+        self.assertEqual("false", receipt(call("select-base", "--previous-commit-only"))["found"])
 
     def test_rolling_base_manual_dev_publication_from_protected_integration(self):
         self.prepare_indexed_candidate()

@@ -1487,7 +1487,7 @@ def rolling_result(args, tag="", producer="", digest="", indexed=False):
 def rolling_base(args):
     select = args.command == "select-base"
     if (args.writer_owned or args.approved_tag or args.approved_producer or args.local_assets
-            or args.refresh_stale or args.no_build or args.indexed
+            or args.refresh_stale or args.no_build or args.indexed or (args.previous_commit_only and not select)
             or (select and (args.tag or args.producer or args.manifest_sha256 or args.target))):
         raise ValueError("invalid option for the protected Release base reader")
     if not select and (not args.tag or not re.fullmatch(r"[0-9a-f]{40}", args.producer)
@@ -1518,6 +1518,8 @@ def rolling_base(args):
                                          verification=verification, metadata=metadata)
             _, manifest, _ = snapshot
             producer = manifest["producer_commit_sha"]
+            if args.previous_commit_only and producer == args.source_commit:
+                continue
             digest = archive_sha(stage / MANIFEST, deadline)
             if not select and (producer != args.producer or (args.manifest_sha256 and digest != args.manifest_sha256)):
                 raise ValueError("rolling base differs from the selected producer or manifest digest")
@@ -1553,6 +1555,8 @@ def _main():
     parser.add_argument("--tag", default="", help="exact candidate or rolling base Release")
     parser.add_argument("--producer", default="", help="immutable commit of the selected rolling base")
     parser.add_argument("--manifest-sha256", default="", help="digest returned by select-base")
+    parser.add_argument("--previous-commit-only", action="store_true",
+                        help="select a rolling base from a strict ancestor of the target commit")
     parser.add_argument("--target", action="append", default=[], help="restore the current import closure for this Lean module")
     parser.add_argument("--indexed", action="store_true", help="use indexed Release snapshot transport")
     parser.add_argument("--no-build", action="store_true", help="publish an existing FIB-checked report/build")
@@ -1576,8 +1580,8 @@ def _main():
         args.repository = args.repository.resolve()
         if args.command in ("select-base", "install-base"):
             return rolling_base(args)
-        if args.producer or args.manifest_sha256:
-            raise ValueError("rolling base arguments require install-base")
+        if args.producer or args.manifest_sha256 or args.previous_commit_only:
+            raise ValueError("rolling base options require select-base or install-base")
         if args.target and (args.command != "fetch" or args.mode == "verification"
                             or (args.mode == "production" and not args.indexed)):
             raise ValueError("--target requires an indexed production or exact indexed candidate fetch")
