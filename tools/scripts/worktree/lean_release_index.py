@@ -279,19 +279,23 @@ class VolumeInput:
 
 
 def restore_full(stage, manifest, rows, destination, deadline):
+    with VolumeInput(stage, manifest["parts"]) as source:
+        restore_stream(source, manifest, rows, destination, deadline)
+
+
+def restore_stream(source, manifest, rows, destination, deadline):
     installed = set()
     digest = hashlib.sha256()
 
-    with VolumeInput(stage, manifest["parts"]) as volumes:
-        class VerifiedStream:
-            def read(self, size):
-                block = volumes.read(size)
-                digest.update(block)
-                return block
+    class VerifiedStream:
+        def read(self, size):
+            block = source.read(size)
+            digest.update(block)
+            return block
 
-        stream = VerifiedStream()
-        for row in rows:
-            extract_frame(stream, row, destination, installed, deadline)
+    stream = VerifiedStream()
+    for row in rows:
+        extract_frame(stream, row, destination, installed, deadline)
     if digest.hexdigest() != manifest["archive_sha256"]:
         raise ValueError("Release archive checksum mismatch")
 

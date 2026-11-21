@@ -1030,12 +1030,15 @@ def restore_snapshot(root, partition, tag, stage, deadline, expected=None, refre
     indexed = physical or manifest.get("schema") == INDEXED_SCHEMA
     entries = [*parts, manifest["index"]] if indexed else parts
     commit = manifest["producer_commit_sha"]
+    one_volume = False
     with observed_phase("transfer", expected_bytes=manifest["archive_bytes"]):
         if physical:
             import lean_release_volume_remote as remote
 
             tree = remote.load_tree(sys.modules[__name__], tag, stage, manifest, deadline)
-            parts = remote.download_full(sys.modules[__name__], stage, manifest, tree, deadline)
+            one_volume = remote.single_volume_restore(stage, root, manifest, tree)
+            if not one_volume:
+                parts = remote.download_full(sys.modules[__name__], stage, manifest, tree, deadline)
         elif local_assets is None:
             # A multi-gigabyte Release asset is a streaming transport. Its
             # duration depends on the link and must not consume the bounded
@@ -1098,7 +1101,10 @@ def restore_snapshot(root, partition, tag, stage, deadline, expected=None, refre
                         rows = (tree["members"] if physical else
                                 indexed_release.read_index(stage / indexed_release.INDEX, manifest["archive_bytes"]))
                         source.mkdir()
-                        indexed_release.restore_full(stage, dict(manifest, parts=parts), rows, source, deadline)
+                        if one_volume:
+                            remote.restore_one_volume(sys.modules[__name__], stage, manifest, tree, source, deadline)
+                        else:
+                            indexed_release.restore_full(stage, dict(manifest, parts=parts), rows, source, deadline)
                         report_reuse.publication.validate_bundle(source / "stratalint/raw-lean-report.json")
                 else:
                     compressed = opened.enter_context((stage / ASSET).open("rb"))

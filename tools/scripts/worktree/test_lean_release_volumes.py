@@ -11,6 +11,7 @@ import sys
 import subprocess
 import tempfile
 import tarfile
+import time
 import zipfile
 from types import SimpleNamespace
 import unittest
@@ -141,6 +142,44 @@ class VolumeDownloads(unittest.TestCase):
             self.assertCountEqual(downloads, keys)
             self.assertEqual(receipt.call_args.kwargs, {"payload_requests": 2, "payload_bytes": 8192,
                 "logical_bytes": 8192, "staged_payload_bound": 12288})
+
+
+    def test_low_disk_reader_accepts_backwards_and_repeated_spans_and_bounds_the_spool(self):
+        import lean_cache_release as release
+        import lean_release_volume_remote as remote
+
+        blobs = [bytes(range(48)), bytes(range(80, 128))]
+        keys = [hashlib.sha256(blob).hexdigest() for blob in blobs]
+        segments = [(0, 34, 6), (1, 8, 12), (0, 0, 10), (1, 12, 10), (0, 34, 6)]
+        sizes = {key: len(blob) for key, blob in zip(keys, blobs, strict=True)}
+        rows, locations, expected = [], [], b""
+        for volume, start, count in segments:
+            rows.append({"offset":len(expected)})
+            locations.append([[keys[volume], start, count]])
+            expected += blobs[volume][start:start+count]
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory)
+            requested = []
+            observed = []
+            def gh(deadline, *args):
+                self.assertIsNone(deadline)
+                self.assertEqual(list(stage.iterdir()), [])
+                key = args[-1]
+                (stage / key).write_bytes(blobs[keys.index(key)])
+                observed.append(sum(p.stat().st_size for p in stage.iterdir()))
+                requested.append(key)
+            def read_range(asset, start, count, output, deadline):
+                output.write(blobs[asset["id"]][start:start+count])
+            with patch.object(remote, "asset_for", side_effect=lambda host, tag, key, size, deadline: {"id": keys.index(key)}), \
+                    patch.object(release, "gh", side_effect=gh), patch.object(release, "download_range", side_effect=read_range), \
+                    patch.object(remote.LogicalVolumeInput, "WINDOW", 8):
+                remote_tree = {"members": rows, "locations": locations, "volumes": sizes}
+                reader = remote.LogicalVolumeInput(release, stage, {"volume_scope":"test"}, remote_tree, release.operation_deadline())
+                self.assertEqual(b"".join(iter(lambda: reader.read(5), b"")), expected)
+                self.assertGreater(reader.range_requests, 0)
+                self.assertLessEqual(reader.transferred, sum(sizes.values()) + len(expected))
+                self.assertCountEqual(requested, keys)
+                self.assertEqual(max(observed), 48)
 
 
 class VolumeReleases(unittest.TestCase):
@@ -742,6 +781,86 @@ class VolumeReleases(unittest.TestCase):
             release.restore_scoped(dest, partition, retry, stage, release.operation_deadline(),
                                    cache_key=key, producer=author, targets=["D5.B"], verification=False)
             self.assertEqual((dest / artifact.relative_to(self.project)).read_bytes(), artifact.read_bytes())
+
+    def test_low_disk_full_restore_uses_one_spool_and_rolls_back_late_corruption(self):
+        import lean_release_volume_remote as remote
+
+        with ExitStack() as stack:
+            release, key, partition, identity = self.github_transport(stack, 65536)
+            # A residual larger than multiple volumes exercises extraction across boundaries.
+            artifact = self.project / ".lake/build/generated.bin"
+            artifact.write_bytes(random.Random(17).randbytes(256 * 1024))
+            author = run(self.project, "git", "rev-parse", "HEAD").strip()
+            identity.return_value = {"producer_commit_sha":author,"publication_id":"ci-901-1",
+                                     "workflow_run_id":"901","workflow_run_attempt":"1"}
+            tag = release.prefix(partition, key, indexed="volumes") + "ci-901-1"
+            with redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(release.publish(self.project, partition, build_report=False, indexed=True), 0)
+            self.assertIn('"status":"published"', output.getvalue())
+            manifest = json.loads((self.pool / tag / volumes.MANIFEST).read_bytes())
+            tree = volumes.read_tree(self.pool / tag / volumes.INDEX, manifest)
+            dest = self.consumer("bounded-full")
+            stage = self.area / "bounded-transfer"
+            stage.mkdir()
+            with patch.object(remote.shutil, "disk_usage", return_value=SimpleNamespace(free=manifest["archive_bytes"])):
+                self.assertTrue(remote.single_volume_restore(stage, dest, manifest, tree))
+            with patch.object(remote.shutil, "disk_usage", return_value=SimpleNamespace(free=10 * manifest["archive_bytes"])):
+                self.assertFalse(remote.single_volume_restore(stage, dest, manifest, tree))
+            stack.enter_context(patch.object(remote, "single_volume_restore", return_value=True))
+            send = release.gh
+            peak = []
+            def observe(deadline, *args):
+                result = send(deadline, *args)
+                if args[:2] == ("release", "download") and args[2].startswith("lean-volume-v1-"):
+                    files = [p for p in Path(args[args.index("--dir") + 1]).parent.rglob("*")
+                             if p.is_file() and p.name not in (volumes.INDEX, volumes.MANIFEST)]
+                    self.assertEqual(len(files), 1)
+                    st = files[0].stat()
+                    peak.append((st.st_size, st.st_blocks * 512))
+                return result
+            stack.enter_context(patch.object(release, "gh", side_effect=observe))
+            start = time.monotonic()
+            self.assertTrue(release.restore_snapshot(dest, partition, tag, stage, release.operation_deadline(), cache_key=key))
+            duration = time.monotonic() - start
+            self.assertEqual(len(peak), len(tree["volumes"]))
+            self.assertEqual(max(x for x, _ in peak), 65536)
+            self.assertEqual((dest / ".lake/build/generated.bin").read_bytes(), artifact.read_bytes())
+            run(dest, "lake", "--no-build", "build", "@fixture/+D5.B:olean")
+            if os.getenv("LEAN_VOLUME_MEASURE"):
+                print(json.dumps({"archive_bytes":manifest["archive_bytes"],"volumes":len(peak),"seconds":duration,
+                                  "peak_bytes":max(x for x,_ in peak),"allocated_peak":max(y for _,y in peak)}))
+            saved = dest / ".lake/build/old-marker"
+            saved.write_bytes(b"previous generation")
+            original_tree = remote.load_tree
+            for component in ("frame", "archive"):
+                check_stage = self.area / ("corrupt-" + component)
+                check_stage.mkdir()
+                snapshot = release.snapshot_manifest(partition, tag, check_stage, release.operation_deadline(), cache_key=key)
+                if component == "archive":
+                    snapshot[1]["archive_sha256"] = "0" * 64
+                def metadata(*args):
+                    verified = original_tree(*args)
+                    if component == "frame":
+                        verified["members"][-1]["sha256"] = "0" * 64
+                    return verified
+                with self.subTest(component=component), patch.object(remote, "load_tree", side_effect=metadata), \
+                        self.assertRaisesRegex(ValueError, "checksum"):
+                    release.restore_snapshot(dest, partition, tag, check_stage, release.operation_deadline(),
+                                             cache_key=key, refresh_stale=True, validated_snapshot=snapshot)
+                self.assertEqual(saved.read_bytes(), b"previous generation")
+            last = tree["locations"][-1][-1][0]
+            original_asset = remote.asset_for
+            def damage(host, address, digest, size, deadline):
+                asset = original_asset(host, address, digest, size, deadline)
+                if digest == last:
+                    path = self.pool / address / digest
+                    data = path.read_bytes()
+                    path.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+                return asset
+            with patch.object(remote, "asset_for", side_effect=damage), self.assertRaisesRegex(ValueError,"physical volume checksum"):
+                release.restore_snapshot(dest, partition, tag, stage, release.operation_deadline(), cache_key=key, refresh_stale=True)
+            self.assertEqual(saved.read_bytes(), b"previous generation")
+            self.assertEqual((dest / ".lake/build/generated.bin").read_bytes(), artifact.read_bytes())
 
     def test_github_command_transport_and_retention(self):
         with ExitStack() as stack:

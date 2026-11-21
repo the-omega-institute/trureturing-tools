@@ -1,6 +1,8 @@
 """GitHub Releases transport for directly addressed, immutable physical volumes."""
 
 import hashlib
+import io
+import shutil
 import json
 import os
 import re
@@ -200,6 +202,112 @@ def download(host, manifest, tree, rows, output, deadline, assets):
         calls += 1
         total += size
     return calls, total
+
+
+def single_volume_restore(stage, root, manifest, tree):
+    # On a shared filesystem the logical archive and extracted build coexist.
+    # The index gives the compressed length but no upper bound on expanded files.
+    logical = manifest["archive_bytes"]
+    largest = max(tree["volumes"].values())
+    threshold = max(logical + largest, 2 * logical if stage.stat().st_dev == root.stat().st_dev else 0)
+    return shutil.disk_usage(stage).free < threshold
+
+
+class LogicalVolumeInput:
+    """Read authenticated extents in logical order using one spool and bounded read-ahead."""
+
+    WINDOW = 8 * 1024 * 1024
+    WINDOW_BUDGET = 32 * 1024 * 1024
+
+    def __init__(self, host, stage, manifest, tree, deadline):
+        self.host, self.stage, self.deadline = host, stage, deadline
+        self.prefix = volume_prefix(manifest["volume_scope"])
+        self.sizes = tree["volumes"]
+        self.window_size = min(self.WINDOW, self.WINDOW_BUDGET // len(self.sizes))
+        # A logical interleave can still consume each individual asset forward.
+        # Prefetch only bytes that will be consumed before a seek on that asset.
+        spans = list(ranges(tree, tree["members"]))
+        following = {}
+        for span in reversed(spans):
+            digest, start, count = span
+            end = start + count
+            next_start, run_end = following.get(digest, (end, end))
+            if next_start != end:
+                run_end = end
+            span.append(run_end)
+            following[digest] = start, run_end
+        self.spans = iter(spans)
+        self.left = 0
+        self.assets = {}
+        self.spool = None
+        self.windows = {}
+        self.requests = self.transferred = self.range_requests = 0
+
+    def window(self, digest, start):
+        window = self.windows.get(digest)
+        if window is not None and window[0] <= start < window[0] + len(window[1]):
+            return memoryview(window[1])[start - window[0]:]
+        size = self.sizes[digest]
+        if digest not in self.assets:
+            if self.spool is not None:
+                self.spool.unlink()
+            tag = self.prefix + digest
+            asset = asset_for(self.host, tag, digest, size, self.deadline)
+            if asset is None:
+                raise ValueError("missing physical volume: " + tag)
+            with self.deadline.pause():
+                self.host.gh(None, "release", "download", tag, "--repo", self.host.REPO,
+                             "--dir", str(self.stage), "--pattern", digest)
+            self.spool = self.stage / digest
+            if self.spool.stat().st_size != size or archive_sha(self.spool, self.deadline) != digest:
+                raise ValueError("physical volume checksum or size mismatch")
+            self.assets[digest] = asset
+            self.requests += 1
+            self.transferred += size
+
+        count = min(self.run_end - start, self.window_size)
+        if self.spool.name == digest:
+            with self.spool.open("rb") as source:
+                source.seek(start)
+                data = source.read(count)
+        else:
+            # Revisit the same immutable asset ID. The frame and whole-archive
+            # digests independently cover the bytes actually passed to extraction.
+            output = io.BytesIO()
+            with self.deadline.pause():
+                self.host.download_range(self.assets[digest], start, count, output, self.host.operation_deadline())
+            data = output.getvalue()
+            self.requests += 1
+            self.range_requests += 1
+            self.transferred += len(data)
+        if len(data) != count:
+            raise ValueError("truncated physical volume window")
+        self.windows[digest] = (start, data)
+        return memoryview(data)
+
+    def read(self, size):
+        pieces = []
+        while size:
+            if not self.left:
+                span = next(self.spans, None)
+                if span is None:
+                    break
+                self.digest, self.offset, self.left, self.run_end = span
+            block = self.window(self.digest, self.offset)[:min(self.left, size)]
+            pieces.append(block)
+            self.offset += len(block)
+            self.left -= len(block)
+            size -= len(block)
+        return b"".join(pieces)
+
+
+def restore_one_volume(host, stage, manifest, tree, destination, deadline):
+    with tempfile.TemporaryDirectory(dir=stage) as temporary:
+        reader = LogicalVolumeInput(host, Path(temporary), manifest, tree, deadline)
+        index.restore_stream(reader, manifest, tree["members"], destination, deadline)
+    host.receipt("volume-download", "complete", payload_requests=reader.requests, payload_bytes=reader.transferred,
+                 range_requests=reader.range_requests, logical_bytes=manifest["archive_bytes"],
+                 staged_payload_bound=max(tree["volumes"].values()))
 
 
 def download_full(host, stage, manifest, tree, deadline):
