@@ -333,7 +333,7 @@ shutil.rmtree = cleanup
         result = self.transport("fetch", FAKE_GH_LOG=str(log))
         self.assertEqual(1, result.returncode, result.stdout + result.stderr)
         calls = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertTrue(any(call[:2] == ["release", "list"] for call in calls),
+        self.assertTrue(any(call[:2] == ["api", "graphql"] for call in calls),
                         '[FAIL] main_fetch_keeps_release_listing')
 
     def separate_git_directory(self):
@@ -937,7 +937,7 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("deadline exhausted", result.stdout)
         self.assertEqual([3, 2, 1], [call["timeout"] for call in self.gh_budgets()])
-        snapshots = [call for call in self.gh_budgets() if call["args"][0] == "api"]
+        snapshots = [call for call in self.gh_budgets() if call["args"][0] == "api" and "/releases/tags/" in call["args"][1]]
         self.assertEqual(1, len(snapshots))
         self.assertIn("502-1", snapshots[0]["args"][1])
         self.assertFalse((self.root / ".lake/build").exists())
@@ -1235,7 +1235,7 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
                 self.assertIn('"status":"failed"', result.stdout)
                 self.assertNotIn('"status":"published"', result.stdout)
                 calls = [json.loads(line) for line in (self.root / "gh.log").read_text().splitlines()]
-                self.assertFalse(any(call[:2] in (["release", "list"], ["release", "delete"]) for call in calls))
+                self.assertFalse(any(call[:2] in (["api", "graphql"], ["release", "list"], ["release", "delete"]) for call in calls))
                 self.assertFalse(any(call[:2] == ["release", "download"] and "lean-build.tgz" in call for call in calls))
 
     def test_draft_or_malformed_exact_metadata_fails_before_create(self):

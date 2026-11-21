@@ -8,6 +8,8 @@ if "FAKE_GH_LOG" in os.environ:
     with pathlib.Path(os.environ["FAKE_GH_LOG"]).open("a") as log:
         log.write(json.dumps(args) + "\\n")
 verb = args[0] if args and args[0] == "api" else (args[1] if len(args) > 1 else "")
+if args[:2] == ["api", "graphql"]:
+    verb = "list"
 if os.environ.get("FAKE_HANG") == verb:
     import signal
     signal.pause()
@@ -17,6 +19,18 @@ def fail():
 if len(args) > 1 and os.environ.get("FAKE_FAIL") == verb and verb != "upload": fail()
 if (len(args) > 1 and verb == "download" and os.environ.get("FAKE_FAIL_ASSET") == "1"
         and any(value.startswith("lean-build.tgz") for value in args)): fail()
+if args[:2] == ["api", "graphql"]:
+    if "FAKE_LIST_JSON" in os.environ:
+        releases = json.loads(os.environ["FAKE_LIST_JSON"])
+    else:
+        releases = [dict(tagName=p.parent.name, createdAt=p.parent.name,
+                         isDraft=json.loads(p.read_text())["draft"]) for p in root.glob("*/release.json")]
+    releases.sort(key=lambda row: row["createdAt"], reverse=True)
+    start = next((int(a[6:]) for a in args if a.startswith("after=")), 0)
+    end = start + 100
+    print(json.dumps({"nodes": releases[start:end], "pageInfo": {
+        "hasNextPage": end < len(releases), "endCursor": str(end)}}))
+    sys.exit(0)
 if args[:2] == ["release", "list"] and "FAKE_LIST_JSON" in os.environ:
     print(os.environ["FAKE_LIST_JSON"]); sys.exit(0)
 if args[0] == "api" and args[1].endswith("/branches/dev"):

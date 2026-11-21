@@ -151,7 +151,7 @@ os.execv({real_git}, [{real_git}, *sys.argv[1:]])
             ("workflow_run_id", "workflow_run_attempt", "source_ref")))
         self.assertFalse(any(event["operation"] == "copytree" for event in self.installation_events()))
         self.assertEqual(2, len(list(self.remote.iterdir())))
-        self.assertFalse(any(call[:2] in (["release", "list"], ["release", "delete"])
+        self.assertFalse(any(call[:2] in (["api", "graphql"], ["release", "list"], ["release", "delete"])
                              for call in self.verification_calls()))
         shutil.rmtree(self.root / ".lake/build")
         fetched = self.verification("fetch", STRATALINT_ACTIONS_CACHE_SEEDED="true")
@@ -300,7 +300,7 @@ lean_cache_release_io.extract_members = extract
         self.assertEqual(chunk_bytes is not None, measured["parts"] > 1)
         calls = self.verification_calls()
         self.assertTrue(any(call[:2] == ["release", "download"] for call in calls))
-        self.assertFalse(any(call[:2] in (["release", "list"], ["release", "delete"])
+        self.assertFalse(any(call[:2] in (["api", "graphql"], ["release", "list"], ["release", "delete"])
                              for call in calls))
 
     def test_single_asset_verification_fits_restore_workspace(self):
@@ -515,7 +515,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
                 self.assertNotIn('"status":"published"', result.stdout)
                 calls = self.verification_calls()
                 self.assertEqual(2, sum(call[0] == "api" and "/releases/tags/" in call[1] for call in calls))
-                self.assertFalse(any(call[:2] in (["release", "list"], ["release", "delete"]) for call in calls))
+                self.assertFalse(any(call[:2] in (["api", "graphql"], ["release", "list"], ["release", "delete"]) for call in calls))
 
     def test_verification_upload_failure_and_real_build_failure_are_nonzero(self):
         self.verification_fixture()
@@ -665,7 +665,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         calls = self.verification_calls()
         self.assertTrue(any(call[:2] == ["api", "repos/the-omega-institute/trureturing/commits/" +
                              self.verification_commit] for call in calls))
-        self.assertFalse(any(call[:2] in (["release", "list"], ["release", "delete"]) or
+        self.assertFalse(any(call[:2] in (["api", "graphql"], ["release", "list"], ["release", "delete"]) or
                              (call[0] == "api" and "/branches/dev" in call[1]) for call in calls))
 
     def test_candidate_publish_only_rejects_stale_report_without_building(self):

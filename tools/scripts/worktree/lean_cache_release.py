@@ -1263,16 +1263,40 @@ def snapshot_partition(root, partition, tag, cache_key, *, indexed=False):
 
 
 def snapshot_candidates(root, partition, deadline, cache_key, *, indexed=False, fallback=False):
-    """One listing and filter for both freshness decisions and recovery fetches."""
-    releases = json.loads(gh(deadline, "release", "list", "--repo", REPO, "--limit", "100",
-        "--json", "tagName,createdAt,isDraft"))
-    releases.sort(key=lambda release: release["createdAt"], reverse=True)
-    for use_index in (True, False) if indexed and fallback else (indexed,):
-        for release in releases:
-            tag = release.get("tagName", "")
-            source = snapshot_partition(root, partition, tag, cache_key, indexed=use_index)
-            if release.get("isDraft") is False and source is not None:
+    """Walk published Releases newest first, preferring indexed snapshots across all pages."""
+    owner, name = REPO.split("/", 1)
+    query = """query($owner: String!, $name: String!, $after: String) {
+      repository(owner: $owner, name: $name) {
+        releases(first: 100, after: $after, orderBy: {field: CREATED_AT, direction: DESC}) {
+          nodes { tagName isDraft }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }"""
+    cursor_args = []
+    legacy = []
+    while True:
+        page = json.loads(gh(deadline, "api", "graphql", "-f", "query=" + query,
+                             "-f", "owner=" + owner, "-f", "name=" + name, *cursor_args,
+                             "--jq", ".data.repository.releases"))
+        for release in page["nodes"]:
+            if release["isDraft"] is not False:
+                continue
+            tag = release["tagName"]
+            source = snapshot_partition(root, partition, tag, cache_key, indexed=indexed)
+            if source is not None:
                 yield source, tag
+            elif indexed and fallback:
+                source = snapshot_partition(root, partition, tag, cache_key)
+                if source is not None:
+                    legacy.append((source, tag))
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page["pageInfo"]["endCursor"]
+        if not isinstance(cursor, str) or not cursor or cursor_args == ["-f", "after=" + cursor]:
+            raise ValueError("invalid GitHub Release pagination cursor")
+        cursor_args = ["-f", "after=" + cursor]
+    yield from legacy
 
 
 def fetch_locked(root, partition, deadline, refresh_stale=False, approved_tag=None, approved_producer=None,

@@ -478,7 +478,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
     def assert_manifest_only_downloaded(self, log):
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual("api", calls[0][0])
-        self.assertFalse(any(call[:2] == ["release", "list"] for call in calls))
+        self.assertFalse(any(call[:2] == ["api", "graphql"] for call in calls))
         downloads = [call for call in calls if call[:2] == ["release", "download"]]
         self.assertEqual(1, len(downloads))
         self.assertEqual(["manifest.json"], [downloads[0][i + 1] for i, arg in enumerate(downloads[0])
@@ -887,6 +887,26 @@ ctypes.CDLL = cdll
         self.assertEqual("stratalint-raw-lean-report-test", changed["cache_key"]["report_format"])
         self.assertIn("-report-stratalint-raw-lean-report-test-env-", changed["release_prefix"])
 
+    def test_release_pagination_prefers_older_indexed_snapshot_and_stops_after_a_hit(self):
+        import lean_cache_release as release
+
+        partition = release.partition_path(self.root)
+        key = {"report_format": "fixture", "execution_sha256": "a" * 64}
+        legacy = release.prefix(partition, key) + "ci-1-1"
+        indexed = release.prefix(partition, key, indexed=True) + "ci-2-1"
+        def page(tags, cursor=None):
+            return json.dumps({"nodes": [{"tagName": tag, "isDraft": draft} for tag, draft in tags],
+                               "pageInfo": {"hasNextPage": cursor is not None, "endCursor": cursor}})
+        pages = [page([(legacy, False), (indexed, True)], "first"),
+                 page([(indexed, False)], "second"), page([])]
+        with patch.object(release, "gh", side_effect=pages) as gh:
+            candidates = release.snapshot_candidates(self.root, partition, None, key, indexed=True, fallback=True)
+            self.assertEqual((partition, indexed), next(candidates))
+            self.assertEqual(2, gh.call_count)
+            self.assertIn("after=first", gh.call_args.args)
+            self.assertEqual([(partition, legacy)], list(candidates))
+            self.assertIn("after=second", gh.call_args.args)
+
     def test_mismatched_key_is_never_selected_or_downloaded(self):
         # Selection filters incompatible names before any snapshot request.
         published = self.transport("publish")
@@ -901,12 +921,16 @@ ctypes.CDLL = cdll
         log = self.root / "key-gh-calls"
         missed = self.transport("fetch", FAKE_LIST_JSON=json.dumps(releases), FAKE_GH_LOG=str(log))
         self.assertEqual(1, missed.returncode, missed.stdout + missed.stderr)
-        self.assertEqual(["list"], [json.loads(line)[1] for line in log.read_text().splitlines()])
+        self.assertEqual([["api", "graphql"]], [json.loads(line)[:2] for line in log.read_text().splitlines()])
+        releases.extend(dict(tagName=f"unrelated-{i}", createdAt="2", isDraft=False) for i in range(100))
         releases.append(dict(tagName=original, createdAt="1", isDraft=False))
         log.unlink()
         restored = self.transport("fetch", FAKE_LIST_JSON=json.dumps(releases), FAKE_GH_LOG=str(log))
         self.assertEqual(0, restored.returncode, restored.stdout + restored.stderr)
         calls = [json.loads(line) for line in log.read_text().splitlines()]
+        listings = [call for call in calls if call[:2] == ["api", "graphql"]]
+        self.assertEqual(2, len(listings))
+        self.assertIn("after=100", listings[1])
         self.assertTrue(all(tag not in call for tag in wrong for call in calls[1:]))
         self.assertIn(original, restored.stdout)
 
