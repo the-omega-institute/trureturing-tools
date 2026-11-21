@@ -128,6 +128,15 @@ class ReuseTests(unittest.TestCase):
         self.assertFalse(api.reuse(self.root, self.output, self.output)['needs_lake'])
         self.assertFalse((self.root / '.lake').exists())
 
+    def test_reuse_preserves_checked_status_of_an_ordinary_historical_report(self):
+        api = self.receipt()
+        receipt = publication.member(self.report, api.SUFFIX)
+        record = json.loads(receipt.read_bytes())
+        record['completed'] = api.LEGACY_CHECKED
+        receipt.write_text(json.dumps(record))
+        self.assertFalse(api.reuse(self.root, self.report, self.report)['needs_lake'])
+        self.assertEqual(api.read_receipt(self.report)['completed'], api.CHECKED)
+
     def test_seed_format_requires_complete_sealed_inputs(self):
         api = self.receipt()
         receipt = publication.member(self.report, '.reuse.json')

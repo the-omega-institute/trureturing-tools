@@ -569,7 +569,7 @@ def publish(root, partition, verification=None, *, build_report=True):
                     raise ValueError("no private project build to publish")
                 captured = report_reuse.capture(root)
                 report_receipt = report_reuse.read_receipt(report, captured)
-                if report_receipt['completed'] != report_reuse.CHECKED:
+                if report_receipt['completed'] not in report_reuse.CHECKED_STEPS:
                     raise ValueError("Release publication requires a checked full report. "
                                      "Run make check-lean-report FULL_BUILD=1 before publishing.")
                 report_reuse.publication.validate_bundle(report, repository=root)

@@ -35,6 +35,7 @@ CHECKED = [*COMPLETED, 'full-report-checked']
 # Older receipts can establish ordinary report completion. Current bundle
 # admission still checks the supported fields before reuse.
 LEGACY_CHECKED = [*COMPLETED, 'fib-inputs-checked']
+CHECKED_STEPS = (CHECKED, LEGACY_CHECKED)
 
 
 INVALID_SEED = (OSError, UnicodeError, ValueError, KeyError, TypeError,
@@ -138,7 +139,7 @@ def read_receipt(report, captured=None):
         raise ValueError('reuse receipt is absent or nonregular')
     receipt = publication.read_json(path.read_bytes())
     materials.require_keys(receipt, {'schema', 'completed', 'inputs', 'bundle'}, 'reuse receipt')
-    if receipt['schema'] != SCHEMA or receipt['completed'] not in (COMPLETED, CHECKED, LEGACY_CHECKED):
+    if receipt['schema'] != SCHEMA or receipt['completed'] not in (COMPLETED, *CHECKED_STEPS):
         raise ValueError('reuse receipt lacks complete entry success')
     if not isinstance(receipt['inputs'], dict):
         raise ValueError('invalid reuse inputs')
@@ -344,7 +345,7 @@ def _reuse(repository, report, output):
                 raise ValueError('reuse receipt changed during publication')
         if capture(repository) != captured:
             raise ValueError('registered inputs changed during reuse')
-        write_receipt(output, captured, checked=receipt['completed'] == CHECKED)
+        write_receipt(output, captured, checked=receipt['completed'] in CHECKED_STEPS)
         if canonical and base is not None and not record_seed_base(repository, base):
             invalidate_seed_base(repository)
     except INVALID_SEED as error:
@@ -375,7 +376,7 @@ def seed_format(report):
             raise ValueError('missing reuse receipt')
         receipt = publication.read_json(path.read_bytes())
         materials.require_keys(receipt, {'schema', 'completed', 'inputs', 'bundle'}, 'reuse receipt')
-        if receipt['schema'] != SCHEMA or receipt['completed'] not in (COMPLETED, CHECKED, LEGACY_CHECKED):
+        if receipt['schema'] != SCHEMA or receipt['completed'] not in (COMPLETED, *CHECKED_STEPS):
             raise ValueError('reuse receipt lacks complete entry success')
         inputs = receipt['inputs']
         fields = {'eligible', 'report_format', 'files', 'execution'}
