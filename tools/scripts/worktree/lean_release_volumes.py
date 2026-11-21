@@ -111,42 +111,69 @@ def copy_range(source, offset, count, output):
             count -= len(block)
 
 
-def materialize_delta(stage, metadata, rows, previous, chunk_bytes, delta, deadline=None):
-    """Choose exact compressed frames, then place all changed frames in bounded volumes."""
-    reused = {}
-    old_sizes = {}
-    if previous is not None and previous[0]["lake_inputs_sha256"] == metadata["lake_inputs_sha256"]:
+class HashOutput:
+    def __init__(self):
+        self.digest = hashlib.sha256()
+        self.size = 0
+
+    def tell(self):
+        return self.size
+
+    def write(self, block):
+        self.digest.update(block)
+        self.size += len(block)
+        return len(block)
+
+
+def pack_volumes(root, stage, previous, chunk_bytes, save_part, deadline=None):
+    """Index a logical snapshot while staging at most one confirmed physical volume."""
+    if not 0 < chunk_bytes <= VOLUME_BYTES:
+        raise ValueError("invalid physical volume size")
+    config = lake_configuration(root)
+    modules, groups = index.frame_inventory(root)
+    rows, sizes = [], {}
+    compact = False
+    compatible = previous is not None and previous[0]["lake_inputs_sha256"] == config
+    if compatible:
+        logical = HashOutput()
+        for name, artifacts in groups:
+            rows.append(index.write_frame(root, modules, name, artifacts, logical, deadline, stable_timestamps=True))
+        logical_bytes, logical_sha = logical.size, logical.digest.hexdigest()
         old_tree = previous[1]
-        old_sizes = old_tree["volumes"]
-        reused = {row["sha256"]: spans for row, spans in zip(old_tree["members"], old_tree["locations"],
-                                                             strict=True)}
-    locations = [reused.get(row["sha256"]) for row in rows]
-    delta_bytes = sum(row["bytes"] for row, spans in zip(rows, locations, strict=True) if spans is None)
-    sizes = {key: old_sizes[key] for spans in locations if spans for key, _, _ in spans}
-    projected_parts = len(sizes) + (delta_bytes + chunk_bytes - 1) // chunk_bytes
-    compact = (projected_parts > MAX_VOLUMES or
-               sum(sizes.values()) + delta_bytes > 2 * metadata["archive_bytes"])
-    peak = metadata["archive_bytes"]
-    if compact or delta_bytes == metadata["archive_bytes"]:
-        locations = [None] * len(rows)
-        sizes = {}
-        staged, parts = stage, metadata["parts"]
-    elif delta_bytes:
-        staged = delta
-        with MultipartArchiveOutput(delta, "delta", chunk_bytes, deadline) as out:
-            remaining_source = metadata["archive_bytes"]
-            for row, spans in zip(rows, locations, strict=True):
-                for part, start, count in index.volume_ranges(metadata["parts"], row["offset"], row["bytes"]):
-                    source = stage / part["name"]
-                    if spans is None:
-                        copy_range(source, start, count, out)
-                        peak = max(peak, remaining_source + out.tell())
-                    if start + count == part["bytes"]:
-                        source.unlink()
-                        remaining_source -= part["bytes"]
-        parts = out.metadata()["parts"]
+        reused = {row["sha256"]: spans for row, spans in zip(old_tree["members"], old_tree["locations"], strict=True)}
+        locations = [reused.get(row["sha256"]) for row in rows]
+        changed = sum(row["bytes"] for row, spans in zip(rows, locations, strict=True) if spans is None)
+        sizes = {key: old_tree["volumes"][key] for spans in locations if spans for key, _, _ in spans}
+        compact = (len(sizes) + (changed + chunk_bytes - 1) // chunk_bytes > MAX_VOLUMES
+                   or sum(sizes.values()) + changed > 2 * logical_bytes)
+        if compact:
+            sizes.clear()
+            locations = [None] * len(rows)
     else:
-        parts, staged = [], delta
+        if not groups:
+            raise ValueError("member index does not cover archive")
+        locations = [None] * len(groups)
+
+    parts = []
+    if any(spans is None for spans in locations):
+        with MultipartArchiveOutput(stage, "volume", chunk_bytes, deadline, on_part=save_part) as output:
+            for pos, (name, artifacts) in enumerate(groups):
+                if locations[pos] is not None:
+                    continue
+                row = index.write_frame(root, modules, name, artifacts, output, deadline, stable_timestamps=True)
+                if compatible:
+                    row["offset"] = rows[pos]["offset"]
+                    if row != rows[pos]:
+                        raise ValueError("compiler frame changed between measurement and upload")
+                else:
+                    rows.append(row)
+        parts = output.parts
+        if not compatible:
+            logical_bytes, logical_sha = output.archive_bytes, output.archive_hash.hexdigest()
+
+    index.validate_members(rows, logical_bytes)
+    if not 0 < logical_bytes <= MAX_VOLUMES * VOLUME_BYTES:
+        raise ValueError("invalid logical volume archive size")
     written = 0
     for pos, row in enumerate(rows):
         if locations[pos] is None:
@@ -154,53 +181,60 @@ def materialize_delta(stage, metadata, rows, previous, chunk_bytes, delta, deadl
                               for part, start, count in index.volume_ranges(parts, written, row["bytes"])]
             written += row["bytes"]
     sizes.update({part["sha256"]: part["bytes"] for part in parts})
-    return {"members": rows, "locations": locations, "volumes": sizes}, staged, parts, written, compact, peak
+    tree = {"members": rows, "locations": locations, "volumes": sizes}
+    contents = {"archive_bytes": logical_bytes, "archive_sha256": logical_sha, "lake_inputs_sha256": config}
+    peak = max((part["bytes"] for part in parts), default=0)
+    return contents, tree, written, compact, peak
+
+
+def write_tree(path, tree):
+    raw = json_bytes(tree)
+    if len(raw) > 128 * 1024 * 1024:
+        raise ValueError("volume index exceeds maximum size")
+    with path.open("wb") as target:
+        with gzip.GzipFile(filename="", fileobj=target, mode="wb", mtime=0) as encoded:
+            encoded.write(raw)
+    if path.stat().st_size > 32 * 1024 * 1024:
+        raise ValueError("compressed volume index exceeds maximum size")
 
 
 def publish(store, tag, root, base=None, chunk_bytes=VOLUME_BYTES):
-    if not 0 < chunk_bytes <= VOLUME_BYTES:
-        raise ValueError("invalid physical volume size")
     store.mkdir(parents=True, exist_ok=True)
     destination = snapshot_path(store, tag)
-    with tempfile.TemporaryDirectory(prefix=".stage-", dir=store) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".stage-", dir=store) as temporary, store_lock(store, write=True):
         stage = Path(temporary)
         producer = checkout(root)
-        metadata = index.pack(root, stage, chunk_bytes, None, stable_timestamps=True)
-        rows = index.read_index(stage / index.INDEX, metadata["archive_bytes"])
-        with store_lock(store, write=True):
-            if destination.exists():
-                existing, _ = read_snapshot(store, tag)
-                if (existing["producer_commit_sha"] != producer or any(existing[key] != metadata[key]
-                        for key in ("archive_sha256", "lake_inputs_sha256"))):
-                    raise ValueError("snapshot tag is already bound to another build")
-                return {"payload_bytes": 0, "metadata_bytes": 0, "new_volumes": [], "existing": True}
-            previous = read_snapshot(store, base) if base else None
-            delta = stage / "delta"
-            delta.mkdir()
-            tree, payloads, parts, written, compact, peak = materialize_delta(
-                stage, metadata, rows, previous, chunk_bytes, delta)
-            uploaded = []
-            for part in parts:
-                if store_asset(store, part, payloads / part["name"]):
-                    uploaded.append(part)
-            for digest, size in tree["volumes"].items():
-                if (store / "volumes" / digest).stat().st_size != size:
-                    raise ValueError("referenced physical volume is missing or truncated")
-            new_tag = stage / "snapshot"
-            new_tag.mkdir()
-            with (new_tag / INDEX).open("wb") as target:
-                with gzip.GzipFile(filename="", fileobj=target, mode="wb", mtime=0) as out:
-                    out.write(json_bytes(tree))
-            manifest = {key: metadata[key] for key in ("archive_sha256", "archive_bytes", "lake_inputs_sha256")}
-            manifest.update(schema=SCHEMA, tag=tag, producer_commit_sha=producer, index_sha256=archive_sha(new_tag / INDEX, None))
-            (new_tag / MANIFEST).write_bytes(json_bytes(manifest))
-            meta_bytes = sum(path.stat().st_size for path in new_tag.iterdir())
-            destination.parent.mkdir(exist_ok=True)
-            new_tag.rename(destination)
-            return {"payload_bytes": sum(part["bytes"] for part in uploaded), "metadata_bytes": meta_bytes,
-                    "new_volumes": [part["sha256"] for part in uploaded],
-                    "reused_bytes": metadata["archive_bytes"] - written, "compacted": compact,
-                    "peak_staged_payload_bytes": peak}
+        existing = read_snapshot(store, tag) if destination.exists() else None
+        previous = existing or (read_snapshot(store, base) if base else None)
+        uploaded = []
+
+        def save_part(part, path):
+            if existing:
+                raise ValueError("snapshot tag is already bound to another build")
+            if store_asset(store, part, path):
+                uploaded.append(part)
+
+        contents, tree, written, compact, peak = pack_volumes(root, stage, previous, chunk_bytes, save_part)
+        if existing:
+            if existing[0]["producer_commit_sha"] != producer or any(existing[0][k] != v for k, v in contents.items()):
+                raise ValueError("snapshot tag is already bound to another build")
+            return {"payload_bytes": 0, "metadata_bytes": 0, "new_volumes": [], "existing": True}
+        for digest, size in tree["volumes"].items():
+            if (store / "volumes" / digest).stat().st_size != size:
+                raise ValueError("referenced physical volume is missing or truncated")
+        new_tag = stage / "snapshot"
+        new_tag.mkdir()
+        write_tree(new_tag / INDEX, tree)
+        manifest = dict(contents, schema=SCHEMA, tag=tag, producer_commit_sha=producer,
+                        index_sha256=archive_sha(new_tag / INDEX, None))
+        (new_tag / MANIFEST).write_bytes(json_bytes(manifest))
+        meta_bytes = sum(path.stat().st_size for path in new_tag.iterdir())
+        destination.parent.mkdir(exist_ok=True)
+        new_tag.rename(destination)
+        return {"payload_bytes": sum(part["bytes"] for part in uploaded), "metadata_bytes": meta_bytes,
+                "new_volumes": [part["sha256"] for part in uploaded],
+                "reused_bytes": contents["archive_bytes"] - written, "compacted": compact,
+                "peak_staged_payload_bytes": peak}
 
 
 def restore(store, tag, root, destination, targets=()):

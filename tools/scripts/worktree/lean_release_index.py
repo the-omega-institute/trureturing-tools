@@ -86,35 +86,42 @@ def member_groups(inventory, graph):
         yield None, batch
 
 
-def pack(root, stage, chunk_bytes, deadline, *, stable_timestamps=False):
+def frame_inventory(root):
     modules = workspace_modules(root)
     graph = project_imports(root, modules)
-    inventory = build_inventory(root, modules)
+    return modules, list(member_groups(build_inventory(root, modules), graph))
+
+
+def write_frame(root, modules, module, artifacts, output, deadline, *, stable_timestamps):
     build = root / PROJECT_BUILD
-    frames = []
+    frame = MemberOutput(output)
+    with gzip.GzipFile(filename="", fileobj=frame, mode="wb", compresslevel=1, mtime=0) as compressed:
+        with tarfile.open(mode="w|", fileobj=compressed) as archive:
+            for artifact in artifacts:
+                source = build / artifact.path
+                tar = archive.gettarinfo(str(source), arcname=str(artifact.path))
+                if not tar.isfile() or tar.size != artifact.size:
+                    raise ValueError(f"Lake artifact changed during snapshot: {artifact.path}")
+                tar.uid = tar.gid = 0
+                tar.uname = tar.gname = ""
+                if stable_timestamps:
+                    tar.mtime = 0
+                    tar.pax_headers.pop("mtime", None)
+                tar.mode = artifact.mode & 0o777
+                with source.open("rb") as data:
+                    archive.addfile(tar, ArchiveInput(data, deadline))
+    row = frame.record(module)
+    if module is not None:
+        row["source_sha256"] = hashlib.sha256((root / modules[module].source).read_bytes()).hexdigest()
+        row["paths"] = [str(artifact.path) for artifact in artifacts]
+    return row
+
+
+def pack(root, stage, chunk_bytes, deadline, *, stable_timestamps=False):
+    modules, groups = frame_inventory(root)
     with MultipartArchiveOutput(stage, ASSET, chunk_bytes, deadline) as output:
-        for module, artifacts in member_groups(inventory, graph):
-            frame = MemberOutput(output)
-            with gzip.GzipFile(filename="", fileobj=frame, mode="wb", compresslevel=1, mtime=0) as compressed:
-                with tarfile.open(mode="w|", fileobj=compressed) as archive:
-                    for artifact in artifacts:
-                        source = build / artifact.path
-                        tar = archive.gettarinfo(str(source), arcname=str(artifact.path))
-                        if not tar.isfile() or tar.size != artifact.size:
-                            raise ValueError(f"Lake artifact changed during snapshot: {artifact.path}")
-                        tar.uid = tar.gid = 0
-                        tar.uname = tar.gname = ""
-                        if stable_timestamps:
-                            tar.mtime = 0
-                            tar.pax_headers.pop("mtime", None)
-                        tar.mode = artifact.mode & 0o777
-                        with source.open("rb") as data:
-                            archive.addfile(tar, ArchiveInput(data, deadline))
-            row = frame.record(module)
-            if module is not None:
-                row["source_sha256"] = hashlib.sha256((root / modules[module].source).read_bytes()).hexdigest()
-                row["paths"] = [str(artifact.path) for artifact in artifacts]
-            frames.append(row)
+        frames = [write_frame(root, modules, name, artifacts, output, deadline,
+                              stable_timestamps=stable_timestamps) for name, artifacts in groups]
     with (stage / INDEX).open("wb") as encoded:
         with gzip.GzipFile(filename="", fileobj=encoded, mode="wb", mtime=0) as index:
             index.write(json.dumps({"members": frames}, separators=(",", ":")).encode())

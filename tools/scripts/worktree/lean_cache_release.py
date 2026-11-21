@@ -603,11 +603,15 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
                     return 0
                 # Level 1 keeps the gzip protocol within the transport window.
                 preparing = True
-                if indexed:
+                if physical:
+                    import lean_release_volume_remote as remote
+
+                    contents = remote.stage_publication(sys.modules[__name__], root, stage, partition, cache_key,
+                                                        identity, verification is not None, deadline)
+                elif indexed:
                     import lean_release_index as indexed_release
 
-                    contents = (indexed_release.pack(root, stage, CHUNK_BYTES, deadline, stable_timestamps=True)
-                                if physical else indexed_release.pack(root, stage, CHUNK_BYTES, deadline))
+                    contents = indexed_release.pack(root, stage, CHUNK_BYTES, deadline)
                 else:
                     with MultipartArchiveOutput(stage, ASSET, CHUNK_BYTES, deadline) as output:
                         with tarfile.open(stage / ASSET, "w:gz", compresslevel=1,
@@ -616,11 +620,6 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
                                         filter=lambda member: None if member.isfile()
                                         and member.name.endswith(".setup.json") else member)
                     contents = output.metadata()
-            if physical:
-                import lean_release_volume_remote as remote
-
-                contents = remote.stage_publication(sys.modules[__name__], stage, contents, partition, cache_key,
-                                                    identity, verification is not None, deadline)
             metadata = {"schema": ("lean-release-seed-v6" if physical else INDEXED_SCHEMA) if indexed else "lean-release-seed-v4",
                         "partition": partition, "cache_key": cache_key, **identity, **contents}
             (stage / MANIFEST).write_text(json.dumps(metadata, sort_keys=True) + "\n")

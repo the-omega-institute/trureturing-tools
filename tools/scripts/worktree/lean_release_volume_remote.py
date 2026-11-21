@@ -1,6 +1,5 @@
 """GitHub Releases transport for directly addressed, immutable physical volumes."""
 
-import gzip
 import hashlib
 import json
 import os
@@ -116,7 +115,7 @@ def published_base(host, scope, partition, key, verification, deadline):
     return None
 
 
-def stage_publication(host, stage, contents, partition, cache_key, identity, verification, deadline):
+def stage_publication(host, root, stage, partition, cache_key, identity, verification, deadline):
     test_id = os.environ.get("LEAN_CACHE_VOLUME_TEST_ID") or None
     if os.environ.get("LEAN_CACHE_VOLUME_RETIRE_TAG") and not test_id:
         raise ValueError("retiring an integration snapshot requires a test volume scope")
@@ -127,30 +126,27 @@ def stage_publication(host, stage, contents, partition, cache_key, identity, ver
     if old_tag := os.environ.get("LEAN_CACHE_VOLUME_RETIRE_TAG"):
         binding = predecessor_binding(host, partition, cache_key, scope, test_id, identity, old_tag,
                                       previous[0] if previous else None, deadline)
-    rows = index.read_index(stage / volumes.INDEX, contents["archive_bytes"])
-    delta = stage / "delta"
-    delta.mkdir()
-    tree, packed, parts, written, compact, peak = volumes.materialize_delta(stage, contents, rows, previous,
-                                                                      host.CHUNK_BYTES, delta, deadline)
-    new = {part["sha256"]: part for part in parts}
     uploads = []
-    for digest, size in tree["volumes"].items():
-        physical = volume_prefix(scope) + digest
-        source = packed / new[digest]["name"] if digest in new else None
-        if ensure_asset(host, physical, digest, size, source, deadline,
-                        serialized=(os.environ.get("GITHUB_ACTIONS") == "true" and identity["publication_id"].startswith("ci-"))):
+    confirmed = set()
+    pool = volume_prefix(scope)
+    serialized = os.environ.get("GITHUB_ACTIONS") == "true" and identity["publication_id"].startswith("ci-")
+
+    def save_part(part, path):
+        digest = part["sha256"]
+        if ensure_asset(host, pool + digest, digest, part["bytes"], path, deadline, serialized=serialized):
             uploads.append(digest)
-    # Retire the complete v5 staging copy before verification reads the published object.
-    for base, entries in ((stage, contents["parts"]), (packed, parts)):
-        for part in entries:
-            (base / part["name"]).unlink(missing_ok=True)
-    with (stage / volumes.INDEX).open("wb") as target:
-        with gzip.GzipFile(filename="", fileobj=target, mode="wb", mtime=0) as encoded:
-            encoded.write(volumes.json_bytes(tree))
+        confirmed.add(digest)
+
+    contents, tree, written, compact, peak = volumes.pack_volumes(
+        root, stage, previous, host.CHUNK_BYTES, save_part, deadline)
+    for digest, size in tree["volumes"].items():
+        if digest not in confirmed:
+            ensure_asset(host, pool + digest, digest, size, None, deadline, serialized=serialized)
+    volumes.write_tree(stage / volumes.INDEX, tree)
     host.receipt("volume-upload", "saved", new_volumes=uploads,
                  payload_bytes=sum(tree["volumes"][name] for name in uploads),
                  reused_bytes=contents["archive_bytes"] - written, compacted=compact, peak_staged_payload_bytes=peak)
-    return {**{k: contents[k] for k in ("lake_inputs_sha256", "archive_bytes", "archive_sha256")},
+    return {**contents,
             **({"volume_test_id": test_id} if test_id else {}),
             **({"volume_predecessor": binding} if binding else {}), "volume_scope": scope, "index": {"name": volumes.INDEX, "bytes": (stage / volumes.INDEX).stat().st_size,
                                              "sha256": archive_sha(stage / volumes.INDEX, deadline)}}

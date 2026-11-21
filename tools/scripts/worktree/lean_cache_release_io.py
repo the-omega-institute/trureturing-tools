@@ -38,11 +38,12 @@ def remaining(deadline):
 
 class MultipartArchiveOutput:
     """Stage one gzip stream without retaining a second copy of its parts."""
-    def __init__(self, stage, name, chunk_bytes, deadline):
+    def __init__(self, stage, name, chunk_bytes, deadline, *, on_part=None):
         if chunk_bytes <= 0:
             raise ValueError("archive part size must be positive")
         self.stage, self.name = stage, name
         self.chunk_bytes, self.deadline = chunk_bytes, deadline
+        self.on_part = on_part
         self.output = None
         self.failure = None
         self.parts = []
@@ -69,7 +70,11 @@ class MultipartArchiveOutput:
         finally:
             output.close()
         remaining(self.deadline)
-        self.parts.append({"name": self.path.name, "sha256": self.part_hash.hexdigest(), "bytes": self.part_bytes})
+        part = {"name": self.path.name, "sha256": self.part_hash.hexdigest(), "bytes": self.part_bytes}
+        self.parts.append(part)
+        if self.on_part is not None:
+            self.on_part(part, self.path)
+            self.path.unlink(missing_ok=True)
 
     def tell(self):
         return self.archive_bytes
@@ -112,7 +117,7 @@ class MultipartArchiveOutput:
         self._close_part()
         if not self.archive_bytes:
             raise ValueError("archive must fit in 1 to 100 parts")
-        if len(self.parts) == 1:
+        if self.on_part is None and len(self.parts) == 1:
             self.path.rename(self.stage / self.name)
             self.parts[0]["name"] = self.name
         remaining(self.deadline)

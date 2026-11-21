@@ -2,6 +2,7 @@
 
 import json
 import os
+import random
 from pathlib import Path
 from contextlib import ExitStack, redirect_stdout
 import io
@@ -179,9 +180,11 @@ class VolumeReleases(unittest.TestCase):
         self.change_b()
         with self.assertRaisesRegex(ValueError, "already bound"):
             volumes.publish(self.pool, "first", self.project)
-        with patch.object(volumes, "MAX_VOLUMES", 1):
+        with patch.object(volumes, "MAX_VOLUMES", 1), \
+                patch.object(volumes.index, "write_frame", wraps=volumes.index.write_frame) as encode:
             repacked = volumes.publish(self.pool, "second", self.project, "first")
             self.assertTrue(repacked["compacted"])
+            self.assertEqual([call.args[2] for call in encode.call_args_list], ["D5.A", "D5.B", "D5.C"] * 2)
         old_tag = self.pool / "snapshots/first"
         current = self.pool / "snapshots/second" / volumes.INDEX
         current.write_bytes(current.read_bytes() + b"x")
@@ -189,7 +192,7 @@ class VolumeReleases(unittest.TestCase):
             volumes.retire(self.pool, ["first", "repeat"])
         self.assertTrue(old_tag.exists())
 
-    def test_github_command_transport_and_retention(self):
+    def github_transport(self, stack, chunk_bytes):
         import lean_cache_release as release
 
         fixture = Path(__file__).resolve().parents[2] / "tests/StrataLint.ScriptTests/Fixtures"
@@ -208,18 +211,125 @@ class VolumeReleases(unittest.TestCase):
         remote_env = {"PATH": str(binary) + os.pathsep + os.environ["PATH"],
                       "FAKE_REMOTE": str(self.pool), "GITHUB_ACTIONS": "true",
                       "LEAN_CACHE_RELEASE_VOLUMES": "1"}
+        stack.enter_context(patch.dict(os.environ, remote_env))
+        stack.enter_context(patch.object(release, "REPO", "fixture/private"))
+        stack.enter_context(patch.object(release, "CHUNK_BYTES", chunk_bytes))
+        stack.enter_context(patch.object(release.report_reuse, "capture", return_value={}))
+        stack.enter_context(patch.object(release.report_reuse, "read_receipt",
+                                        return_value={"completed": release.report_reuse.CHECKED}))
+        stack.enter_context(patch.object(release.report_reuse.publication, "validate_bundle"))
+        stack.enter_context(patch.object(release.report_reuse, "record_seed_base", return_value=True))
+        stack.enter_context(patch.object(release, "partition_path", return_value=partition))
+        stack.enter_context(patch.object(release, "release_key", return_value=key))
+        identity = stack.enter_context(patch.object(release, "publication_identity"))
+        return release, key, partition, identity
+
+    def test_streaming_publisher_cross_volume_frame_and_retry(self):
+        import lean_release_index as index
+        import lean_release_volume_remote as remote
+
+        chunk = 8192
+        artifact = self.project / ".lake/build/ir/D5/B.bc"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(random.Random(1).randbytes(6 * chunk))
+        reference = self.area / "reference"
+        reference.mkdir()
+        expected = index.pack(self.project, reference, chunk, None, stable_timestamps=True)
+        modules = ["D5.A", "D5.B", "D5.C"]
+        author = run(self.project, "git", "rev-parse", "HEAD").strip()
         with ExitStack() as stack:
-            stack.enter_context(patch.dict(os.environ, remote_env))
-            stack.enter_context(patch.object(release, "REPO", "fixture/private"))
-            stack.enter_context(patch.object(release, "CHUNK_BYTES", 5000))
-            stack.enter_context(patch.object(release.report_reuse, "capture", return_value={}))
-            stack.enter_context(patch.object(release.report_reuse, "read_receipt",
-                                            return_value={"completed": release.report_reuse.CHECKED}))
-            stack.enter_context(patch.object(release.report_reuse.publication, "validate_bundle"))
-            stack.enter_context(patch.object(release.report_reuse, "record_seed_base", return_value=True))
-            stack.enter_context(patch.object(release, "partition_path", return_value=partition))
-            stack.enter_context(patch.object(release, "release_key", return_value=key))
-            identity = stack.enter_context(patch.object(release, "publication_identity"))
+            release, key, partition, identity = self.github_transport(stack, chunk)
+            send = release.gh
+            measurements = []
+            transfers = []
+
+            def observed_send(deadline, *args):
+                if args[:2] == ("release", "upload"):
+                    tag, path = args[2], Path(args[3])
+                    if tag.startswith("lean-volume-v1-"):
+                        transfers.append(tag)
+                        stage = path.parent.parent
+                        # The digest-named upload is a hard link to the active volume.
+                        stats = [p.stat() for p in stage.rglob("*") if p.is_file()]
+                        inodes = {(st.st_dev, st.st_ino) for st in stats}
+                        self.assertEqual(len(inodes), 1)
+                        self.assertLessEqual(stats[0].st_size, chunk)
+                        measurements.append((stats[0].st_size, stats[0].st_blocks * 512))
+                    else:
+                        self.assertEqual({p.name for p in path.parent.rglob("*") if p.is_file()},
+                                         {volumes.INDEX, volumes.MANIFEST})
+                return send(deadline, *args)
+
+            stack.enter_context(patch.object(release, "gh", side_effect=observed_send))
+            encode = stack.enter_context(patch.object(index, "write_frame", wraps=index.write_frame))
+
+            def publish(num, status="published"):
+                suffix = f"ci-{num}-1"
+                identity.return_value = {"producer_commit_sha": author, "publication_id": suffix,
+                                         "workflow_run_id": str(num), "workflow_run_attempt": "1"}
+                encode.reset_mock()
+                transfers.clear()
+                with redirect_stdout(io.StringIO()) as output:
+                    result = release.publish(self.project, partition, build_report=False, indexed=True)
+                events = dict(line.split(" ", 1) for line in output.getvalue().splitlines())
+                self.assertEqual(result, 2 if status == "failed" else 0, output.getvalue())
+                self.assertEqual(json.loads(events["LEAN_CACHE_PUBLISH"])["status"], status, output.getvalue())
+                return release.prefix(partition, key, indexed="volumes") + suffix
+
+            tag = publish(701)
+            self.assertEqual([call.args[2] for call in encode.call_args_list], modules)
+            manifest = json.loads((self.pool / tag / volumes.MANIFEST).read_bytes())
+            self.assertEqual((manifest["archive_bytes"], manifest["archive_sha256"]),
+                             (expected["archive_bytes"], expected["archive_sha256"]))
+            tree = volumes.read_tree(self.pool / tag / volumes.INDEX, manifest)
+            row = tree["members"][1]
+            self.assertGreater(len(tree["locations"][1]), 6)
+            self.assertEqual(max(n for n, _ in measurements), chunk)
+            if os.environ.get("LEAN_VOLUME_MEASURE"):
+                print(json.dumps({"logical_bytes": manifest["archive_bytes"], "large_frame_bytes": row["bytes"],
+                                  "large_frame_spans": len(tree["locations"][1]), "volume_bytes": chunk,
+                                  "peak_staged_bytes": max(n for n, _ in measurements),
+                                  "peak_allocated_bytes": max(n for _, n in measurements)}))
+
+            publish(702)
+            self.assertEqual([call.args[2] for call in encode.call_args_list], modules)
+            self.assertEqual(transfers, [])
+
+            artifact.write_bytes(random.Random(2).randbytes(6 * chunk))
+            confirm = remote.ensure_asset
+            confirmed = []
+
+            def interrupt(*args, **kwargs):
+                saved = confirm(*args, **kwargs)
+                if saved:
+                    confirmed.append(args[1])
+                    raise OSError("interrupted after the first confirmed volume")
+                return saved
+
+            with patch.object(remote, "ensure_asset", side_effect=interrupt):
+                failed_tag = publish(703, "failed")
+            self.assertEqual(transfers, confirmed)
+            self.assertEqual(len(confirmed), 1)
+            self.assertFalse((self.pool / failed_tag).exists())
+            self.assertTrue((self.pool / tag / volumes.MANIFEST).exists())
+
+            retry = publish(703)
+            self.assertEqual([call.args[2] for call in encode.call_args_list], modules + ["D5.B"])
+            self.assertNotIn(confirmed[0], transfers)
+            self.assertTrue(transfers)
+            manifest = json.loads((self.pool / retry / volumes.MANIFEST).read_bytes())
+            tree = volumes.read_tree(self.pool / retry / volumes.INDEX, manifest)
+            self.assertIn(confirmed[0].rsplit("-", 1)[1], tree["volumes"])
+            dest = self.consumer("cross-volume")
+            stage = self.area / "scoped-transfer"
+            stage.mkdir()
+            release.restore_scoped(dest, partition, retry, stage, release.operation_deadline(),
+                                   cache_key=key, producer=author, targets=["D5.B"], verification=False)
+            self.assertEqual((dest / artifact.relative_to(self.project)).read_bytes(), artifact.read_bytes())
+
+    def test_github_command_transport_and_retention(self):
+        with ExitStack() as stack:
+            release, key, partition, identity = self.github_transport(stack, 5000)
             tags = []
             uploads = []
             for num in range(1, 7):
