@@ -75,9 +75,7 @@ def selection(data, paths, purpose):
     report = hits["current"] and matches(parse("[scope]\n" + data["current"]["report_paths"]), paths)["scope"]
     source_delta = hits["current"] and matches(parse("[scope]\n" + data["current"]["delta_paths"]), paths)["scope"]
     return {"hits": hits, "report": report, "delta": report and source_delta,
-            "source-delta": source_delta, "full-report": False,
-            "compiled-audit": report and hits["tests-lean"],
-            "source-evidence": report and hits["tests-declared-template"]}
+            "source-delta": source_delta, "full-report": False}
 
 
 def git(root, *args):

@@ -31,6 +31,7 @@ internal static class FrozenLedgerDeltaPredicate
             && path.EndsWith(".cs", StringComparison.Ordinal)
         || path.StartsWith("tools/StrataLint.Engine/", StringComparison.Ordinal)
             && path.EndsWith(".cs", StringComparison.Ordinal)
-        || path.StartsWith(".github/workflows/ci-", StringComparison.Ordinal)
+        || (path.StartsWith(".github/workflows/ci-", StringComparison.Ordinal)
+            || path.StartsWith("tools/ci/workflows/ci-", StringComparison.Ordinal))
             && path.EndsWith(".yml", StringComparison.Ordinal);
 }

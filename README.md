@@ -19,8 +19,10 @@ exact candidate and pins its SHA-256 in a fixed consumer checkout. The real
 consumer installer verifies and installs the archive before CI runs the
 registered units and additional candidate test projects.
 
-The consuming repository checks its own current source, FILEMAP and scoped
-Lean evidence against the actual PR or push.
+The tools repository owns the tool build, regression tests and release workflows.
+The consuming repository owns CI for its Lean and Scribe source, FILEMAP,
+frozen statements, cache publication and Scribe resources. Its workflows
+invoke the tools selected by its release lock.
 
 ## Package and release
 
@@ -40,7 +42,7 @@ gh workflow run release.yml --ref dev -f source=pr/123
 
 To refresh an expired artifact, rerun the pull request CI or use `gh workflow run ci.yml --ref my-feature` for a branch.
 
-The preview tag contains the channel, run number and source commit. Set the repository variable `TOOLS_RELEASE_SERIES` to choose the version under development (default `0.1.0`). In the downstream trial PR, pin the preview's exact tag and the SHA-256 of `trureturing-tools.tar.gz`. The release notes and the GitHub asset metadata carry that digest.
+The preview tag contains the channel, run number and source commit. Set the repository variable `TOOLS_RELEASE_SERIES` to choose the version under development (default `0.1.0`). In a downstream trial checkout, run `make install-tools`, then `python3 tools/consumer/pin.py <preview-tag>`. The pin command checks the public archive's SHA-256 and updates `Meta/tools-release.json`. Commit that lock in the consumer PR. Use the same command with a stable tag after promotion.
 
 After downstream CI accepts the candidate, promote it to `main` and run the stable workflow on that branch. Set `preview` to the tested preview tag and `version` to the stable tag.
 

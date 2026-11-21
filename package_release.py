@@ -13,14 +13,6 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent
 ASSET = "trureturing-tools.tar.gz"
-CONSUMER_WORKFLOWS = (
-    "ci-current.yml",
-    "ci-publication-verify.yml",
-    "ci-unit.yml",
-    "lean-analysis-fixtures.yml",
-    "lean-cache-publish.yml",
-    "scribe-release-publish.yml",
-)
 
 
 def git(*args, stdin=None):
@@ -29,10 +21,7 @@ def git(*args, stdin=None):
 
 def write_archive(revision, output):
     tree = git("rev-parse", "--verify", "--end-of-options", revision + "^{tree}").strip()
-    destinations = {".github/workflows/" + name: "tools/ci/workflows/" + name
-                    for name in CONSUMER_WORKFLOWS}
-    destinations["LICENSE"] = "tools/LICENSE"
-    listing = git("ls-tree", "-rz", tree, "--", "tools", *destinations)
+    listing = git("ls-tree", "-rz", tree, "--", "LICENSE", "tools")
     members = {}
     for record in listing.rstrip(b"\0").split(b"\0"):
         metadata, raw_path = record.split(b"\t", 1)
@@ -40,9 +29,9 @@ def write_archive(revision, output):
         path = raw_path.decode("utf-8")
         if mode not in (b"100644", b"100755") or kind != b"blob":
             raise ValueError(f"release input must be a regular file: {path}")
-        if path in destinations.values():
-            raise ValueError(f"{path} is reserved for a packaged repository file")
-        name = destinations.get(path, path)
+        if path == "tools/LICENSE":
+            raise ValueError("tools/LICENSE is reserved for the repository license")
+        name = "tools/LICENSE" if path == "LICENSE" else path
         members[name] = (mode, oid)
     if "tools/LICENSE" not in members or len(members) == 1:
         raise ValueError("release requires LICENSE and a nonempty tools tree")
