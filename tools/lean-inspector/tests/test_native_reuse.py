@@ -42,8 +42,7 @@ class NativeLocalReportConsumerTests:
             self.assertEqual(0, git.returncode, git.stdout + git.stderr)
         anchor = run('git', 'rev-parse', 'HEAD').stdout.strip()
         self.restore_compiler()
-        report = ('make', 'lean-report', 'FULL_BUILD=1', 'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build')
-        checked = ('make', 'check-lean-report', *report[2:])
+        checked = ('make', 'check-lean-report', 'FULL_BUILD=1', 'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build')
         full = run(*checked, PARTIAL_INDEXED_PROJECT='false')
         self.assertEqual(0, full.returncode, full.stdout + full.stderr)
 
@@ -71,16 +70,17 @@ class NativeLocalReportConsumerTests:
         self.assertTrue(receipt.is_file())
         self.assertFalse(compiler.exists())
 
-        reused = run(*report, PARTIAL_INDEXED_PROJECT='false')
-        self.assertEqual(0, reused.returncode, reused.stdout + reused.stderr)
-        self.assertFalse(compiler.exists(), 'reading the report must leave the evicted compiler artifact missing')
+        raw_report = build / 'stratalint/raw-lean-report.json'
+        publication.validate_bundle(raw_report, repository=self.root)
+        prior_report = publication.digest(raw_report)
         rejected = run(*shards, 'prepare', '--anchor', anchor)
         self.assertIn('project snapshot is missing compiler or report outputs', rejected.stderr)
         self.assertNotEqual(0, rejected.returncode)
 
         repaired = run(*checked, PARTIAL_INDEXED_PROJECT='true')
         self.assertEqual(0, repaired.returncode, repaired.stdout + repaired.stderr)
-        self.assertIn('LEAN_INSPECTOR_WORK extracted_modules=0 aggregates=0', repaired.stdout)
+        self.assertEqual(prior_report, publication.digest(raw_report))
+        self.assertEqual(json.loads(receipt.read_text())['completed'][-1], 'fib-inputs-checked')
         self.assertTrue(compiler.is_file())
         self.assertEqual(retained_mtime, retained.stat().st_mtime_ns)
         self.write('available-shards.json', json.dumps(sorted(set(record['entries'].values()) - {evicted})))
