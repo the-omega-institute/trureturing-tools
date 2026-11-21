@@ -35,7 +35,7 @@ def sparse_plan(root, tag, manifest, digest, tree, target, *, extra_roots=()):
     modules = workspace_modules(root)
     sources = {mod.source.as_posix() for mod in modules.values()}
     for path in paths:
-        if path in sources and path.startswith(("D5/", "Reg/Reg/")):
+        if path in sources and path.startswith(("D5/", "Reg/")):
             continue
         if path.startswith("Blueprint/") and path.endswith((".md", ".scribe.cs")):
             continue

@@ -250,6 +250,12 @@ class VolumeReleases(unittest.TestCase):
                 self.assertTrue(sparse.install(host, clone, self.area, "base", manifest, "2"*64, target,
                                                "refs/heads/dev", False, None))
                 self.assertFalse(leftover.exists())
+            self.write("Reg/D5/Registration.lean", "import D5.A\n")
+            self.commit("add a registration in the project Reg package")
+            with patch.object(sparse.compiler, "production_targets", return_value={"Reg.D5.Registration", "D5.B", "D5.C"}):
+                new_plan = sparse.sparse_plan(self.project, "base", manifest, "2"*64, tree,
+                                              run(self.project, "git", "rev-parse", "HEAD").strip())
+                self.assertEqual(new_plan["rebuild_modules"], ["D5.B", "Reg.D5.Registration"])
             self.write("external-build-input.txt", "global input")
             self.commit("change an unevaluated build input")
             self.assertIsNone(sparse.sparse_plan(self.project, "base", manifest, "2"*64, tree,
