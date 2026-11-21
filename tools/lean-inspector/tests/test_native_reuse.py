@@ -16,6 +16,10 @@ class NativeLocalReportConsumerTests:
             dict(pattern='D5/**/*.lean', optional=False), dict(pattern='Reg/**/*.lean', optional=False)]
         self.write('lean-report-inputs.json', json.dumps(policy))
         self.write('utility.json', '[]')
+        self.copy('tools/lean-inspector/build_inputs.py')
+        self.write('tools/scripts/compiled-fib-test.sh', 'echo regressions >> .lake/fib-regressions\n')
+        self.write('tools/lean-inspector/LeanInformationAuditRegAnalysis/AuricFib/Main.lean',
+                   'def main : IO Unit := pure ()\n')
         self.write('Reg/Required.lean', 'def regRequired : Nat := 1\n')
         self.write('tools/lean-inspector/LeanInformationAuditRegTests/Required.lean',
                    'def requiredCheck : Bool := true\n')
@@ -39,7 +43,8 @@ class NativeLocalReportConsumerTests:
         anchor = run('git', 'rev-parse', 'HEAD').stdout.strip()
         self.restore_compiler()
         report = ('make', 'lean-report', 'FULL_BUILD=1', 'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build')
-        full = run(*report, PARTIAL_INDEXED_PROJECT='false')
+        checked = ('make', 'check-lean-report', *report[2:])
+        full = run(*checked, PARTIAL_INDEXED_PROJECT='false')
         self.assertEqual(0, full.returncode, full.stdout + full.stderr)
 
         shards = (sys.executable, 'tools/scripts/worktree/lean_actions_shards.py')
@@ -73,9 +78,9 @@ class NativeLocalReportConsumerTests:
         self.assertIn('project snapshot is missing compiler or report outputs', rejected.stderr)
         self.assertNotEqual(0, rejected.returncode)
 
-        repaired = run(*report, PARTIAL_INDEXED_PROJECT='true')
+        repaired = run(*checked, PARTIAL_INDEXED_PROJECT='true')
         self.assertEqual(0, repaired.returncode, repaired.stdout + repaired.stderr)
-        self.assertIn('complete-entry-reused', repaired.stdout)
+        self.assertIn('LEAN_INSPECTOR_WORK extracted_modules=0 aggregates=0', repaired.stdout)
         self.assertTrue(compiler.is_file())
         self.assertEqual(retained_mtime, retained.stat().st_mtime_ns)
         self.write('available-shards.json', json.dumps(sorted(set(record['entries'].values()) - {evicted})))
