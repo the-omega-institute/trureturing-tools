@@ -39,6 +39,11 @@ public sealed class FourierBridgeSourceEvidenceTests(Xunit.Abstractions.ITestOut
             using var stderr = new MemoryStream();
             try
             {
+                var prepared = BoundedProcessRunner.Run("make",
+                    ["lean-report-prepare", $"LEAN_TARGETS={module} Reg.{module}"],
+                    root, NativeEvidenceDeadline, 4 * 1024 * 1024,
+                    standardOutput: stdout, standardError: stderr);
+                Assert.True(prepared.ExitCode == 0, "Native source/mirror input preparation failed.");
                 var produced = BoundedProcessRunner.Run("/bin/bash",
                     ["tools/scripts/worktree/lean-cache-run.sh", "lake", "-d", "tools/lean-inspector-reg", "build",
                         "+" + module + ":report", "+Reg." + module + ":report"],
