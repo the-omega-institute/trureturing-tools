@@ -360,11 +360,13 @@ end AuricFibUniversalProduction
         unrelated = ROOT / (unrelated_name.replace('.', '/') + '.lean')
         self.assertFalse(unrelated.exists(), 'unrelated fixture is already owned')
         extra_targets = []
-        def build(*, success=True):
-            activity.write_text('')
-            phases.write_text('')
+        def build_targets():
             subprocess.run(['make', 'lean', 'LEAN_TARGETS=' + ' '.join(
                 [MODULE, PLAIN_MODULE, *(item.removesuffix(':report') for item in extra_targets)])], cwd=ROOT, check=True)
+
+        def build_reports(*, success=True):
+            activity.write_text('')
+            phases.write_text('')
             result = subprocess.run(['bash', 'tools/scripts/worktree/lean-cache-run.sh', 'lake', '-d',
                 'tools/lean-inspector-reg', 'build', MODULE + ':report', PLAIN_MODULE + ':report',
                 *extra_targets],
@@ -374,6 +376,11 @@ end AuricFibUniversalProduction
             if not success:
                 self.assertIn('needs to be rebuilt', result.stdout + result.stderr)
             return [json.loads(line) for line in activity.read_text().splitlines()]
+
+        def build():
+            build_targets()
+            return build_reports()
+
         self.assertEqual(build(), [])
         try:
             unrelated.write_text('def unrelatedFibWorkProbe : Nat := 1\n')
@@ -405,11 +412,13 @@ end AuricFibUniversalProduction
             self.source.write_bytes(changed_source)
             analyzer = ROOT / 'tools/lean-inspector/LeanInformationAuditRegAnalysis/AuricFib/Main.lean'
             executable = STATE / 'reg/bin/auricFibAnalysis'
+            # Prepare the changed targets while the installed tools match their release.
+            build_targets()
             original_analyzer, stat = analyzer.read_bytes(), analyzer.stat()
             old_executable = publication.digest(executable)
             try:
                 analyzer.write_bytes(original_analyzer + b'\n-- exercise a stale precompiled analyzer\n')
-                failed_work = build(success=False)
+                failed_work = build_reports(success=False)
                 self.assertEqual(publication.digest(executable), old_executable)
                 self.assertFalse(any(row['kind'] == 'fib-analysis-invocations' and row['count']
                                      for row in failed_work))
