@@ -332,15 +332,16 @@ def _reuse(repository, report, output):
         # current inputs and the report contract.
         receipt = read_receipt(report, captured)
         coordinates = publication.coordinates(repository)
-        if canonical and not canonical_source:
-            invalidate_seed_base(repository)
-        # Prepare the output under the writer guard before changing its report.
-        publication.member(output, SUFFIX).unlink(missing_ok=True)
+        same_path = report.resolve() == output.resolve()
+        if same_path:
+            publication.member(output, SUFFIX).unlink(missing_ok=True)
         publication.publish(report, output, coordinates, repository, mode='cached',
                             expected_hashes=receipt['bundle'], validate=False)
-        # Rebind source evidence after publication; a same-path republish may
-        # only change publication mode, not the report or its material bytes.
-        if Path(report).resolve() != Path(output).resolve():
+        if not same_path:
+            # A rejected source must leave the previous destination generation intact.
+            if canonical:
+                invalidate_seed_base(repository)
+            publication.member(output, SUFFIX).unlink(missing_ok=True)
             if receipt != read_receipt(report, captured):
                 raise ValueError('reuse receipt changed during publication')
         if capture(repository) != captured:

@@ -359,6 +359,19 @@ class ReuseTests(unittest.TestCase):
         self.assertIsNone(api.read_seed_base(self.root))
         self.assertFalse(api.seed_format(self.report)['compatible'])
 
+    def test_rejecting_an_incoming_bundle_preserves_the_destination_receipt(self):
+        api = self.dev_repository()
+        destination = self.report
+        self.assertFalse(api.reuse(self.root, destination, self.output)['needs_lake'])
+        old_receipt = publication.member(destination, api.SUFFIX).read_bytes()
+        old_base = api.read_seed_base(self.root)
+        with patch.object(publication, 'validate_bundle', side_effect=ValueError('unsupported module fields')):
+            result = api.reuse(self.root, self.output, destination)
+        self.assertTrue(result['needs_lake'])
+        self.assertEqual(publication.member(destination, api.SUFFIX).read_bytes(), old_receipt)
+        self.assertEqual(api.read_seed_base(self.root), old_base)
+        self.assertTrue(api.seed_format(destination)['compatible'])
+
     def test_custom_source_reuse_does_not_inherit_canonical_producer(self):
         api = self.dev_repository()
         canonical, base = self.report, api.read_seed_base(self.root)
