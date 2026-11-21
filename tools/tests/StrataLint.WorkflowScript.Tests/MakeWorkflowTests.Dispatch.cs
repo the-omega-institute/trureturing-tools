@@ -63,7 +63,7 @@ public sealed partial class MakeWorkflowTests
         // make test 是薄委托;数学门链条的唯一真源在 math-gate.sh 里,断言脚本本体。
         var mathematicalTestRecipe = Recipe(makefile, "test");
         Assert.DoesNotContain("dotnet test", mathematicalTestRecipe, StringComparison.Ordinal);
-        Assert.Contains("make lean-report", mathematicalTestRecipe, StringComparison.Ordinal);
+        Assert.Contains("make check-lean-report", mathematicalTestRecipe, StringComparison.Ordinal);
         Assert.Equal(
             $"\t@/bin/bash {LeanCacheEnsureScriptPath}",
             Recipe(makefile, "lean-cache-ensure"));
@@ -105,7 +105,7 @@ public sealed partial class MakeWorkflowTests
             inspector.Split('\n'),
             static line => line.StartsWith("run_phase report ", StringComparison.Ordinal));
         Assert.Equal(
-            $"run_phase report \"$REPOSITORY/{LeanCacheRunScriptPath}\" ${{REPORT_COMMAND[@]+\"${{REPORT_COMMAND[@]}}\"}} \"$LAKE\" --log-level=error \"${{workspace[@]}}\" build :report \\",
+            $"run_phase report \"$REPOSITORY/{LeanCacheRunScriptPath}\" --prebuilt ${{REPORT_COMMAND[@]+\"${{REPORT_COMMAND[@]}}\"}} \"$LAKE\" --log-level=error \"${{workspace[@]}}\" build :report",
             reportPhase);
 
         int EnsureDependency(string target)
@@ -168,7 +168,12 @@ public sealed partial class MakeWorkflowTests
         Assert.Contains(PrOpenScriptPath, Recipe(makefile, "pr-open"), StringComparison.Ordinal);
         Assert.Contains("--head \"$(HEAD)\"", Recipe(makefile, "pr-open"), StringComparison.Ordinal);
         Assert.DoesNotContain("pr-update", makefile, StringComparison.Ordinal);
-        foreach (var removed in ToolsTargets.Except(["help", "test", "filemap-conform"], StringComparer.Ordinal))
+        var forwarded = new[] { "filemap-conform", "compiled-judge-test", "compiled-fib-test" };
+        foreach (var target in forwarded)
+        {
+            Assert.Contains($"$(MAKE) -C tools {target}", Recipe(makefile, target), StringComparison.Ordinal);
+        }
+        foreach (var removed in ToolsTargets.Except(forwarded.Concat(["help", "test"]), StringComparer.Ordinal))
         {
             Assert.DoesNotContain($"\n{removed}:", "\n" + makefile, StringComparison.Ordinal);
         }
@@ -450,9 +455,9 @@ public sealed partial class MakeWorkflowTests
 
         Assert.Equal(0, rootResult.ExitCode);
         var rootOutput = System.Text.Encoding.UTF8.GetString(rootResult.StandardOutput);
-        Assert.Contains("make test FULL_BUILD=1  Run lean-report and check-current", rootOutput, StringComparison.Ordinal);
+        Assert.Contains("make test FULL_BUILD=1  Run check-lean-report and check-current", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make gate [BASE=origin/dev] [PURPOSE=pull-request|push]  Run all applicable shared CI checks", rootOutput, StringComparison.Ordinal);
-        Assert.Contains("make lean-report FULL_BUILD=1 [REBUILD_REPORT_CACHE=1 | REGENERATE_REPORT_ARTIFACTS=1]  Full report; regenerate explicitly discards generated reports while retaining compiled Lean", rootOutput, StringComparison.Ordinal);
+        Assert.Contains("make lean-report FULL_BUILD=1 [REBUILD_REPORT_CACHE=1 | REGENERATE_REPORT_ARTIFACTS=1]  Inspect prebuilt Lean artifacts; regenerate discards generated reports", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make lean-report-scoped LEAN_TARGETS=", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make dag DIGEST=HEX64 [PREFIX=scribe-resources]  Fetch a published full Scribe pack and render the DAG", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make filemap  Render FILEMAP on demand from Meta/FILEMAP.toml", rootOutput, StringComparison.Ordinal);

@@ -38,34 +38,26 @@ class CheckTests(unittest.TestCase):
     def test_hosted_setup_uses_actual_targets_programs_and_selected_lean_suites(self):
         data, _ = contract.load(ROOT)
         plan = contract.selection(data, ["README.md"], "push")
-        for targets, programs, suite, needs in (([], [], None, False), (["D5.A"], [], None, True),
-                ([], ["Audit"], None, True), ([], [], "source-evidence", True),
-                ([], [], "compiled-audit", True)):
-            with self.subTest(targets=targets, programs=programs, suite=suite), tempfile.TemporaryDirectory() as temp:
+        for targets, programs, needs in (([], [], False), (["D5.A"], [], True), ([], ["Audit"], True)):
+            with self.subTest(targets=targets, programs=programs), tempfile.TemporaryDirectory() as temp:
                 scope = Path(temp) / "plan"
                 output = Path(temp) / "output"
                 scope.write_text(json.dumps({"targets": targets, "programs": programs}))
-                chosen = dict(plan)
-                if suite:
-                    chosen[suite] = True
                 with patch.object(checks, "execute", return_value=0), patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
-                    self.assertEqual(checks.current_phase("lean-plan", data, chosen, None, Path("changed"), scope), 0)
+                    self.assertEqual(checks.current_phase("lean-plan", data, plan, None, Path("changed"), scope), 0)
                 self.assertEqual(output.read_text().splitlines(), [
                     "builds_lean=" + str(bool(targets or programs)).lower(), "needs_lean=" + str(needs).lower()])
 
-    def test_failed_plan_blocks_setup_but_failed_ancillary_setup_still_runs_source_admission(self):
+    def test_failed_plan_blocks_report_and_empty_scope_skips_the_toolchain(self):
         data, _ = contract.load(ROOT)
-        plan = contract.selection(data, ["tools/scripts/compiled-judge-test.sh"], "push")
-        self.assertTrue(plan["compiled-audit"])
-        for plan_code, prepared, runs_current in ((2, False, False), (0, True, True)):
-            with self.subTest(plan_code=plan_code), patch.object(checks, "prepare_current", return_value=0), \
-                    patch.object(checks, "prepare_lean_scope", return_value=(plan_code, False)), \
-                    patch.object(checks, "prepare_local_lean", return_value=2) as setup, \
-                    patch.object(checks, "current_phase", return_value=0) as phase:
+        plan = contract.selection(data, ["Meta/domains.yaml"], "push")
+        for planning in (0, 2):
+            with self.subTest(planning=planning), patch.object(checks, "prepare_lean_scope", return_value=(planning, False)), \
+                    patch.object(checks, "prepare_local_lean") as setup, patch.object(checks, "current_phase", return_value=0) as phase:
                 self.assertEqual(checks.current_run(data, plan, "a" * 40, Path("changed"),
-                    checks.Prerequisite(0, "accepted", True)), 2)
-                self.assertEqual(setup.called, prepared)
-                self.assertEqual([call.args[0] for call in phase.call_args_list], ["pr-lean"] if runs_current else [])
+                    checks.Prerequisite(0, "accepted")), planning)
+                setup.assert_not_called()
+                self.assertEqual([call.args[0] for call in phase.call_args_list], ["pr-lean"] if planning == 0 else [])
 
     def test_hosted_scope_rejects_missing_manifest_before_launch(self):
         data, revision = contract.load(ROOT)
@@ -98,17 +90,28 @@ class CheckTests(unittest.TestCase):
 
     def test_admission_reuses_all_batches_and_runs_without_reports_for_source_changes(self):
         import ci_pr_lean
-        cases = [([], 0, 3, 0), (["D5.A", "D5.B"], 1, 0, 1), (["D5.A"], 0, 2, 2)]
-        for targets, current_exit, delta_exit, expected in cases:
-            with self.subTest(targets=targets), tempfile.TemporaryDirectory() as temp:
+        cases = [([], [], "push", "", "", 0, 3, 0),
+                 ([], ["LeanInformationAudit.Program"], "pull_request", "", "/judge/producer.dll", 0, 0, 0),
+                 (["D5.A", "D5.B"], ["LeanInformationAudit.Program"], "push", "", "/judge/producer.dll", 1, 0, 1),
+                 (["D5.A"], [], "pull_request", "", "", 0, 2, 2),
+                 (["D5.A"], [], "pull_request", "/caller/producer.dll", "", 0, 0, 0),
+                 (["D5.A"], [], "", "", "", 0, 0, 0)]
+        for targets, programs, event, supplied, detected, current_exit, delta_exit, expected in cases:
+            with self.subTest(targets=targets, programs=programs, event=event, supplied=supplied), tempfile.TemporaryDirectory() as temp:
                 changed = Path(temp) / "changed"
                 contract.write_paths(changed, ["some-file"])
-                built, consumers = [], []
+                built, consumers, commands = [], [], []
                 def run(command, **options):
-                    if "lean-inputs" in command:
-                        plan = {"programs": [], "targets": targets, "paths": [], "definitions": {}}
-                        return subprocess.CompletedProcess(command, 0, json.dumps(plan))
+                    commands.append(command)
+                    if command[1] == "tools/scripts/workflow/judge-lean-producer.sh":
+                        self.assertEqual(command, ["bash", "tools/scripts/workflow/judge-lean-producer.sh",
+                                                   "tools/StrataLint.Cli/bin/Release/net10.0"])
+                        return subprocess.CompletedProcess(command, 0, detected + "\n")
+                    if command[0] == "make" or command[1] == "tools/scripts/worktree/lean-cache-run.sh":
+                        self.assertTrue(options["check"])
+                        self.assertEqual(options["env"]["STRATALINT_LEAN_PRODUCER_DLL"], supplied or detected)
                     if command[:2] == ["make", "lean-report-scoped"]:
+                        self.assertEqual(commands[-2], ["make", "lean-report-prepare", command[2]])
                         report = Path(options["env"]["LEAN_REPORT"])
                         self.assertNotIn(report, built)
                         report.touch()
@@ -123,13 +126,34 @@ class CheckTests(unittest.TestCase):
                         return subprocess.CompletedProcess(command, current_exit if command[2] == "check-current" else delta_exit)
                     return subprocess.CompletedProcess(command, 0)
                 scope_file = Path(temp) / "scope"
-                scope_file.write_text(json.dumps({"programs": [], "targets": targets, "paths": [], "definitions": {}}))
+                scope_file.write_text(json.dumps({"programs": programs, "targets": targets, "paths": [], "definitions": {}}))
                 with patch.object(ci_pr_lean, "plan_scope", side_effect=AssertionError("scope planned twice")), \
+                        patch.dict(os.environ, GITHUB_EVENT_NAME=event, STRATALINT_LEAN_PRODUCER_DLL=supplied), \
                         patch.object(ci_pr_lean.subprocess, "run", side_effect=run), \
                         patch.object(ci_pr_lean, "report_batches", return_value=[([target], []) for target in targets]):
                     self.assertEqual(ci_pr_lean.check(changed, "a" * 40, scope_file), expected)
                 self.assertEqual(consumers, ["check-current", "check-delta"])
                 self.assertEqual(len(built), len(targets))
+                probes = [cmd for cmd in commands if cmd[1] == "tools/scripts/workflow/judge-lean-producer.sh"]
+                self.assertEqual(len(probes), int(bool((targets or programs) and event and not supplied)))
+                self.assertEqual([cmd[6:] for cmd in commands if cmd[1] == "tools/scripts/worktree/lean-cache-run.sh"],
+                                 [["+" + program for program in programs]] if programs else [])
+                self.assertEqual([cmd[2] for cmd in commands if cmd[:2] == ["make", "lean-report-prepare"]],
+                                 ["LEAN_TARGETS=" + target for target in targets])
+
+    def test_failed_report_preparation_stops_analysis_and_admission(self):
+        import ci_pr_lean
+        with tempfile.TemporaryDirectory() as temp:
+            changed, scope_file = Path(temp) / "changed", Path(temp) / "scope"
+            contract.write_paths(changed, ["D5/A.lean"])
+            scope_file.write_text(json.dumps({"programs": [], "targets": ["D5.A"], "paths": [], "definitions": {}}))
+            command = ["make", "lean-report-prepare", "LEAN_TARGETS=D5.A"]
+            with patch.dict(os.environ, STRATALINT_LEAN_PRODUCER_DLL="/caller/producer.dll"), \
+                    patch.object(ci_pr_lean.subprocess, "run", side_effect=subprocess.CalledProcessError(7, command)) as run:
+                with self.assertRaises(subprocess.CalledProcessError) as error:
+                    ci_pr_lean.check(changed, "a" * 40, scope_file)
+                self.assertEqual(error.exception.returncode, 7)
+                self.assertEqual([call.args[0] for call in run.call_args_list], [command])
 
     def test_real_process_exits_are_preserved(self):
         for raw in (0, 1, 2, 3, 124, 143):
@@ -166,42 +190,15 @@ class CheckTests(unittest.TestCase):
         self.assertIn('"status":"blocked"', output.getvalue())
 
     @patch.object(checks, "prepare_lean_scope", return_value=(0, True))
-    def test_independent_validators_execute_after_a_semantic_rejection(self, _):
-        data, _ = contract.load(ROOT)
-        plan = contract.selection(data, ["D5/changed.lean"], "push")
-        called = []
-        def phase(name, *_):
-            called.append(name)
-            return 1 if name == "source-evidence" else 0
-        with patch.object(checks, "execute", return_value=0), patch.object(checks, "prepare_local_lean", return_value=0), patch.object(checks, "prepare_unit", return_value=0), \
-                patch.object(checks, "current_phase", side_effect=phase):
-            self.assertEqual(checks.current_run(data, plan, "a" * 40, Path("changed")), 1)
-        self.assertIn("source-evidence", called)
-        self.assertIn("compiled-audit", called)
-
-    @patch.object(checks, "prepare_lean_scope", return_value=(0, True))
     def test_failed_dependency_preparation_blocks_actual_execution(self, _):
         data, _ = contract.load(ROOT)
         plan = contract.selection(data, ["D5/changed.lean"], "push")
         with patch.object(checks, "prepare_judge", return_value=2), \
-                patch.object(checks, "prepare_current", return_value=2), patch.object(checks, "prepare_local_lean", return_value=2), \
+                patch.object(checks, "prepare_local_lean", return_value=2), \
                 patch.object(checks, "current_phase") as phase, contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(checks.current_run(data, plan, "a" * 40, Path("changed")), 2)
         phase.assert_not_called()
         self.assertIn('"check":"pr-lean","status":"blocked"', output.getvalue())
-
-    @patch.object(checks, "prepare_lean_scope", return_value=(0, True))
-    def test_selected_evidence_restore_failure_keeps_other_ready_validators_reachable(self, _):
-        data, _ = contract.load(ROOT)
-        plan = contract.selection(data, ["D5/changed.lean"], "push")
-        called = []
-        with patch.object(checks, "prepare_current", return_value=2), \
-                patch.object(checks, "prepare_local_lean", return_value=0), \
-                patch.object(checks, "current_phase", side_effect=lambda phase, *_: called.append(phase) or 0):
-            code = checks.current_run(data, plan, "a" * 40, Path("changed"), checks.Prerequisite(0, "accepted", True))
-        self.assertEqual(2, code)
-        self.assertNotIn("source-evidence", called)
-        self.assertEqual(called, ["pr-lean", "compiled-audit"])
 
     def test_source_command_uses_original_current_delta_for_mixed_changes(self):
         data, _ = contract.load(ROOT)
@@ -243,8 +240,6 @@ class CheckTests(unittest.TestCase):
                 self.assertTrue(plan["report"])
                 self.assertTrue(plan["delta"])
                 self.assertTrue(plan["hits"]["filemap"])
-                if included.endswith(".lean"):
-                    self.assertTrue(plan["compiled-audit"])
 
     def test_source_rejection_blocks_every_guarded_launch_in_executable_local_adapter(self):
         result, calls, plan = self.local_spies(source=1)
@@ -274,8 +269,9 @@ class CheckTests(unittest.TestCase):
                     if line.startswith("CI_CHECK "))}
                 self.assertTrue(all(records[name] == "success" for name, hit in plan["hits"].items()
                                     if hit and name != "current"))
-                for phase in ("source-evidence", "compiled-audit"):
-                    self.assertEqual(records[phase], "blocked" if scoped else "success")
+                self.assertEqual(records["pr-lean"], "failure" if scoped else "success")
+                self.assertNotIn("compiled-audit", records)
+                self.assertNotIn("source-evidence", records)
                 self.assertIn(["pr-lean", "D5/changed.lean"], calls)
 
     def test_bootstrap_and_source_input_failures_preserve_independent_fallback(self):
@@ -286,8 +282,7 @@ class CheckTests(unittest.TestCase):
                 self.assertIn(["pr-lean", "D5/changed.lean"], calls)
                 if judge:
                     self.assertFalse(any("check-source" in call for call in calls))
-                    self.assertIn('"check":"compiled-audit","status":"blocked"', result.stdout)
-                self.assertTrue(any(call[:4] == ["make", "-C", "tools", "test"] for call in calls))
+                self.assertIn(["make", "filemap-conform"], calls)
 
     def local_spies(self, source=0, scoped=0, judge=0, paths=("D5/changed.lean",), purpose="pull-request",
                     report_paths=None):
@@ -312,6 +307,7 @@ class CheckTests(unittest.TestCase):
             data, _ = contract.load(ROOT)
             if report_paths is not None:
                 data["current"]["report_paths"] = report_paths
+            (root / contract.CONTRACT).parent.mkdir(exist_ok=True)
             (root / contract.CONTRACT).write_text(json.dumps(data))
             for unit in data["units"].values():
                 for lock in unit["cache-dependency-path"].splitlines():
@@ -366,17 +362,11 @@ class CheckTests(unittest.TestCase):
             plan = json.loads(next(line.removeprefix("CI_LOCAL ") for line in result.stdout.splitlines() if line.startswith("CI_LOCAL ")))
             return result, calls, plan
 
-    def test_commands_keep_actual_canonical_test_evidence_and_complementary_filters(self):
+    def test_consumer_unit_executes_its_registered_filemap_check(self):
         data, _ = contract.load(ROOT)
         with patch.object(checks, "execute", return_value=2) as execute:
-            code = checks.unit_run("tests-lean", data["units"]["tests-lean"])
-            self.assertEqual(code, 2)
-            self.assertEqual(execute.call_args.args[1][:4], ["make", "-C", "tools", "test"])
-            checks.unit_run("tests-declared-template", data["units"]["tests-declared-template"])
-            self.assertIn('TEST_FILTER="FullyQualifiedName!~FourierBridgeSourceEvidenceTests"', execute.call_args.args[1][-1])
-            plan = contract.selection(data, ["tools/StrataLint.Lean/Changed.cs"], "pull-request")
-            checks.current_phase("source-evidence", data, plan, "a" * 40, Path("changed"))
-            self.assertIn("TEST_FILTER=FullyQualifiedName~FourierBridgeSourceEvidenceTests", execute.call_args.args[1])
+            self.assertEqual(checks.unit_run("filemap", data["units"]["filemap"]), 2)
+            self.assertEqual(execute.call_args.args[1], ["bash", "-e", "-o", "pipefail", "-c", "make filemap-conform"])
 
 
 class ScopedReportTests(unittest.TestCase):

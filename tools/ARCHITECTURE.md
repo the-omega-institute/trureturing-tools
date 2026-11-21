@@ -4,36 +4,20 @@ Production harness projects, scripts, manifests, and architecture material live 
 `tools/`; all harness test and compile-fail projects live under `tools/tests/`.
 `Meta/` is the data side of this boundary and contains no harness program directory.
 
-CI is one workflow, `ci-current.yml`, which consumes the sole CI_UNITS selection and execution contract in
-`Meta/ci-units.json`. Its `detect` job fetches commits and trees only, verifies the
-event candidate through `ci-entry.sh` (the checked-out `GITHUB_SHA`, the complete
-event range and the pull-request merge parents), lists the changed paths, and
-`ci_detect.py` decides from the `CI_UNITS` sections in that contract which
-units the change hits. A section is named by its job id; `[*]` patterns apply to
-every unit; `*` also matches `/`, `?` matches one character and `!` excludes. Detection
-validates and matches the complete changed-path list without a path-count
-cutoff. The patterns are written, not derived from
-project registrations, FILEMAP or call graphs.
+The tools repository builds the CLI and runs its unit tests, integration fixtures,
+compiler rejection checks, and selftests before it packages a release. Tests that
+need a consumer checkout install the candidate archive in a pinned trureturing fixture.
 
-Each test project, selftest, compile-fail proof, FILEMAP and current is one job
-that runs only when hit. Selected current first runs its narrow source prerequisite
-in the native source job; completed source rejection blocks the selected fan-out.
-When current is unselected this phase is skipped. Independent selected jobs then
-run in parallel; steps within a job may be serial. `ci-unit.yml` supplies the common checkout, candidate verification, .NET
-and optional Lean cache steps; its unit id selects the declaration consumed by
-`ci_checks.py`, which runs the canonical project/test-evidence or command implementation. The current job produces one Lean report and
-runs `check-current`, Scribe, and (for pull requests) `check-delta` against the
-first parent as data. The one required check is the `required` job:
-`ci_required.py` is green only when detection succeeded, the unit sections and the
-jobs it needs correspond one to one, every hit unit succeeded with its matching execution
-identity and every missed unit was skipped. Each hosted entry removes remote state after the fixed candidate and any
-required base data are available, and no job executes protected-base code; the
-actual required check names and deployment state come from the installed ruleset
-and real Actions runs.
+The consumer owns its ordinary `ci-current.yml` workflow, its cache and Scribe
+publication workflows, and the selection contract in `Meta/ci-units.json`.
+Its `detect` job verifies the event commit and change range and selects FILEMAP
+and current checks. The source prerequisite checks the candidate before current
+runs its scoped Lean and Scribe checks. The `required` job checks each selected
+result and the execution identity emitted by its job.
 
 Local `make gate BASE=<commit> [PURPOSE=pull-request|push]` and the local harness
 entry consume the same contract and check implementation, including current subchecks,
-complementary test filters, prerequisites and canonical TRX verification. Local changes
+FILEMAP and the source prerequisite. Local changes
 include the staged, unstaged and untracked candidate, deletions and both rename paths.
 An invalid explicit base fails; an empty diff is distinct from unavailable hosted base.
 `make gate-plan` reports selection, fixed base, actual candidate tree identity, contract
@@ -61,8 +45,7 @@ repository source, glob, namespace and topology admission. Solution runs retain
 the registered owned-test assembly floor, waived only for filtered solution runs. `dotnet-test.sh` and the compile-proof make target
 build and invoke this executable. CLI forwards the same commands through a project
 reference. TRX validation requires successful executed tests, the selected owner
-assemblies, and no infrastructure hang guard skips. Its owned tests run as their
-own CI unit.
+assemblies, and no infrastructure hang guard skips. The tools repository runs its owned tests.
 
 The report format identifier governs strict artifact acceptance. Native Lake facets own report reuse
 and require selected Lean/audit targets and the current inspector build. Compiler traces, utility

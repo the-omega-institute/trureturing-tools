@@ -44,8 +44,13 @@ internal static partial class JudgeSurfaceRevisionScanner
     };
 
     internal static bool IsJudgeSurfacePath(string path) =>
-        path.StartsWith(".github/", StringComparison.Ordinal)
+        IsActionsPath(path)
         || path.StartsWith("tools/scripts/workflow/", StringComparison.Ordinal);
+
+    private static bool IsActionsPath(string path) =>
+        path.StartsWith(".github/", StringComparison.Ordinal)
+        || path.StartsWith("tools/ci/workflows/", StringComparison.Ordinal)
+        || path.StartsWith("tools/ci/actions/", StringComparison.Ordinal);
 
     internal static ImmutableArray<string> Scan(string path, string text)
     {
@@ -55,7 +60,7 @@ internal static partial class JudgeSurfaceRevisionScanner
         // scalar is a checkout input, wherever the YAML structure puts them (review rounds 5–11:
         // a line-oriented reading of YAML missed folding, tags, flow mappings and multi-line
         // scalars one form per round). Everything else on the judge surface is shell, line by line.
-        if (path.StartsWith(".github/", StringComparison.Ordinal)
+        if (IsActionsPath(path)
             && (path.EndsWith(".yml", StringComparison.Ordinal) || path.EndsWith(".yaml", StringComparison.Ordinal)))
         {
             ScanYaml(text, messages);

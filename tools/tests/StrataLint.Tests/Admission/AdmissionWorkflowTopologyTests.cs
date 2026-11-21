@@ -18,6 +18,35 @@ public sealed class AdmissionWorkflowTopologyTests
     }
 
     [Theory]
+    [InlineData(true, "workflow_call", "check-delta", true)]
+    [InlineData(false, "workflow_call", "check-delta", false)]
+    [InlineData(true, "push", "check-delta", false)]
+    [InlineData(true, "workflow_call", "check-current", false)]
+    public void ReleasedGateRequiresTheLockedReusableWorkflowAndItsDeltaStep(
+        bool matches, string trigger, string command, bool expected)
+    {
+        var workflowSha = new string('a', 40);
+        var caller = Encoding.UTF8.GetBytes($"""
+            on:
+              pull_request:
+                branches: [dev]
+            jobs:
+              checks:
+                uses: the-omega-institute/trureturing-tools/.github/workflows/ci-current.yml@{workflowSha}
+            """);
+        var pin = $$"""{"workflow_sha":"{{(matches ? workflowSha : new string('b', 40))}}"}""";
+        var definition = $"""
+            on: [{trigger}]
+            jobs:
+              current:
+                runs-on: fixture
+                steps:
+                  - run: dotnet judge.dll {command}
+            """;
+        Assert.Equal(expected, AdmissionWorkflowTopology.HasRequiredBaseGate(caller, "dev", () => (pin, definition)));
+    }
+
+    [Theory]
     [InlineData("pull_request_target", "dev", "current", "current", "check-delta")]
     [InlineData("push", "dev", "current", "current", "check-delta")]
     [InlineData("pull_request", "main", "current", "current", "check-delta")]
@@ -66,6 +95,7 @@ public sealed class AdmissionWorkflowTopologyTests
     [Theory]
     [InlineData(".github/workflows/ci-tests-fixture.yml")]
     [InlineData(".github/workflows/ci-current.yml")]
+    [InlineData("tools/ci/workflows/ci-current.yml")]
     [InlineData("tools/scripts/workflow/ci-entry.sh")]
     [InlineData("tools/scripts/worktree/lean_actions.py")]
     [InlineData("tools/scripts/report/lean-report-input.sh")]

@@ -16,7 +16,7 @@ internal static partial class RepositoryRules
         try { materials = RegisteredCheckMaterials.Read(context.Current, "SL-015"); }
         catch (InvalidDataException exception)
         {
-            return [new RuleFinding(RegisteredCheckMaterials.ManifestPath, exception.Message)];
+            return [new RuleFinding(RegisteredCheckMaterials.PathIn(context.Current), exception.Message)];
         }
         foreach (var material in materials)
         {

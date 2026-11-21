@@ -40,6 +40,21 @@ public sealed partial class FileMapPolicyTests
             static finding => finding.Code == "FILEMAP-DIRECTORY-KIND"));
     }
 
+    [Theory]
+    [InlineData("tools/ci/ci-cache-paths.json", "NativeArchivePaths", true, true)]
+    [InlineData("tools/ci/ci-checks.json", "RegisteredCheckMaterials", true, true)]
+    [InlineData("tools/ci/ci-units.json", "CiUnitContract", true, true)]
+    [InlineData("tools/ci/ci-units.json", "CiUnitContract", false, false)]
+    [InlineData("tools/ci/ci-units.json", "SnapshotDecoder", true, false)]
+    [InlineData("tools/ci/other.json", "CiUnitContract", true, false)]
+    public void ReleasedCiRegistryResidenceRequiresItsOwnVerifier(
+        string path, string verifier, bool released, bool accepted)
+    {
+        var manifest = Parse(Entry(path, "data", "none", "reader", verifier));
+        var findings = FileMapPolicy.InspectDirectoryKinds(manifest, [path], isReleaseMember: _ => released);
+        Assert.Equal(!accepted, findings.Any(static finding => finding.Code == "FILEMAP-DATA-RESIDENCE"));
+    }
+
     [Fact]
     public void ExactProtectedResidenceCountIsAccepted()
     {
