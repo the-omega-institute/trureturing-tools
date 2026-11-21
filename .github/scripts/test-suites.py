@@ -13,7 +13,6 @@ STANDALONE = (
     "StrataLint.Configuration.Tests",
     "StrataLint.Engineering.Tests",
     "StrataLint.HeaderScript.Tests",
-    "StrataLint.LeanReportScript.Tests",
     "StrataLint.ReportSupervisor.Tests",
     "StrataLint.ResourceObservation.Tests",
     "StrataLint.Rules.Tests",
