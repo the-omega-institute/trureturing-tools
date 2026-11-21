@@ -499,7 +499,7 @@ def run(args, *rest, **kwargs):
         return original(args, *rest, **kwargs)
     finally:
         # Protected-content queries are instantaneous in this transport-clock fixture.
-        if args[1] != "api" or "/releases/" in args[2]:
+        if args[1] != "api" or args[2] == "graphql" or "/releases/" in args[2]:
             clock += int(os.environ["FAKE_CLOCK_STEP"])
 subprocess.run = run
 ''' + ('os.environ.pop("STRATALINT_LEAN_CACHE_RELEASE_TIMEOUT_SECONDS", None)\n'
