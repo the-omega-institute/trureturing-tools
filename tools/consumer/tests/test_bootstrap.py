@@ -15,7 +15,6 @@ import unittest
 
 
 CONSUMER = Path(os.environ.get("CONSUMER_ROOT", ".")).resolve()
-PROGRAM = Path(__file__).resolve().parents[1]
 BOOTSTRAP = ".github/scripts/install-tools.py"
 
 
@@ -32,8 +31,6 @@ class ReleaseBootstrapTest(unittest.TestCase):
         self.archive = Path(self.temp.name) / "tools.tar.gz"
         entries = {
             "tools/Makefile": b"filemap-conform:\n\t@echo checked\n",
-            "tools/consumer/Makefile": (PROGRAM / "Makefile").read_bytes(),
-            "tools/consumer/install.py": (PROGRAM / "install.py").read_bytes(),
         }
         with tarfile.open(self.archive, "w:gz") as archive:
             for name, content in entries.items():
@@ -71,11 +68,12 @@ class ReleaseBootstrapTest(unittest.TestCase):
     def test_concurrent_install_and_preserved_edits(self):
         with ThreadPoolExecutor(max_workers=2) as pool:
             list(pool.map(lambda _: self.install("--archive", self.archive), range(2)))
-        program = self.root / "tools/consumer/install.py"
-        program.write_text('raise RuntimeError("locally edited")\n')
+        program = self.root / "tools/Makefile"
+        expected = program.read_bytes()
+        program.write_text("# locally edited\n")
         self.install()
-        self.assertEqual(program.read_bytes(), (PROGRAM / "install.py").read_bytes())
-        backups = list(self.cache.parent.glob("previous-*/tools/consumer/install.py"))
+        self.assertEqual(program.read_bytes(), expected)
+        backups = list(self.cache.parent.glob("previous-*/tools/Makefile"))
         self.assertEqual(len(backups), 1)
         self.assertIn("locally edited", backups[0].read_text())
 
@@ -96,3 +94,5 @@ class ReleaseBootstrapTest(unittest.TestCase):
         self.install("--cache-revision", "HEAD", "--cache-from", donor)
         self.assertEqual(hashlib.sha256(self.cache.read_bytes()).hexdigest(), self.sha)
         self.assertFalse((self.root / "tools").exists())
+        self.install()
+        self.assertTrue((self.root / "tools/Makefile").is_file())

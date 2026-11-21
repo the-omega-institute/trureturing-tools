@@ -89,7 +89,7 @@ public sealed partial class FileMapPolicyTests
     public void RegChangesParticipateInCurrentCheckMaterials(string rule, string path, bool report)
     {
         using var json = JsonDocument.Parse(File.ReadAllBytes(
-            Path.Combine(TestRepositoryLayout.FindRoot(), "tools/ci/ci-checks.json")));
+            Path.Combine(TestRepositoryLayout.FindRoot(), "Meta/ci-checks.json")));
         var check = json.RootElement.GetProperty("checks").EnumerateArray()
             .Single(item => item.GetProperty("id").GetString() == rule);
         Assert.Contains(check.GetProperty("materials").EnumerateArray(),

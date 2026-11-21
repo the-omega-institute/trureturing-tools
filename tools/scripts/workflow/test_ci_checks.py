@@ -38,34 +38,26 @@ class CheckTests(unittest.TestCase):
     def test_hosted_setup_uses_actual_targets_programs_and_selected_lean_suites(self):
         data, _ = contract.load(ROOT)
         plan = contract.selection(data, ["README.md"], "push")
-        for targets, programs, suite, needs in (([], [], None, False), (["D5.A"], [], None, True),
-                ([], ["Audit"], None, True), ([], [], "source-evidence", True),
-                ([], [], "compiled-audit", True)):
-            with self.subTest(targets=targets, programs=programs, suite=suite), tempfile.TemporaryDirectory() as temp:
+        for targets, programs, needs in (([], [], False), (["D5.A"], [], True), ([], ["Audit"], True)):
+            with self.subTest(targets=targets, programs=programs), tempfile.TemporaryDirectory() as temp:
                 scope = Path(temp) / "plan"
                 output = Path(temp) / "output"
                 scope.write_text(json.dumps({"targets": targets, "programs": programs}))
-                chosen = dict(plan)
-                if suite:
-                    chosen[suite] = True
                 with patch.object(checks, "execute", return_value=0), patch.dict(os.environ, GITHUB_OUTPUT=str(output)):
-                    self.assertEqual(checks.current_phase("lean-plan", data, chosen, None, Path("changed"), scope), 0)
+                    self.assertEqual(checks.current_phase("lean-plan", data, plan, None, Path("changed"), scope), 0)
                 self.assertEqual(output.read_text().splitlines(), [
                     "builds_lean=" + str(bool(targets or programs)).lower(), "needs_lean=" + str(needs).lower()])
 
-    def test_failed_plan_blocks_setup_but_failed_ancillary_setup_still_runs_source_admission(self):
+    def test_failed_plan_blocks_report_and_empty_scope_skips_the_toolchain(self):
         data, _ = contract.load(ROOT)
-        plan = contract.selection(data, ["tools/scripts/compiled-judge-test.sh"], "push")
-        self.assertTrue(plan["compiled-audit"])
-        for plan_code, prepared, runs_current in ((2, False, False), (0, True, True)):
-            with self.subTest(plan_code=plan_code), patch.object(checks, "prepare_current", return_value=0), \
-                    patch.object(checks, "prepare_lean_scope", return_value=(plan_code, False)), \
-                    patch.object(checks, "prepare_local_lean", return_value=2) as setup, \
-                    patch.object(checks, "current_phase", return_value=0) as phase:
+        plan = contract.selection(data, ["Meta/domains.yaml"], "push")
+        for planning in (0, 2):
+            with self.subTest(planning=planning), patch.object(checks, "prepare_lean_scope", return_value=(planning, False)), \
+                    patch.object(checks, "prepare_local_lean") as setup, patch.object(checks, "current_phase", return_value=0) as phase:
                 self.assertEqual(checks.current_run(data, plan, "a" * 40, Path("changed"),
-                    checks.Prerequisite(0, "accepted", True)), 2)
-                self.assertEqual(setup.called, prepared)
-                self.assertEqual([call.args[0] for call in phase.call_args_list], ["pr-lean"] if runs_current else [])
+                    checks.Prerequisite(0, "accepted")), planning)
+                setup.assert_not_called()
+                self.assertEqual([call.args[0] for call in phase.call_args_list], ["pr-lean"] if planning == 0 else [])
 
     def test_hosted_scope_rejects_missing_manifest_before_launch(self):
         data, revision = contract.load(ROOT)
@@ -198,42 +190,15 @@ class CheckTests(unittest.TestCase):
         self.assertIn('"status":"blocked"', output.getvalue())
 
     @patch.object(checks, "prepare_lean_scope", return_value=(0, True))
-    def test_independent_validators_execute_after_a_semantic_rejection(self, _):
-        data, _ = contract.load(ROOT)
-        plan = contract.selection(data, ["D5/changed.lean"], "push")
-        called = []
-        def phase(name, *_):
-            called.append(name)
-            return 1 if name == "source-evidence" else 0
-        with patch.object(checks, "execute", return_value=0), patch.object(checks, "prepare_local_lean", return_value=0), patch.object(checks, "prepare_unit", return_value=0), \
-                patch.object(checks, "current_phase", side_effect=phase):
-            self.assertEqual(checks.current_run(data, plan, "a" * 40, Path("changed")), 1)
-        self.assertIn("source-evidence", called)
-        self.assertIn("compiled-audit", called)
-
-    @patch.object(checks, "prepare_lean_scope", return_value=(0, True))
     def test_failed_dependency_preparation_blocks_actual_execution(self, _):
         data, _ = contract.load(ROOT)
         plan = contract.selection(data, ["D5/changed.lean"], "push")
         with patch.object(checks, "prepare_judge", return_value=2), \
-                patch.object(checks, "prepare_current", return_value=2), patch.object(checks, "prepare_local_lean", return_value=2), \
+                patch.object(checks, "prepare_local_lean", return_value=2), \
                 patch.object(checks, "current_phase") as phase, contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(checks.current_run(data, plan, "a" * 40, Path("changed")), 2)
         phase.assert_not_called()
         self.assertIn('"check":"pr-lean","status":"blocked"', output.getvalue())
-
-    @patch.object(checks, "prepare_lean_scope", return_value=(0, True))
-    def test_selected_evidence_restore_failure_keeps_other_ready_validators_reachable(self, _):
-        data, _ = contract.load(ROOT)
-        plan = contract.selection(data, ["D5/changed.lean"], "push")
-        called = []
-        with patch.object(checks, "prepare_current", return_value=2), \
-                patch.object(checks, "prepare_local_lean", return_value=0), \
-                patch.object(checks, "current_phase", side_effect=lambda phase, *_: called.append(phase) or 0):
-            code = checks.current_run(data, plan, "a" * 40, Path("changed"), checks.Prerequisite(0, "accepted", True))
-        self.assertEqual(2, code)
-        self.assertNotIn("source-evidence", called)
-        self.assertEqual(called, ["pr-lean", "compiled-audit"])
 
     def test_source_command_uses_original_current_delta_for_mixed_changes(self):
         data, _ = contract.load(ROOT)
@@ -275,8 +240,6 @@ class CheckTests(unittest.TestCase):
                 self.assertTrue(plan["report"])
                 self.assertTrue(plan["delta"])
                 self.assertTrue(plan["hits"]["filemap"])
-                if included.endswith(".lean"):
-                    self.assertTrue(plan["compiled-audit"])
 
     def test_source_rejection_blocks_every_guarded_launch_in_executable_local_adapter(self):
         result, calls, plan = self.local_spies(source=1)
@@ -306,8 +269,9 @@ class CheckTests(unittest.TestCase):
                     if line.startswith("CI_CHECK "))}
                 self.assertTrue(all(records[name] == "success" for name, hit in plan["hits"].items()
                                     if hit and name != "current"))
-                for phase in ("source-evidence", "compiled-audit"):
-                    self.assertEqual(records[phase], "blocked" if scoped else "success")
+                self.assertEqual(records["pr-lean"], "failure" if scoped else "success")
+                self.assertNotIn("compiled-audit", records)
+                self.assertNotIn("source-evidence", records)
                 self.assertIn(["pr-lean", "D5/changed.lean"], calls)
 
     def test_bootstrap_and_source_input_failures_preserve_independent_fallback(self):
@@ -318,8 +282,7 @@ class CheckTests(unittest.TestCase):
                 self.assertIn(["pr-lean", "D5/changed.lean"], calls)
                 if judge:
                     self.assertFalse(any("check-source" in call for call in calls))
-                    self.assertIn('"check":"compiled-audit","status":"blocked"', result.stdout)
-                self.assertTrue(any(call[:4] == ["make", "-C", "tools", "test"] for call in calls))
+                self.assertIn(["make", "filemap-conform"], calls)
 
     def local_spies(self, source=0, scoped=0, judge=0, paths=("D5/changed.lean",), purpose="pull-request",
                     report_paths=None):
@@ -399,17 +362,11 @@ class CheckTests(unittest.TestCase):
             plan = json.loads(next(line.removeprefix("CI_LOCAL ") for line in result.stdout.splitlines() if line.startswith("CI_LOCAL ")))
             return result, calls, plan
 
-    def test_commands_keep_actual_canonical_test_evidence_and_complementary_filters(self):
+    def test_consumer_unit_executes_its_registered_filemap_check(self):
         data, _ = contract.load(ROOT)
         with patch.object(checks, "execute", return_value=2) as execute:
-            code = checks.unit_run("tests-lean", data["units"]["tests-lean"])
-            self.assertEqual(code, 2)
-            self.assertEqual(execute.call_args.args[1][:4], ["make", "-C", "tools", "test"])
-            checks.unit_run("tests-declared-template", data["units"]["tests-declared-template"])
-            self.assertIn('TEST_FILTER="FullyQualifiedName!~FourierBridgeSourceEvidenceTests"', execute.call_args.args[1][-1])
-            plan = contract.selection(data, ["tools/StrataLint.Lean/Changed.cs"], "pull-request")
-            checks.current_phase("source-evidence", data, plan, "a" * 40, Path("changed"))
-            self.assertIn("TEST_FILTER=FullyQualifiedName~FourierBridgeSourceEvidenceTests", execute.call_args.args[1])
+            self.assertEqual(checks.unit_run("filemap", data["units"]["filemap"]), 2)
+            self.assertEqual(execute.call_args.args[1], ["bash", "-e", "-o", "pipefail", "-c", "make filemap-conform"])
 
 
 class ScopedReportTests(unittest.TestCase):

@@ -37,31 +37,29 @@ def standalone():
 
 
 def contract(shard, shard_count):
-    sys.path.insert(0, str(Path("tools/scripts/workflow").resolve()))
-    from ci_contract import load
-    units = load(Path.cwd())[0]["units"]
-    # The complementary Fourier source evidence requires the actual downstream Lean report.
-    registered = {u["project"] for u in units.values() if u["project"]}
-    for unit in units.values():
-        for arg in unit["command"].split():
-            if arg.startswith("TEST_PROJECT="):
-                registered.add(arg.removeprefix("TEST_PROJECT="))
-    discovered = {str(p) for p in Path("tools/tests").glob("*/*.csproj")
-                  if ET.parse(p).findtext(".//IsTestProject") == "true"}
-    additional = sorted(project for project in discovered - registered
-                        if Path(project).stem not in STANDALONE)
-    for project in additional[shard::shard_count]:
-        check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly", project)
-    fixture = [name for name, unit in sorted(units.items()) if name != "tests-integration-mirror"
-               and Path(unit["project"]).stem not in STANDALONE]
-    selected = fixture[shard::shard_count]
-    if not selected and not additional[shard::shard_count]:
+    projects = sorted(p for p in Path("tools/tests").glob("*/*.csproj")
+                      if p.stem not in STANDALONE and ET.parse(p).findtext(".//IsTestProject") == "true")
+    selected = projects[shard::shard_count]
+    if not selected:
         raise ValueError(f"empty consumer fixture shard {shard}")
-    if any(units[name]["lean"] != "none" for name in selected):
+    lean_projects = {"StrataLint.Cache.Native.Tests", "StrataLint.DeclaredTemplate.Tests",
+                     "StrataLint.Lean.Tests", "StrataLint.ScriptTests", "StrataLint.Tests"}
+    if shard == 0 or any(project.stem in lean_projects for project in selected):
         check("bash", "tools/scripts/workflow/install-lean-toolchain.sh", "lean-toolchain")
         os.environ["PATH"] = str(Path.home() / ".elan/bin") + os.pathsep + os.environ["PATH"]
-    for name in selected:
-        check("make", "ci-unit", f"UNIT={name}")
+    for project in selected:
+        if project.stem == "StrataLint.DeclaredTemplate.Tests":
+            # Prepare the two real source/mirror pairs before the assertion's bounded report reader.
+            modules = ("D5.S3.Fourier.IntegerCharacterCoercivity", "D5.S3.TotalVariation.PrimitiveBridgeCancellation")
+            reports = [f"+{prefix}{module}:report" for module in modules for prefix in ("", "Reg.")]
+            check("bash", "tools/scripts/worktree/lean-cache-run.sh", "lake", "-d",
+                  "tools/lean-inspector-reg", "build", *reports)
+        check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly", str(project))
+    if shard == 0:
+        check("make", "-C", "tools", "selftest")
+        check("make", "-C", "tools", "compiled-judge-test")
+        check("bash", "tools/scripts/workflow/ci-entry-test.sh")
+        check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/workflow", "-p", "test_ci_*.py")
 
 
 if __name__ == "__main__":

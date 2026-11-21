@@ -48,7 +48,7 @@ internal sealed partial class TransactionFixture : IDisposable
         Directory.CreateDirectory(binPath);
         CopyScript();
         File.Copy(
-            Path.Combine(TestRepositoryLayout.FindRoot(), "tools", "consumer", "Makefile"),
+            Path.Combine(TestRepositoryLayout.FindRoot(), "Makefile"),
             Path.Combine(Root, "Makefile"));
         WriteFile(
             ".gitignore",

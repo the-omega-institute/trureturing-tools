@@ -50,7 +50,7 @@ public sealed class AddressesAndFormulasScopingTests
         const string experiment = "docs/reports/erdos7-odd-covering/certificates/source_norms/source-budgets/"
             + "source_own_test_consumer.parts/content/008-reweighted_full_haar_chain.json";
         var fixture = new RuleFixture();
-        var manifest = TestRepositoryLayout.ReadAllText(RepositoryRelativePath.Create("tools/ci/ci-checks.json"));
+        var manifest = TestRepositoryLayout.ReadAllText(RepositoryRelativePath.Create("Meta/ci-checks.json"));
         fixture.Files["Meta/ci-checks.json"] = manifest;
         using var document = System.Text.Json.JsonDocument.Parse(manifest);
         var declaration = document.RootElement.GetProperty("checks").EnumerateArray()
@@ -104,7 +104,7 @@ public sealed class AddressesAndFormulasScopingTests
         var result = Execute(fixture, UnrelatedPath);
 
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.RuleId == RuleId.CreateKnown(15)
-            && diagnostic.Path == (manifest is null ? "tools/ci/ci-checks.json" : "Meta/ci-checks.json")
+            && diagnostic.Path == "Meta/ci-checks.json"
             && diagnostic.Message.Contains("registration", StringComparison.Ordinal));
     }
 

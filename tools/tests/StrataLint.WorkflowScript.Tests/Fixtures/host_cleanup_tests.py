@@ -340,7 +340,7 @@ class HostCleanupTests(unittest.TestCase):
         scripts.mkdir(parents=True)
         shutil.copy(SCRIPT, scripts / SCRIPT.name)
         shutil.copy(SCRIPT.with_name("worktree-init.sh"), scripts / "worktree-init.sh")
-        shutil.copy(SCRIPT.parents[2] / "tools/consumer/Makefile", repository / "Makefile")
+        shutil.copy(SCRIPT.parents[2] / "Makefile", repository / "Makefile")
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         python = bin_dir / "python3"

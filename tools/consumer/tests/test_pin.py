@@ -1,13 +1,11 @@
-"""Check pinning against the caller files and the workflows in the installed release."""
+"""Check the version lock against the published asset."""
+import hashlib
 import importlib.util
-import io
+import json
 from pathlib import Path
-import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
-import hashlib
-
 
 spec = importlib.util.spec_from_file_location("pin", Path(__file__).resolve().parents[1] / "pin.py")
 pin = importlib.util.module_from_spec(spec)
@@ -15,41 +13,40 @@ spec.loader.exec_module(pin)
 
 
 class PinTests(unittest.TestCase):
-    def test_all_callers_keep_their_contents_except_for_the_revision(self):
-        source = "f" * 40
-        target = "e" * 40
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workflows = root / ".github/workflows"
-            workflows.mkdir(parents=True)
-            for name in pin.WORKFLOWS:
-                (workflows / name).write_text(f"  run:\n    uses: {pin.REPOSITORY}/.github/workflows/{name}@{source}\n\n")
-            updates = pin.update_callers(root, target)
-            self.assertEqual(len(updates), len(pin.WORKFLOWS))
-            for path, contents in updates.items():
-                self.assertEqual(contents, path.read_text().replace(source, target))
-            (workflows / pin.WORKFLOWS[-1]).write_text("jobs: {}\n")
-            with self.assertRaises(ValueError):
-                pin.update_callers(root, target)
+    def test_release_accepts_published_preview_and_stable_tags(self):
+        for tag in ("v0.2.0", "v0.2.0-feature.12.gabc", "v0.2.0-pr.18.14.gabc"):
+            digest = "a" * 64
+            asset = {"name": pin.ASSET, "state": "uploaded", "digest": "sha256:" + digest}
+            metadata = {"tag_name": tag, "draft": False, "assets": [asset]}
+            with patch.object(pin.subprocess, "check_output", return_value=json.dumps(metadata)):
+                self.assertEqual(pin.release_pin(tag), {"version": tag, "sha256": digest})
+            metadata["draft"] = True
+            with patch.object(pin.subprocess, "check_output", return_value=json.dumps(metadata)):
+                with self.assertRaisesRegex(ValueError, "published"):
+                    pin.release_pin(tag)
 
-    def test_workflow_bytes_are_bound_to_both_the_asset_and_the_git_object(self):
-        data = b"on: workflow_call\n"
-        blob = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
-        with tempfile.TemporaryDirectory() as tmp:
-            archive = Path(tmp) / pin.ASSET
-            tree = []
-            with tarfile.open(archive, "w:gz") as tar:
-                for name in (*pin.WORKFLOWS, "ci-unit.yml"):
-                    member = tarfile.TarInfo("tools/ci/workflows/" + name)
-                    member.size = len(data)
-                    tar.addfile(member, io.BytesIO(data))
-                    tree.append({"type": "blob", "sha": blob, "path": ".github/workflows/" + name})
-            identity = {"workflow_sha": "a" * 40, "sha256": hashlib.sha256(archive.read_bytes()).hexdigest()}
-            with patch.object(pin, "api", return_value={"truncated": False, "tree": tree}):
-                pin.verify_workflows(archive, identity)
-                tree[-1]["sha"] = "0" * 40
-                with self.assertRaisesRegex(ValueError, "differs from the release source"):
-                    pin.verify_workflows(archive, identity)
-            identity["sha256"] = "0" * 64
-            with self.assertRaisesRegex(ValueError, "digest"):
-                pin.verify_workflows(archive, identity)
+    def test_pin_changes_only_after_verifying_the_download(self):
+        tag = "v0.2.0"
+        archive = b"published archive"
+        lock = {"version": tag, "sha256": hashlib.sha256(archive).hexdigest()}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(pin, "release_pin", return_value=lock):
+            root = Path(tmp)
+            path = root / "Meta/tools-release.json"
+            path.parent.mkdir()
+            path.write_text("original\n")
+
+            def download(content):
+                def run(args, **kwargs):
+                    (Path(args[-1]) / pin.ASSET).write_bytes(content)
+                return run
+
+            with patch.object(pin.subprocess, "run", side_effect=download(b"wrong")):
+                with self.assertRaisesRegex(ValueError, "SHA-256"):
+                    pin.pin_release(root, tag)
+            self.assertEqual(path.read_text(), "original\n")
+            with patch.object(pin.subprocess, "run", side_effect=download(archive)):
+                pin.pin_release(root, tag)
+            with patch.object(pin.subprocess, "run") as repeated:
+                pin.pin_release(root, tag)
+                repeated.assert_not_called()
+            self.assertEqual(json.loads(path.read_text()), lock)

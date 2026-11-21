@@ -45,8 +45,7 @@ class LeanBuildLockTests(unittest.TestCase):
 
     @staticmethod
     def copy_sources(root):
-        shutil.copy2(REPO / "tools/consumer/Makefile", root / "Makefile")
-        for name in (WRAPPER, "tools/scripts/worktree/lean-git/git"):
+        for name in ("Makefile", WRAPPER, "tools/scripts/worktree/lean-git/git"):
             (root / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO / name, root / name)
         (root / "Reg").mkdir()

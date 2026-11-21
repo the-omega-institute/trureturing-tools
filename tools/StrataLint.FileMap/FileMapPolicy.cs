@@ -642,7 +642,7 @@ internal static partial class FileMapPolicy
         {
             "tools/ci/ci-units.json" => "CiUnitContract",
             "tools/ci/ci-cache-paths.json" => "NativeArchivePaths",
-            RegisteredCheckMaterials.ManifestPath => "RegisteredCheckMaterials",
+            "tools/ci/ci-checks.json" => "RegisteredCheckMaterials",
             _ => null,
         };
         return verifier is not null && entry.Pattern == path && entry.AdmissionPlane == FileMapAdmissionPlane.Judge

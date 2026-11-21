@@ -285,8 +285,6 @@ public sealed class CliVerbLinkageTests
             yield return makefile;
         }
 
-        yield return Path.Combine(root, "tools", "consumer", "Makefile");
-
         var toolsMakefile = Path.Combine(root, "tools", "Makefile");
         if (File.Exists(toolsMakefile))
         {

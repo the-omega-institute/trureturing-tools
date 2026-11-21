@@ -30,7 +30,7 @@ public sealed class RuleEngineCapacityTests
     {
         const string experiment = "docs/reports/erdos7-odd-covering/profile-notes/321-384/339-irredundant-source-seven-labels-bound-the-actual-surplus.md";
         var fixture = new RuleFixture();
-        fixture.Files["Meta/ci-checks.json"] = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), "tools/ci/ci-checks.json"));
+        fixture.Files["Meta/ci-checks.json"] = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), "Meta/ci-checks.json"));
         using var manifest = System.Text.Json.JsonDocument.Parse(fixture.Files["Meta/ci-checks.json"]);
         var declaration = manifest.RootElement.GetProperty("checks").EnumerateArray().Single(row => row.GetProperty("id").GetString() == "SL-003");
         foreach (var item in declaration.GetProperty("materials").EnumerateArray())
@@ -76,7 +76,7 @@ public sealed class RuleEngineCapacityTests
 
         var diagnostics = RuleCatalog.Default.EvaluateSingle(RuleId.CreateKnown(3), fixture.Build()).Diagnostics;
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Path == (manifest is null ? "tools/ci/ci-checks.json" : "Meta/ci-checks.json")
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Path == "Meta/ci-checks.json"
             && diagnostic.AdmissionEffect == AdmissionEffect.Block && diagnostic.Message.Contains("SL-003", StringComparison.Ordinal));
     }
 

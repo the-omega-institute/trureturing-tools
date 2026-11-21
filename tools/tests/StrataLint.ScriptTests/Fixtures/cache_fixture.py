@@ -28,7 +28,7 @@ class CacheFixture:
         (self.root / "Meta").mkdir()
         (self.root / "Meta/FILEMAP.toml").write_text(
             'files = [{pattern = "Meta/ci-cache-paths.json"}]\n')
-        (self.root / "Meta/ci-cache-paths.json").write_bytes((REPO / "tools/ci/ci-cache-paths.json").read_bytes())
+        (self.root / "Meta/ci-cache-paths.json").write_bytes((REPO / "Meta/ci-cache-paths.json").read_bytes())
         (self.root / "lean-report-inputs.json").write_text(json.dumps({
             "report_execution": {"environment": ["LEAN_OPTS", "ELAN_TOOLCHAIN"]}}))
 

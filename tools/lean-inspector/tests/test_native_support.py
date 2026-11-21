@@ -233,14 +233,12 @@ defaultFacets = ["static"]
             raise RuntimeError('statement fixture inspector entry is missing')
         inspector.write_text(source.replace(entry,
             '  let args := "--statements-only" :: args\n' + entry))
-        shutil.copy2(ROOT / 'tools/consumer/Makefile', self.root / 'Makefile')
-        self.write('.github/scripts/install-tools.py', '# The fixture supplies its own tools.\n')
         for name in ['tools/scripts/report/lean-report-selection.py', 'tools/scripts/report/lean-report-input.sh',
                      'tools/scripts/worktree/lean-cache-input.sh', 'tools/scripts/worktree/lean_cache.py',
                      'tools/scripts/worktree/cache_material.py',
                      'tools/scripts/worktree/lean_cache_release.py', 'tools/scripts/worktree/lean_cache_release_io.py',
                      'tools/scripts/worktree/lean_cache_topology.py',
-                     'lean-toolchain',
+                     'lean-toolchain', 'Makefile',
                      'tools/scripts/worktree/lean-cache-ensure.sh', 'tools/scripts/worktree/lean-cache-run.sh',
                      'tools/scripts/worktree/lean-git/git',
                      'tools/scripts/report/lean-report.sh', 'tools/scripts/report/report-supervisor.sh',
@@ -542,6 +540,8 @@ defaultFacets = ["static"]
         target = self.root / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, target)
+        if name == "Makefile":
+            self.write(".github/scripts/install-tools.py", "# The fixture supplies its own tools.\n")
         if name == "tools/lean-inspector/Inspector.lean":
             target.write_text(transport_inspector(target.read_text()))
         shutil.copymode(ROOT / name, target)

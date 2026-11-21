@@ -113,7 +113,7 @@ public sealed class WorktreeMakeWorkflowTests
         var binDirectory = Path.Combine(fixtureRoot, "bin");
         Directory.CreateDirectory(scriptDirectory);
         Directory.CreateDirectory(binDirectory);
-        File.Copy(Path.Combine(root, "tools", "consumer", "Makefile"), Path.Combine(fixtureRoot, "Makefile"));
+        File.Copy(Path.Combine(root, "Makefile"), Path.Combine(fixtureRoot, "Makefile"));
         File.Copy(
             Path.Combine(root, WorktreeInitScriptPath),
             Path.Combine(fixtureRoot, WorktreeInitScriptPath));

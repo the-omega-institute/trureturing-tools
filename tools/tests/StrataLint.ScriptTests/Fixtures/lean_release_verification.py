@@ -14,7 +14,7 @@ from lean_seed_support import REPORT_BUILD, ROOT, digest, write
 
 class ReleaseVerificationCases:
     def verification_fixture(self, chunk_bytes=None):
-        shutil.copy2(ROOT / "tools/consumer/Makefile", self.root / "Makefile")
+        shutil.copy2(ROOT / "Makefile", self.root / "Makefile")
         helper = "tools/scripts/worktree/lean_cache_release.py"
         (self.root / helper).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / helper, self.root / helper)

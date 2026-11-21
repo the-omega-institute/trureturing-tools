@@ -103,6 +103,8 @@ public sealed partial class MakeWorkflowTests
         "test",
         "selftest",
         "compile-proof",
+        "compiled-judge-test",
+        "compiled-fib-test",
         "filemap-conform",
         "capacity-audit",
         "update-renderer-contract",

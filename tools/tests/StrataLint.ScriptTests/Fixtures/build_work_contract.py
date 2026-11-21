@@ -120,8 +120,7 @@ class BuildWorkContracts(unittest.TestCase):
         fixture.write_policy()
         fixture.bundle()
         fixture.write('.github/scripts/install-tools.py', '# The fixture supplies its own tools.\n')
-        shutil.copy2(REPO / "tools/consumer/Makefile", root / "Makefile")
-        for name in ('tools/scripts/report/lean-report.sh',
+        for name in ('Makefile', 'tools/Makefile', 'tools/scripts/report/lean-report.sh',
                      'tools/scripts/lib/resource-observation-lib.sh',
                      *('tools/lean-inspector/' + file for file in (
                          'build_inputs.py', 'build_work.py', 'inspect.sh', 'native.py', 'publication.py',

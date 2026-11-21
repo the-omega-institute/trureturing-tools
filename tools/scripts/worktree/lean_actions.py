@@ -28,7 +28,7 @@ def native_archive_paths(root: pathlib.Path, layers):
     selected = set(layers) & set(LAYERS)
     if not selected:
         return {}
-    manifest = "Meta/ci-cache-paths.json" if (root / "Meta/ci-cache-paths.json").is_file() else "tools/ci/ci-cache-paths.json"
+    manifest = "Meta/ci-cache-paths.json"
 
     def unique_object(pairs):
         result = {}

@@ -6,8 +6,8 @@ namespace StrataLint.Engine;
 // This projection reads no program, report or inventory fields and invents no inputs.
 internal static class RegisteredCheckMaterials
 {
-    internal const string ManifestPath = "tools/ci/ci-checks.json";
-    private const string LegacyManifestPath = "Meta/ci-checks.json";
+    internal const string ManifestPath = "Meta/ci-checks.json";
+    private const string ReleaseManifestPath = "tools/ci/ci-checks.json";
     private sealed record Manifest(string Schema, MaterialDeclaration[] Checks);
     private sealed record MaterialDeclaration(string Id, string[] Materials, string[] MaterialExcludes);
     private static readonly JsonSerializerOptions Options = new()
@@ -18,8 +18,8 @@ internal static class RegisteredCheckMaterials
     };
 
     internal static string PathIn(RepositorySnapshot snapshot) =>
-        !snapshot.TryGetFile(ManifestPath, out _) && snapshot.TryGetFile(LegacyManifestPath, out _)
-            ? LegacyManifestPath : ManifestPath;
+        !snapshot.TryGetFile(ManifestPath, out _) && snapshot.TryGetFile(ReleaseManifestPath, out _)
+            ? ReleaseManifestPath : ManifestPath;
 
     internal static string[] Read(RepositorySnapshot snapshot, string id)
     {
