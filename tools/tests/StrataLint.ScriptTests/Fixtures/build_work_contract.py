@@ -119,6 +119,7 @@ class BuildWorkContracts(unittest.TestCase):
         fixture.policy.pop('dependency_sources')
         fixture.write_policy()
         fixture.bundle()
+        fixture.write('.github/scripts/install-tools.py', '# The fixture supplies its own tools.\n')
         for name in ('Makefile', 'tools/scripts/report/lean-report.sh',
                      'tools/scripts/lib/resource-observation-lib.sh',
                      *('tools/lean-inspector/' + file for file in (
