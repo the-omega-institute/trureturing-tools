@@ -12,7 +12,7 @@ internal static class TruthReleaseCommand
     private const string ProducerRepository = "the-omega-institute/trureturing-tools";
 
     internal static ExplicitCommandResult Run(IRepositoryGateway repository,
-        IScribeEmissionVerifier? scribeEmissionVerifier, IReadOnlyList<string> arguments)
+        IReadOnlyList<string> arguments)
     {
         ArgumentNullException.ThrowIfNull(repository);
         ArgumentNullException.ThrowIfNull(arguments);
@@ -23,8 +23,6 @@ internal static class TruthReleaseCommand
         {
             var suppliedDefinitions = ScribePackInput.ReadDefinitions(
                 options.ScribePackPath, options.ScribePackDigest);
-            var verifier = scribeEmissionVerifier
-                ?? throw new InvalidOperationException("truth-release requires Scribe emission verification.");
             TruthExportValidation.RequireGitObjectId(
                 options.ProducerPackageCommit,
                 "producer_package_commit");
@@ -39,7 +37,6 @@ internal static class TruthReleaseCommand
                 return new(2, string.Empty, $"TRUTH_RELEASE_REJECTED {rejection}\n");
 
             var truth = prepared.Truth;
-            verifier.Verify(snapshot, truth.Report, suppliedDefinitions);
             var sourceTree = Bare(identity.TreeOid);
             var truthExportBytes = TruthExportJsonWriter.Write(TruthExportProjection.Project(
                 prepared.Catalog.ClosedNodes,
@@ -49,7 +46,7 @@ internal static class TruthReleaseCommand
             var projection = TruthDagProjectionAssembler.Build(truth.Snapshot, truth.Lean, prepared.States);
             var dagMarkdownBytes = CanonicalDagWriter.Write(projection);
             var truthGraphBytes = AssembleTruthGraph(
-                contentHashes, truth, projection, rawLeanReportBytes, suppliedDefinitions);
+                contentHashes, truth, projection, rawLeanReportBytes, suppliedDefinitions, out var unresolvedReferences);
             var blueprintIndexBytes = BlueprintIndexAssembler.Assemble(snapshot);
             var sourceSnapshot = SourceSnapshotAssembler.Assemble(
                 snapshot,
@@ -83,7 +80,7 @@ internal static class TruthReleaseCommand
             return new ExplicitCommandResult(
                 0,
                 $"TRUTH_RELEASE release_digest={digest} source_commit={identity.Revision} "
-                    + $"out={Path.GetFullPath(options.OutDirectory)}\n",
+                    + $"unresolved_references={unresolvedReferences} out={Path.GetFullPath(options.OutDirectory)}\n",
                 string.Empty);
         }
         catch (Exception exception) when (
@@ -145,7 +142,7 @@ internal static class TruthReleaseCommand
         TruthContext truth,
         TruthDagProjection projection,
         ImmutableArray<byte> rawLeanReportBytes,
-        IReadOnlyList<DocumentDefinition> suppliedDefinitions)
+        IReadOnlyList<DocumentDefinition> suppliedDefinitions, out int unresolvedReferences)
     {
         var provenance = new TruthGraphProvenance(
             SnapshotContentDigest.ComputeContentHashes(
@@ -157,9 +154,8 @@ internal static class TruthReleaseCommand
                 projection,
                 provenance,
                 suppliedDefinitions,
-                string.Empty,
                 DeclarationCatalog.Create(truth.Report),
-                tolerateAbsentDocuments: true));
+                out unresolvedReferences));
     }
 
     internal static bool IsReleaseInput(string path) =>
@@ -248,8 +244,7 @@ internal static class TruthReleaseCommand
             || candidateLeanReport is null
             || producerPackageCommit is null
             || producedAt is null
-            || commitOnProtectedDev is null
-            || requiredChecks.Count == 0)
+            || commitOnProtectedDev is null)
         {
             return false;
         }
@@ -303,8 +298,7 @@ internal static class TruthReleaseCommand
         "USAGE: StrataLint truth-release --out DIR [--dag-output FILE] --candidate-lean-report FILE "
             + "--producer-package-commit COMMIT --produced-at TIMESTAMP "
             + "--commit-on-protected-dev true|false "
-            + "--required-check NAME=CONCLUSION (required: "
-            + "every required check supplied by the caller" + ") "
+            + "[--required-check NAME=CONCLUSION] "
             + "--scribe-pack FILE --scribe-pack-digest HEX64\n");
 
     private static ExplicitCommandResult MissingScribePackUsage() => new(

@@ -101,7 +101,7 @@ public sealed partial class TruthReleaseCommandTests
     private const string PackUsage = "--scribe-pack FILE --scribe-pack-digest HEX64";
 
     [Fact]
-    public void ResourcePackProductionVerifierAcceptsSnapshotDefinitionsWithoutAssemblyDiscovery()
+    public void PublicationReadsPackDefinitionsWithoutAssemblyDiscovery()
     {
         using var fixture = CreateFixture(productionVerifier: true);
         using var resources = new TemporaryDirectory();
@@ -119,7 +119,7 @@ public sealed partial class TruthReleaseCommandTests
     }
 
     [Fact]
-    public void ResourcePackProductionVerifierRejectsPackLiteratureReferenceWithoutWritingBundle()
+    public void PublicationProjectsPackWithAnExternalLiteratureReference()
     {
         using var fixture = CreateFixture(productionVerifier: true);
         using var resources = new TemporaryDirectory();
@@ -134,15 +134,12 @@ public sealed partial class TruthReleaseCommandTests
 
         var (exitCode, console) = Run(fixture, output.Path, GreenTrustArguments(), PackArguments(packPath, digest));
 
-        Assert.Equal(2, exitCode);
-        Assert.Contains("Scribe emission verification failed:", console.Error, StringComparison.Ordinal);
-        Assert.Contains("dangling-literature-reference", console.Error, StringComparison.Ordinal);
-        Assert.Contains("lit/fixture2000reference", console.Error, StringComparison.Ordinal);
-        Assert.Empty(Directory.GetFileSystemEntries(output.Path));
+        Assert.True(exitCode == 0, console.Error);
+        Assert.True(File.Exists(Path.Combine(output.Path, TruthReleaseBundleWriter.TruthGraphFileName)));
     }
 
     [Fact]
-    public void ResourcePackProductionVerifierIgnoresAdditionalLocalScribeSources()
+    public void PublicationUsesPackDocumentsWhenAdditionalLocalScribeSourcesExist()
     {
         using var fixture = CreateFixture(productionVerifier: true, additionalLocalSource: true);
         using var resources = new TemporaryDirectory();

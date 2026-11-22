@@ -319,7 +319,7 @@ internal sealed partial class ProductionCliEnvironment : ICliEnvironment
         DagLedgerAlignWriter.Align(repositoryRoot, repository, arguments);
 
     public ExplicitCommandResult TruthRelease(IReadOnlyList<string> arguments) =>
-        TruthReleaseCommand.Run(repository, scribeEmissionVerifier, arguments);
+        TruthReleaseCommand.Run(repository, arguments);
 
     public CommandResult CleanLanes(IReadOnlyList<string> arguments) =>
         CleanLanesCommand.Run(repositoryRoot, arguments, TimeProvider.System.GetUtcNow());

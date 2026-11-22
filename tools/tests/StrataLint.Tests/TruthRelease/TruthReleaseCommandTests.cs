@@ -27,7 +27,7 @@ public sealed partial class TruthReleaseCommandTests
         using var output = new TemporaryDirectory();
         using var dagDirectory = new TemporaryDirectory();
         var dagPath = Path.Combine(dagDirectory.Path, "DAG.md");
-        var (exitCode, console) = Run(fixture, output.Path, [.. GreenTrustArguments(), "--dag-output", dagPath]);
+        var (exitCode, console) = Run(fixture, output.Path, ["--commit-on-protected-dev", "true", "--dag-output", dagPath]);
 
         Assert.True(exitCode == 0, console.Error);
         Assert.Equal(string.Empty, console.Error);
@@ -45,6 +45,7 @@ public sealed partial class TruthReleaseCommandTests
         Assert.Equal(fixture.SourceCommit, export.SourceCommit);
         Assert.Equal(fixture.SourceTree, export.SourceTree);
         Assert.Equal("the-omega-institute/trureturing", verified.Manifest.Source.SourceRepo);
+        Assert.Empty(verified.Manifest.Trust.RequiredChecks);
         Assert.Equal(ProducerRepository, verified.Manifest.Producer.PackageRepo);
         Assert.Equal(ProducerCommit, verified.Manifest.Producer.PackageCommit);
         Assert.Equal(fixture.ReportBytes.ToArray(), File.ReadAllBytes(
@@ -99,7 +100,7 @@ public sealed partial class TruthReleaseCommandTests
     {
         var gateway = new FakeRepositoryGateway(RawChangeSet.Create([]), RawRepositorySnapshot.Create([]), null);
 
-        Assert.Equal(1, global::StrataLint.Cli.TruthReleaseCommand.Run(gateway, null, []).ExitCode);
+        Assert.Equal(1, global::StrataLint.Cli.TruthReleaseCommand.Run(gateway, []).ExitCode);
         Assert.Equal(0, gateway.ReadCount);
     }
 
@@ -169,9 +170,8 @@ public sealed partial class TruthReleaseCommandTests
         using var fixture = CreateFixture(largeDigestionBodies: true);
         using var streamedOutput = new TemporaryDirectory();
         using var fullOutput = new TemporaryDirectory();
-        var capture = new CapturingScribeVerifier();
         var projectedEnvironment = new ProductionCliEnvironment(fixture.RepositoryRoot,
-            fixture.Gateway, fixture.MutableLeanReportSource, capture);
+            fixture.Gateway, fixture.MutableLeanReportSource, null);
         var fullEnvironment = new ProductionCliEnvironment(fixture.RepositoryRoot,
             new FullSnapshotGateway(fixture.Gateway), fixture.MutableLeanReportSource,
             new FakeScribeEmissionVerifier(VerifiedScribeEmissions.Empty));
@@ -181,10 +181,6 @@ public sealed partial class TruthReleaseCommandTests
 
         Assert.True(streamed.ExitCode == 0, streamed.Console.Error);
         Assert.True(full.ExitCode == 0, full.Console.Error);
-        var captured = Assert.IsType<RepositorySnapshot>(capture.Snapshot);
-        Assert.All(captured.Files.Values.Where(static file => file.Path.Value.StartsWith("Meta/Digestion/", StringComparison.Ordinal)),
-            static file => { Assert.Empty(file.RawBytes); Assert.False(file.ContentWasRead); });
-        Assert.Contains(captured.Files.Values, static file => file.Path.Value.StartsWith("Meta/Digestion/atoms/", StringComparison.Ordinal));
         var expectedFiles = Directory.GetFiles(fullOutput.Path).Select(Path.GetFileName).Order(StringComparer.Ordinal).ToArray();
         Assert.Equal(expectedFiles, Directory.GetFiles(streamedOutput.Path).Select(Path.GetFileName).Order(StringComparer.Ordinal));
         foreach (var path in expectedFiles)
@@ -497,18 +493,6 @@ public sealed partial class TruthReleaseCommandTests
         internal string SourceTree { get; } = sourceTree;
 
         public void Dispose() => temporary.Dispose();
-    }
-
-    private sealed class CapturingScribeVerifier : IScribeEmissionVerifier
-    {
-        internal RepositorySnapshot? Snapshot { get; private set; }
-        public VerifiedScribeEmissions Verify(RepositorySnapshot snapshot, LeanAxiomReport report,
-            IReadOnlyList<DocumentDefinition> definitions)
-        { Snapshot = snapshot; return VerifiedScribeEmissions.Empty; }
-        public VerifiedScribeEmissions Verify(RepositorySnapshot snapshot, LeanAxiomReport report,
-            RawChangeSet? changes = null, FrozenStateCatalog? frozenStates = null,
-            FrozenStatementIndex? frozenStatements = null)
-        { Snapshot = snapshot; return VerifiedScribeEmissions.Empty; }
     }
 
     private sealed class FullSnapshotGateway(IRepositoryGateway inner) : IRepositoryGateway

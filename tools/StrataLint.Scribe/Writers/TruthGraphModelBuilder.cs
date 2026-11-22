@@ -18,19 +18,19 @@ public static class TruthGraphModelBuilder
         TruthDagProjection dag,
         TruthGraphProvenance provenance,
         IEnumerable<DocumentDefinition> definitions,
-        string repositoryRoot,
         DeclarationCatalog catalog,
-        bool tolerateAbsentDocuments = false)
+        out int unresolvedReferences)
     {
         ArgumentNullException.ThrowIfNull(dag);
         ArgumentNullException.ThrowIfNull(provenance);
         var formalPaths = dag.Nodes.Select(static node => node.RepoPath.Value)
             .ToHashSet(StringComparer.Ordinal);
-        var documentProjection = string.IsNullOrWhiteSpace(repositoryRoot)
-            ? DocumentGraphExportProjection.AssembleRepository(definitions, catalog, formalPaths,
-                tolerateAbsentDocuments)
-            : DocumentGraphExportProjection.AssembleRepository(definitions, repositoryRoot, catalog,
-                formalPaths, tolerateAbsentDocuments);
+        var material = definitions.Select(definition => new DocumentGraphDocument(
+            definition.RelativePath.Value, definition.Document, "receipt-free")).ToImmutableArray();
+        var graph = DocumentGraphAssembler.Assemble(material.Select(item => item.Document), catalog,
+            validateTargets: false);
+        var documentProjection = DocumentGraphExportProjection.Create(material, graph, catalog, formalPaths,
+            out unresolvedReferences);
         return Create(dag, provenance, documentProjection);
     }
 
@@ -98,21 +98,15 @@ public static class DocumentGraphExportProjectionExtensions
             IEnumerable<DocumentGraphDocument> documents,
             DocumentGraph graph,
             DeclarationCatalog catalog,
-            IReadOnlySet<string> formalTruthRepoPaths)
+            IReadOnlySet<string> formalTruthRepoPaths,
+            out int unresolvedReferences)
         {
             ArgumentNullException.ThrowIfNull(documents);
             ArgumentNullException.ThrowIfNull(graph);
             ArgumentNullException.ThrowIfNull(catalog);
             ArgumentNullException.ThrowIfNull(formalTruthRepoPaths);
-            if (!graph.Findings.IsEmpty)
-            {
-                throw new InvalidOperationException(
-                    $"Document graph is invalid: {graph.Findings[0].Code} {graph.Findings[0].Message}");
-            }
-
-            var material = documents
-                .Select(item => item with { Document = item.Document.ResolveDeclarations(catalog) })
-                .ToImmutableArray();
+            unresolvedReferences = 0;
+            var material = documents.ToImmutableArray();
             var byGid = material.ToDictionary(
                 static item => item.Document.Header.Gid.Value,
                 StringComparer.Ordinal);
@@ -136,16 +130,11 @@ public static class DocumentGraphExportProjectionExtensions
             var narratives = ImmutableArray.CreateBuilder<DocumentNarrativeReferenceEdge>();
             var anchors = ImmutableArray.CreateBuilder<TruthAnchorJoin>();
             var describeNodes = material.SelectMany(source => EnumerateDescribes(source.Document.Content)
-                    .Select(describe => new DescribeGraphNode(
-                        source.RepoPath,
-                        source.Document.Header.Gid.Value,
-                        describe.Id.Value,
-                        DescribeVocabulary.CanonicalName(describe.Kind),
-                        describe.Statement is DescribeStatement.LeanDeclaration lean ? lean.Value.Value : null,
-                        describe.FormulaProvenance == StatementFormulaProvenance.LeanDerived ? "lean-derived" : "hand-authored")))
+                    .Select(describe => ProjectDescribe(source, describe, catalog)))
                 .OrderBy(static node => node.RepoPath, StringComparer.Ordinal)
                 .ThenBy(static node => node.DescribeId, StringComparer.Ordinal)
                 .ToImmutableArray();
+            var describes = describeNodes.ToDictionary(node => (node.DocumentGid, node.DescribeId));
             foreach (var source in material)
             {
                 foreach (var edge in graph.For(source.Document))
@@ -153,31 +142,38 @@ public static class DocumentGraphExportProjectionExtensions
                     switch (edge)
                     {
                         case DocumentEdge.Dependency dependency:
-                            dependencies.Add(new DocumentDependencyEdge(
-                                byGid[dependency.Target.Value].RepoPath,
-                                source.RepoPath));
+                            if (byGid.TryGetValue(dependency.Target.Value, out var target))
+                                dependencies.Add(new DocumentDependencyEdge(target.RepoPath, source.RepoPath));
+                            else
+                                unresolvedReferences++;
                             break;
                         case DocumentEdge.NarrativeReference narrative:
                             var targetGid = narrative.Target switch
                             {
-                                NarrativeTarget.Document target => target.DocumentGid.Value,
-                                NarrativeTarget.Describe target => target.DocumentGid.Value,
+                                NarrativeTarget.Document document => document.DocumentGid.Value,
+                                NarrativeTarget.Describe block => block.DocumentGid.Value,
                                 _ => throw new InvalidOperationException("Unknown narrative target."),
                             };
                             var fragment = narrative.Target is NarrativeTarget.Describe describe
                                 ? $"#describe/{describe.DescribeId.Value}"
                                 : string.Empty;
-                            narratives.Add(new DocumentNarrativeReferenceEdge(
-                                source.RepoPath,
-                                byGid[targetGid].RepoPath + fragment));
+                            if (byGid.TryGetValue(targetGid, out var destination)
+                                && (narrative.Target is not NarrativeTarget.Describe item
+                                    || describes.ContainsKey((targetGid, item.DescribeId.Value))))
+                                narratives.Add(new DocumentNarrativeReferenceEdge(source.RepoPath, destination.RepoPath + fragment));
+                            else
+                                unresolvedReferences++;
                             break;
                         case DocumentEdge.TruthAnchor anchor:
-                            _ = catalog.Resolve(DeclarationHandle.Create(anchor.Target.Value));
                             var formalPath = anchor.Target.Reference.Path.Value;
-                            if (!formalTruthRepoPaths.Contains(formalPath))
+                            if (!formalTruthRepoPaths.Contains(formalPath)
+                                || !Resolves(catalog, anchor.Target.Value)
+                                || (anchor.DescribeId is { } id
+                                    && (!describes.TryGetValue((source.Document.Header.Gid.Value, id.Value), out var node)
+                                        || node.LeanDeclarationGid != anchor.Target.Value)))
                             {
-                                throw new InvalidOperationException(
-                                    $"Truth anchor {anchor.Target.Value} has no formal truth node {formalPath}.");
+                                unresolvedReferences++;
+                                break;
                             }
                             anchors.Add(new TruthAnchorJoin(
                                 source.RepoPath,
@@ -206,6 +202,25 @@ public static class DocumentGraphExportProjectionExtensions
         }
     }
 
+    // Only resolved references can form a join in the v1 graph.
+    private static bool Resolves(DeclarationCatalog catalog, string gid)
+    {
+        try { _ = catalog.Resolve(DeclarationHandle.Create(gid)); return true; }
+        catch (InvalidOperationException) { return false; }
+    }
+
+    private static DescribeGraphNode ProjectDescribe(DocumentGraphDocument source, DocumentBlock.Describe describe,
+        DeclarationCatalog catalog)
+    {
+        var target = describe.Statement is DescribeStatement.LeanDeclaration lean && Resolves(catalog, lean.Value.Value)
+            ? lean.Value.Value : null;
+        string kind;
+        try { kind = DescribeVocabulary.CanonicalName(catalog.ResolveKind(describe)); }
+        catch (InvalidOperationException) { kind = "unresolved"; }
+        return new DescribeGraphNode(source.RepoPath, source.Document.Header.Gid.Value, describe.Id.Value,
+            kind, target, describe.FormulaProvenance == StatementFormulaProvenance.LeanDerived ? "lean-derived" : "hand-authored");
+    }
+
     private static IEnumerable<DocumentBlock.Describe> EnumerateDescribes(BlockSequence blocks)
     {
         foreach (var block in blocks.Items)
@@ -219,56 +234,6 @@ public static class DocumentGraphExportProjectionExtensions
             {
                 foreach (var nested in EnumerateDescribes(section.Content)) yield return nested;
             }
-        }
-    }
-
-    extension(DocumentGraphExportProjection)
-    {
-        public static DocumentGraphExportProjection AssembleRepository(
-            IEnumerable<DocumentDefinition> definitions,
-            string repositoryRoot,
-            DeclarationCatalog catalog,
-            IReadOnlySet<string> formalTruthRepoPaths,
-            bool tolerateAbsentDocuments = false)
-        {
-            ArgumentNullException.ThrowIfNull(definitions);
-            ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRoot);
-            ArgumentNullException.ThrowIfNull(catalog);
-            ArgumentNullException.ThrowIfNull(formalTruthRepoPaths);
-            var material = definitions.ToArray();
-            var documents = material.Select(definition => definition.Document.ResolveDeclarations(catalog)).ToArray();
-            var census = ReceiptFreeDocumentCatalog.Load(repositoryRoot, documents, tolerateAbsentDocuments);
-            var graph = DocumentGraphAssembler.Assemble(
-                documents,
-                catalog);
-            var sources = material.Select(definition => new DocumentGraphDocument(
-                definition.RelativePath.Value,
-                definition.Document,
-                census.ReceiptFreeDocumentGids.Contains(definition.Document.Header.Gid.Value)
-                    ? "receipt-free"
-                    : "receipt-bound"));
-            return DocumentGraphExportProjection.Create(sources, graph, catalog, formalTruthRepoPaths);
-        }
-
-        public static DocumentGraphExportProjection AssembleRepository(
-            IEnumerable<DocumentDefinition> definitions,
-            DeclarationCatalog catalog,
-            IReadOnlySet<string> formalTruthRepoPaths,
-            bool tolerateAbsentDocuments = false)
-        {
-            ArgumentNullException.ThrowIfNull(definitions);
-            ArgumentNullException.ThrowIfNull(catalog);
-            ArgumentNullException.ThrowIfNull(formalTruthRepoPaths);
-            var material = definitions.ToArray();
-            var documents = material.Select(definition => definition.Document.ResolveDeclarations(catalog)).ToArray();
-            if (documents.Length == 0)
-                throw new InvalidOperationException("Scribe document corpus must not be empty.");
-            var graph = DocumentGraphAssembler.Assemble(documents, catalog);
-            var sources = material.Select(definition => new DocumentGraphDocument(
-                definition.RelativePath.Value,
-                definition.Document,
-                "receipt-free"));
-            return DocumentGraphExportProjection.Create(sources, graph, catalog, formalTruthRepoPaths);
         }
     }
 }

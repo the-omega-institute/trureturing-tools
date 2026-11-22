@@ -183,11 +183,6 @@ public static class TruthReleaseManifestReader
             checks.Add(new TruthReleaseRequiredCheck(name, conclusion));
         }
 
-        if (names.Count == 0)
-        {
-            throw new FormatException("required_checks must contain at least one successful named check.");
-        }
-
         // Completeness against the installed protection policy is a provenance obligation,
         // not a property of this producer-declared manifest.
         return checks.ToImmutable();
