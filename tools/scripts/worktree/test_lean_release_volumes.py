@@ -3,8 +3,10 @@
 import json
 import os
 import random
+import resource
+import signal
 from pathlib import Path
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 import io
 import hashlib
 import sys
@@ -25,6 +27,19 @@ def run(root, *args):
     if result.returncode:
         raise AssertionError(f"{args} exited {result.returncode}: {result.stdout}{result.stderr}")
     return result.stdout
+
+
+@contextmanager
+def restore_file_limit(size):
+    # Each installed file fits. A staged compressed group or large frame exceeds the limit.
+    previous = resource.getrlimit(resource.RLIMIT_FSIZE)
+    handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    try:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (size, previous[1]))
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, previous)
+        signal.signal(signal.SIGXFSZ, handler)
 
 
 class VolumeDownloads(unittest.TestCase):
@@ -238,8 +253,11 @@ class VolumeReleases(unittest.TestCase):
         report = self.project / ".lake/build/stratalint/raw-lean-report.json"
         report.parent.mkdir(parents=True)
         report.write_text("{}")
-        volumes.publish(self.pool, "base", self.project, chunk_bytes=4096)
+        for i in range(3):
+            (report.parent / f"payload-{i}").write_bytes(random.Random(i).randbytes(96 * 1024))
+        volumes.publish(self.pool, "base", self.project, chunk_bytes=128 * 1024)
         manifest, tree = volumes.read_snapshot(self.pool, "base")
+        self.assertGreater(max(row["bytes"] for row in tree["members"] if row["module"] is None), 144 * 1024)
         host = Mock()
         host.prefix.return_value = "test-volume-"
         scope = remote.namespace("fixture", {}, False, "ci-1", host)
@@ -252,21 +270,20 @@ class VolumeReleases(unittest.TestCase):
         host.report_reuse.read_receipt.return_value = {"completed": ["checked"]}
         host.report_reuse.seed_identity.return_value = "1" * 64
 
-        def download(unused_host, metadata, checked_tree, rows, output, deadline, cache):
-            size = calls = 0
-            for digest, start, count in remote.ranges(checked_tree, rows):
-                with (self.pool / "volumes" / digest).open("rb") as stream:
-                    stream.seek(start)
-                    output.write(stream.read(count))
-                size += count
-                calls += 1
-            return calls, size
+        def range_blocks(digest, start, size, deadline):
+            with (self.pool / "volumes" / digest).open("rb") as stream:
+                stream.seek(start)
+                yield stream.read(size)
+        host.range_blocks.side_effect = range_blocks
 
         with patch.object(sparse.compiler, "production_targets", return_value={"D5.B", "D5.C"}), \
-             patch.object(remote, "load_tree", return_value=tree), patch.object(remote, "download", side_effect=download), \
+             patch.object(remote, "load_tree", return_value=tree), \
+             patch.object(remote, "asset_for", side_effect=lambda host, tag, digest, size, deadline: digest), \
              patch.dict(os.environ, {"GITHUB_ENV": "", "LEAN_CACHE_VOLUME_TEST_ID": ""}):
-            self.assertTrue(sparse.install(host, clone, self.area, "base", manifest, "2"*64, target,
-                                           "refs/heads/dev", False, None))
+            graph = sparse.project_imports(clone, sparse.workspace_modules(clone))
+            with patch.object(sparse, "project_imports", return_value=graph), restore_file_limit(144 * 1024):
+                self.assertTrue(sparse.install(host, clone, self.area, "base", manifest, "2"*64, target,
+                                              "refs/heads/dev", False, None))
             plan = sparse.read_plan(clone)
             self.assertEqual(plan["base_commit"], base)
             self.assertEqual(plan["rebuild_modules"], ["D5.B"])
@@ -286,6 +303,14 @@ class VolumeReleases(unittest.TestCase):
                     sparse.install(host, clone, self.area, "other", manifest, "2"*64, target,
                                    "refs/heads/dev", False, None)
                 self.assertTrue(leftover.exists())
+                def interrupted(*args):
+                    yield from range_blocks(*args)
+                    raise KeyboardInterrupt
+                with patch.object(host, "range_blocks", interrupted), self.assertRaises(KeyboardInterrupt):
+                    sparse.install(host, clone, self.area, "base", manifest, "2"*64, target,
+                                   "refs/heads/dev", False, None)
+                self.assertTrue(leftover.exists())
+                self.assertEqual(sparse.read_plan(clone), plan)
                 self.assertTrue(sparse.install(host, clone, self.area, "base", manifest, "2"*64, target,
                                                "refs/heads/dev", False, None))
                 self.assertFalse(leftover.exists())
@@ -550,6 +575,58 @@ class VolumeReleases(unittest.TestCase):
         stack.enter_context(patch.object(release, "release_key", return_value=key))
         identity = stack.enter_context(patch.object(release, "publication_identity"))
         return release, key, partition, identity
+
+    def test_scoped_coalesced_ranges_can_exceed_the_restore_file_limit(self):
+        import lean_release_index as index
+
+        graph = index.project_imports(self.project, index.workspace_modules(self.project))
+        chunk = 128 * 1024
+        names = ["D5.A", "D5.B", "D5.C"]
+        for i, name in enumerate(names):
+            path = self.project / f".lake/build/ir/D5/{name[-1]}.bc"
+            path.write_bytes(random.Random(i).randbytes(96 * 1024))
+        author = run(self.project, "git", "rev-parse", "HEAD").strip()
+        with ExitStack() as stack:
+            release, key, partition, identity = self.github_transport(stack, chunk)
+            identity.return_value = dict(producer_commit_sha=author, publication_id="ci-701-1",
+                                         workflow_run_id="701", workflow_run_attempt="1")
+            for mode in ("0", "1"):
+                with self.subTest(mode=mode), patch.dict(os.environ, LEAN_CACHE_RELEASE_VOLUMES=mode):
+                    tag = release.prefix(partition, key, indexed="volumes" if mode == "1" else True) + "ci-701-1"
+                    self.assertEqual(release.publish(self.project, partition, build_report=False, indexed=True), 0)
+                    target = self.consumer("scoped-" + mode)
+                    log = self.area / ("requests-" + mode)
+                    with tempfile.TemporaryDirectory() as stage, restore_file_limit(144 * 1024), \
+                            patch.object(index, "project_imports", return_value=graph), \
+                            patch.dict(os.environ, FAKE_GH_LOG=str(log)):
+                        count, transferred = release.restore_scoped(target, partition, tag, Path(stage),
+                            release.operation_deadline(), cache_key=key, producer=author, targets=names, verification=False)
+                    self.assertEqual(count, len(names))
+                    self.assertGreater(transferred, 2 * chunk)
+                    requests = [json.loads(line) for line in log.read_text().splitlines()]
+                    self.assertEqual(sum(call[:2] == ["api", "--include"] for call in requests), 3)
+                    for name in names:
+                        path = Path(f".lake/build/ir/D5/{name[-1]}.bc")
+                        self.assertEqual((target / path).read_bytes(), (self.project / path).read_bytes())
+
+            # Failure reported after the final body byte must precede installation.
+            original_blocks = release.range_blocks
+            for error in (ValueError("late transport failure"), KeyboardInterrupt()):
+                dest = self.consumer("interrupted-" + type(error).__name__)
+                previous = dest / ".lake/build/local"
+                previous.parent.mkdir(parents=True)
+                previous.write_bytes(b"existing")
+                def interrupted(asset, offset, length, deadline):
+                    yield from original_blocks(asset, offset, length, deadline)
+                    if length < chunk:
+                        raise error
+                with tempfile.TemporaryDirectory() as stage, patch.object(release, "range_blocks", interrupted), \
+                        self.assertRaises(type(error)):
+                    release.restore_scoped(dest, partition, tag, Path(stage), release.operation_deadline(),
+                                           cache_key=key, producer=author, targets=names, verification=False)
+                self.assertEqual(list(previous.parent.iterdir()), [previous])
+                self.assertEqual(previous.read_bytes(), b"existing")
+                self.assertEqual(list((dest / ".lake").glob(".release-*")), [])
 
     def test_two_generations_with_sparse_checked_report_and_empty_consumers(self):
         import lean_release_index as index

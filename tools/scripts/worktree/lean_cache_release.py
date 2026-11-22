@@ -827,7 +827,7 @@ def snapshot_manifest(partition, tag, stage, deadline, expected=None, verificati
     return metadata, manifest, parts
 
 
-def download_range(asset, offset, length, output, deadline):
+def range_blocks(asset, offset, length, deadline):
     asset_id = asset.get("id")
     size = asset.get("size")
     if type(asset_id) is not int or asset_id <= 0 or type(size) is not int:
@@ -863,14 +863,20 @@ def download_range(asset, offset, length, output, deadline):
                 block = process.stdout.read(min(left, 1024 * 1024))
                 if not block:
                     raise ValueError("truncated Release range")
-                output.write(block)
                 left -= len(block)
+                yield block
             if process.stdout.read(1) or process.wait() != 0:
                 raise ValueError("Release range did not complete exactly")
         finally:
             watchdog.cancel()
             if process.poll() is None:
                 process.kill()
+
+
+def download_range(asset, offset, length, output, deadline):
+    with contextlib.closing(range_blocks(asset, offset, length, deadline)) as blocks:
+        for block in blocks:
+            output.write(block)
 
 
 def restore_scoped(root, partition, tag, stage, deadline, *, cache_key, producer, targets, verification,
@@ -910,27 +916,15 @@ def restore_scoped(root, partition, tag, stage, deadline, *, cache_key, producer
         raise ValueError("scoped restore requires a private project build")
     lake.mkdir(exist_ok=True)
     assets = {asset["name"]: asset for asset in metadata["assets"]}
-    requests = transferred = 0
+    if physical:
+        spans = remote.asset_ranges(sys.modules[__name__], manifest, tree, rows, deadline, assets)
+    else:
+        spans = indexed_release.selected_volume_ranges(parts, assets, rows)
     with tempfile.TemporaryDirectory(prefix=".release-", dir=lake) as temporary:
         unpacked = pathlib.Path(temporary)
         extracted = set()
-        for group in indexed_release.adjacent_members(rows):
-            with tempfile.TemporaryFile(dir=unpacked) as payload:
-                start = group[0]["offset"]
-                end = group[-1]["offset"] + group[-1]["bytes"]
-                if physical:
-                    calls, count = remote.download(sys.modules[__name__], manifest, tree, group, payload, deadline, assets)
-                    requests += calls
-                    transferred += count
-                else:
-                    for part, offset, length in indexed_release.volume_ranges(parts, start, end - start):
-                        download_range(assets[part["name"]], offset, length, payload, deadline)
-                        requests += 1
-                        transferred += length
-                payload.seek(0)
-                for row in group:
-                    indexed_release.extract_frame(payload, row, unpacked, extracted, deadline)
-                    indexed_release.check_compiler_outputs(unpacked, row)
+        requests, transferred = indexed_release.extract_ranges(
+            range_blocks, spans, rows, unpacked, extracted, deadline)
         target = lake / "build"
         supplemental = set()
         restored_modules, deferred_modules = [], []

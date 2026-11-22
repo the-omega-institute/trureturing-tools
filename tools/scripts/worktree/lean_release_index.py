@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import closing
 import gzip
 from graphlib import TopologicalSorter
 import hashlib
@@ -204,6 +205,14 @@ def volume_ranges(parts, offset, length):
     raise ValueError("member extent is outside Release volumes")
 
 
+def selected_volume_ranges(parts, assets, rows):
+    for group in adjacent_members(rows):
+        start = group[0]["offset"]
+        end = group[-1]["offset"] + group[-1]["bytes"]
+        for part, offset, length in volume_ranges(parts, start, end - start):
+            yield assets[part["name"]], offset, length
+
+
 class MemberInput:
     def __init__(self, stream, size, deadline):
         self.stream = stream
@@ -243,6 +252,51 @@ def extract_frame(stream, row, destination, installed, deadline):
             remaining(deadline)
     if member.left or member.digest.hexdigest() != row["sha256"] or (expected is not None and observed != expected):
         raise ValueError("Release member checksum, size or inventory mismatch")
+
+
+class BlockInput:
+    """Present successive transport blocks as one file across asset and frame boundaries."""
+
+    def __init__(self, blocks):
+        self.blocks = blocks
+        self.pending = memoryview(b"")
+
+    def read(self, size):
+        if size < 0:
+            raise ValueError("Release frame reads need a finite size")
+        pieces = []
+        while size:
+            if not self.pending:
+                self.pending = memoryview(next(self.blocks, b""))
+                if not self.pending:
+                    break
+            block = self.pending[:size]
+            pieces.append(block)
+            self.pending = self.pending[len(block):]
+            size -= len(block)
+        return b"".join(pieces)
+
+
+def extract_ranges(range_blocks, spans, rows, destination, installed, deadline):
+    requests = transferred = 0
+
+    def blocks():
+        nonlocal requests, transferred
+        for asset, start, length in spans:
+            yield from range_blocks(asset, start, length, deadline)
+            requests += 1
+            transferred += length
+
+    with closing(blocks()) as source:
+        reader = BlockInput(source)
+        for row in rows:
+            extract_frame(reader, row, destination, installed, deadline)
+            if row["module"] is not None:
+                check_compiler_outputs(destination, row)
+        # Finish the last response, including its exact length and transport exit.
+        if reader.read(1):
+            raise ValueError("Release ranges exceed the selected members")
+    return requests, transferred
 
 
 class VolumeInput:
