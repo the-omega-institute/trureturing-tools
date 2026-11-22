@@ -2,7 +2,7 @@ using System.Text.Json;
 using StrataLint.Engine;
 using Trureturing.Truth;
 
-namespace StrataLint.Tests.TruthRelease;
+namespace StrataLint.Tests;
 
 public sealed partial class TruthReleaseCommandTests
 {

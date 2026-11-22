@@ -33,7 +33,7 @@ python3 -B "$scripts/report.py" "$report"
 make scribe-release
 pack="$PWD/Generated/scribe-release/scribe-resources.zip"
 digest="$(unzip -p "$pack" manifest.json | jq -er .totalSha256)"
-produced_at="$(git show -s --format=%cI "$source_commit")"
+produced_at="$(git show -s --format=%cI HEAD)"
 dotnet "$issuer" truth-release --candidate-lean-report "$report" --out "$temp/release/bundle" --dag-output "$temp/release/DAG.md" \
   --scribe-pack "$pack" --scribe-pack-digest "$digest" --producer-package-commit "$producer" \
   --produced-at "$produced_at" --commit-on-protected-dev true "${required[@]}"

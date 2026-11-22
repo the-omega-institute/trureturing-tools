@@ -9,7 +9,7 @@ using StrataLint.Scribe;
 using Trureturing.Truth;
 using static StrataLint.TestSupport.FrozenLedgerTestData;
 
-namespace StrataLint.Tests.TruthRelease;
+namespace StrataLint.Tests;
 
 public sealed partial class TruthReleaseCommandTests
 {
