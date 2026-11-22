@@ -12,13 +12,14 @@ internal static class DagLedgerAlignWriter
         try
         {
             var options = ParseArguments(arguments);
-            var source = new DagLedgerCommandPreparation.FileLeanReportSource(options.ReportPath);
             var selected = options.Selectors.Concat(options.Adds).Distinct().OrderBy(static path => path.Value, StringComparer.Ordinal).ToArray();
             var truth = selected.Length > 0
-                ? DagLedgerCommandPreparation.BuildTruthScoped(repository, source, selected,
+                ? DagLedgerCommandPreparation.BuildTruthScoped(repository,
+                    new DagLedgerCommandPreparation.FileLeanReportSource(options.ReportPath!), selected,
                     requireAllSources: !options.Retirements.IsEmpty)
-                : DagLedgerCommandPreparation.BuildTruth(repository, source);
-            var states = LeanTruthStates.Resolve(truth.Snapshot, truth.Lean);
+                : null;
+            var snapshot = truth?.Snapshot ?? DagLedgerCommandPreparation.ReadRetirementSources(repository);
+            var states = truth is null ? null : LeanTruthStates.Resolve(snapshot, truth.Lean);
             var planned = new List<(RepoPath Path, FrozenStateRecord Record, bool Added)>();
             foreach (var path in selected)
             {
@@ -27,10 +28,10 @@ internal static class DagLedgerAlignWriter
                     throw new InvalidOperationException($"selector {path.Value} is not a registered frozen-state member");
                 if (current is { } bytes)
                     _ = FrozenStateRecordLoader.Load(new(FrozenStatePath.FromModulePath(path), bytes, Encoding.UTF8.GetString(bytes.AsSpan())));
-                if (!truth.Snapshot.Files.ContainsKey(path)) throw new InvalidOperationException($"module {path.Value} does not exist");
-                if (!states.TryGetValue(path, out var state) || state is not TruthState.Closed)
+                if (!snapshot.Files.ContainsKey(path)) throw new InvalidOperationException($"module {path.Value} does not exist");
+                if (!states!.TryGetValue(path, out var state) || state is not TruthState.Closed)
                     throw new InvalidOperationException($"module {path.Value} has TruthState={state}, expected Closed");
-                if (!truth.Report.Files.TryGetValue(path, out var report))
+                if (!truth!.Report.Files.TryGetValue(path, out var report))
                     throw new InvalidOperationException($"module {path.Value} has no current Lean report");
                 planned.Add((path, FrozenStateRecord.FromReport(path, report), current is null));
             }
@@ -40,7 +41,7 @@ internal static class DagLedgerAlignWriter
                 {
                     var statePath = Path.GetRelativePath(root, file).Replace('\\', '/');
                     if (!FrozenStatePath.TryToModulePath(statePath, out var module)) throw new FormatException("invalid frozen state path: " + statePath);
-                    if (!truth.Snapshot.Files.ContainsKey(module) && !options.Retirements.Contains(module))
+                    if (!snapshot.Files.ContainsKey(module) && !options.Retirements.Contains(module))
                         throw new InvalidOperationException($"module {module.Value} does not exist; missing registrations require explicit --retire-registration");
                 }
             }
@@ -48,14 +49,11 @@ internal static class DagLedgerAlignWriter
             {
                 if (!retired.Value.StartsWith("D5/", StringComparison.Ordinal))
                     throw new InvalidOperationException($"registration retirement requires a D5 module: {retired.Value}");
-                if (truth.Snapshot.Files.ContainsKey(retired)) throw new InvalidOperationException($"cannot retire existing module {retired.Value}");
+                if (snapshot.Files.ContainsKey(retired)) throw new InvalidOperationException($"cannot retire existing module {retired.Value}");
                 var pin = FrozenStateWriter.ReadCurrentBytes(root, retired)
                     ?? throw new InvalidOperationException($"selector {retired.Value} is not a registered frozen-state member");
                 _ = FrozenStateRecordLoader.Load(new(FrozenStatePath.FromModulePath(retired), pin, Encoding.UTF8.GetString(pin.AsSpan())));
-                foreach (var (path, report) in truth.Report.Files)
-                    if (report.Imports.Contains(LeanImportClosure.ModuleName(retired)))
-                        throw new InvalidOperationException($"module {path.Value} still imports retired registration {retired.Value}");
-                foreach (var file in truth.Snapshot.Files.Values.Where(static file => LeanClosureValidator.IsReportLean(file.Path.Value)))
+                foreach (var file in snapshot.Files.Values.Where(static file => LeanClosureValidator.IsReportLean(file.Path.Value)))
                     if (LeanSourceCatalog.ParseFileImports(file).Contains(LeanImportClosure.ModuleName(retired)))
                         throw new InvalidOperationException($"module {file.Path.Value} still imports retired registration {retired.Value}");
             }
@@ -82,7 +80,7 @@ internal static class DagLedgerAlignWriter
         }
         catch (Exception exception) when (exception is ArgumentException or FormatException or IOException
             or InvalidOperationException or JsonException or UnauthorizedAccessException
-            or DagLedgerCommandPreparation.LeanReportUnusableException or DagLedgerCommandPreparation.RepositoryUnavailableException)
+            or DagLedgerCommandPreparation.RepositoryUnavailableException)
         {
             return new(false, Summary(0, 0, 0, 0, 1), "LEDGER_ALIGN_FAILED " + exception.Message
                 + (exception.InnerException is null ? string.Empty : " Cause: " + exception.InnerException.Message) + "\n");
@@ -105,7 +103,7 @@ internal static class DagLedgerAlignWriter
                 default: throw Usage();
             }
         var selectionCount = selectors.Count + adds.Count + retirements.Count;
-        if (string.IsNullOrWhiteSpace(report) || selectionCount == 0) throw Usage();
+        if (selectionCount == 0 || (selectors.Count + adds.Count > 0 && string.IsNullOrWhiteSpace(report))) throw Usage();
         if (selectors.Concat(adds).Concat(retirements).GroupBy(static path => path).Any(static group => group.Count() != 1))
             throw new InvalidOperationException("duplicate or conflicting module selector");
         return new(report, selectors.ToImmutable(), adds.ToImmutable(), retirements.ToImmutable());
@@ -117,10 +115,10 @@ internal static class DagLedgerAlignWriter
         _ = FrozenStatePath.FromModulePath(path);
         return path;
     }
-    private static InvalidOperationException Usage() => new("USAGE: StrataLint ledger-align --candidate-lean-report FILE "
-        + "(--selector MODULE | --add MODULE | --retire-registration MODULE)...");
+    private static InvalidOperationException Usage() => new("USAGE: StrataLint ledger-align [--candidate-lean-report FILE] "
+        + "(--selector MODULE | --add MODULE | --retire-registration MODULE)... (report required for --selector or --add)");
     private static string Summary(int considered, int changed, int added, int unchanged, int conflicts = 0) =>
         $"LEDGER_ALIGN selectors_considered={considered} changed={changed} added={added} unchanged={unchanged} conflicts={conflicts}\n";
-    private sealed record AlignOptions(string ReportPath, ImmutableArray<RepoPath> Selectors,
+    private sealed record AlignOptions(string? ReportPath, ImmutableArray<RepoPath> Selectors,
         ImmutableArray<RepoPath> Adds, ImmutableArray<RepoPath> Retirements);
 }

@@ -10,15 +10,6 @@ internal static class DagLedgerCommandPreparation
         || FrozenStatePath.IsUnderRoot(path)
         || path is "lean-toolchain" or "lakefile.toml" or "lake-manifest.json" or "lean-report-inputs.json";
 
-    internal static TruthContext BuildTruth(
-        IRepositoryGateway repository,
-        ILeanReportSource leanReportSource)
-    {
-        var snapshot = Decode(Ask(() => repository.ReadCurrentProjection(IsLedgerInput)));
-        var (report, lean) = LoadLean(snapshot, leanReportSource);
-        return BuildTruth(snapshot, report, lean);
-    }
-
     internal static TruthContext BuildTruthScoped(
         IRepositoryGateway repository,
         ILeanReportSource leanReportSource,
@@ -35,49 +26,9 @@ internal static class DagLedgerCommandPreparation
             return source.Files.TryGetValue(path, out var file) ? file
                 : throw new InvalidOperationException("scoped Lean report source bytes are unavailable: " + path.Value);
         });
-        var report = leanReportSource is FileLeanReportSource fileSource
-            ? fileSource.Load(scope, () => requireAllSources ? inventory : Decode(Ask(() =>
-                repository.ReadCurrentProjection(IsLedgerInput))))
-            : leanReportSource.Load(scope);
+        var report = leanReportSource.Load(scope);
         var snapshot = scope.SourceSnapshot;
-        return BuildTruth(snapshot, report, ValidateLean(snapshot, report));
-    }
-
-    internal static TruthContext BuildTruth(
-        RepositorySnapshot snapshot,
-        LeanAxiomReport report)
-    {
-        ArgumentNullException.ThrowIfNull(snapshot);
-        ArgumentNullException.ThrowIfNull(report);
-        return BuildTruth(snapshot, report, ValidateLean(snapshot, report));
-    }
-
-    private static TruthContext BuildTruth(
-        RepositorySnapshot snapshot,
-        LeanAxiomReport report,
-        AcceptedLeanClosure lean)
-        => new(snapshot, lean, report);
-
-    private static (LeanAxiomReport Report, AcceptedLeanClosure Lean) LoadLean(
-        RepositorySnapshot snapshot,
-        ILeanReportSource leanReportSource)
-    {
-        // Loading and validating the report are one step from a caller's point of view: both
-        // failures say the build artefact is unusable, not that this repository is wrong. Keeping
-        // them together lets a caller classify them as one thing.
-        LeanAxiomReport report;
-        AcceptedLeanClosure lean;
-        try
-        {
-            report = leanReportSource.Load(snapshot);
-            lean = ValidateLean(snapshot, report);
-        }
-        catch (Exception exception) when (exception is not LeanReportUnusableException)
-        {
-            throw new LeanReportUnusableException(exception);
-        }
-
-        return (report, lean);
+        return new(snapshot, ValidateLean(snapshot, report), report);
     }
 
     /// Runs a gateway call that reads repository state, marking anything it throws. A repository
@@ -102,24 +53,14 @@ internal static class DagLedgerCommandPreparation
     internal sealed class RepositoryUnavailableException(Exception inner)
         : Exception("repository could not be read", inner);
 
-    /// Raised when the raw Lean report cannot be loaded or does not validate. Both are faults in
-    /// a build artefact rather than statements about the repository, and callers that classify
-    /// failures need to tell them apart from ledger faults -- which otherwise arrive as the same
-    /// exception types.
-    internal sealed class LeanReportUnusableException(Exception inner)
-        : Exception("raw Lean report is unusable", inner);
-
     internal sealed class FileLeanReportSource(string path) : ILeanReportSource
     {
-        public LeanAxiomReport Load(RepositorySnapshot snapshot) =>
-            RawLeanReportArtifact.ReadFile(path, snapshot);
-
         public LeanAxiomReport Load(LeanReportScope scope) =>
-            RawLeanReportArtifact.ReadFileForScopeOrFull(path, scope);
-
-        internal LeanAxiomReport Load(LeanReportScope scope, Func<RepositorySnapshot> fullSource) =>
-            RawLeanReportArtifact.ReadFileForScopeOrFull(path, scope, fullSource);
+            RawLeanReportArtifact.ReadFileForScope(path, scope, validateMaterials: true);
     }
+
+    internal static RepositorySnapshot ReadRetirementSources(IRepositoryGateway repository) =>
+        Decode(Ask(() => repository.ReadCurrentProjection(IsLedgerInput)));
 
     /// Bytes that will not decode are a fault in the repository we were handed, not a verdict about
     /// its ledger -- spec A16 classifies snapshot rejection as infrastructure. The read itself can

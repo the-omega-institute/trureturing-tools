@@ -7,8 +7,6 @@ internal interface ICliEnvironment
 {
     ExplicitCommandResult CapacityAudit(IReadOnlyList<string> arguments);
 
-    AdmissionOutcome Check(IReadOnlyList<string> arguments);
-
     ExplicitCommandResult CheckCurrent(IReadOnlyList<string> arguments);
 
     ExplicitCommandResult CheckDelta(IReadOnlyList<string> arguments);
@@ -17,7 +15,6 @@ internal interface ICliEnvironment
 
     AdmissionTopologyOutcome Topology(IReadOnlyList<string> arguments);
 
-    CommandResult Coverage(IReadOnlyList<string> arguments);
 
 
 
@@ -41,8 +38,6 @@ internal interface ICliEnvironment
     CommandResult Route(IReadOnlyList<string> arguments);
 
     CommandResult SelfTest(IReadOnlyList<string> arguments);
-
-    CommandResult RenderDag(IReadOnlyList<string> arguments);
 
     CommandResult AlignLedger(IReadOnlyList<string> arguments);
 
@@ -88,8 +83,6 @@ internal static class CliApplication
         {
             ["capacity-audit"] = static (environment, tail, console) =>
                 RenderExplicit(environment.CapacityAudit(tail), console),
-            ["check"] = static (environment, tail, console) =>
-                RenderAdmission(environment.Check(tail), console),
             ["check-current"] = static (environment, tail, console) =>
                 RenderExplicit(environment.CheckCurrent(tail), console),
             ["check-delta"] = static (environment, tail, console) =>
@@ -100,10 +93,6 @@ internal static class CliApplication
                 RenderTestEvidence("compile-proof", tail, console),
             ["clean-lanes"] = static (environment, tail, console) =>
                 RenderCommand(environment.CleanLanes(tail), console),
-            ["coverage"] = static (environment, tail, console) =>
-                RenderCommand(environment.Coverage(tail), console),
-            ["dag-render"] = static (environment, tail, console) =>
-                RenderCommand(environment.RenderDag(tail), console),
             ["deposit-header-check"] = static (environment, tail, console) =>
                 RenderExplicit(environment.DepositHeaderCheck(tail), console),
             ["lean-utility-input"] = static (environment, tail, console) =>
@@ -198,7 +187,7 @@ internal static class CliApplication
         }
     }
 
-    private static int RenderAdmission(AdmissionOutcome outcome, ICliConsole console) => outcome switch
+    internal static int RenderAdmission(AdmissionOutcome outcome, ICliConsole console) => outcome switch
     {
         AdmissionOutcome.Admitted admitted => RenderAdmitted(admitted, console),
         AdmissionOutcome.RuleRejected rejected => RenderRejected(rejected, console),

@@ -680,8 +680,7 @@ class NativeSemanticConsumerTests:
                         [('before', before), ('unchanged', unchanged), ('warm', warm), ('clean', clean)]},
             warm_matches_clean=warm_report == clean_report and warm_material == clean_material,
             unaffected_origin_preserved=before['origins']['D5.Alone'] == warm['origins']['D5.Alone'],
-            published_closed_negation=published_evidence,
-            publication_and_current_input_verification_passed=True)
+            published_closed_negation=published_evidence)
         self.record_result('comparison', result)
         self.assertFalse(result['public_olean_changed'])
         self.assertTrue(result['private_olean_changed'])
@@ -699,31 +698,18 @@ class NativeSemanticConsumerTests:
         before = self.report()[0][-1]['utility_refutation']['is_closed_negation']
         dependency = self.root / 'ClaimSupport.lean'
         old_sha = publication.digest(dependency)
-        coordinates = publication.coordinates(self.root)
         self.write('ClaimSupport.lean', 'def claimSupport : Prop := True\n')
-        stage = subprocess.run([sys.executable, str(self.root / 'tools/lean-inspector/publication.py'),
-            'stage', '--bundle', str(self.root / 'public.json'), '--repository', str(self.root),
-            '--staging-directory', str(self.root / 'staged')], env=self.env,
-            text=True, capture_output=True, timeout=120)
-        verify = subprocess.run(['bash', str(self.root / 'tools/scripts/report/lean-report-input.sh'),
-            'verify', '--repository', str(self.root), '--report', str(self.root / 'public.json')],
-            env=self.env, text=True, capture_output=True, timeout=120)
         self.build()
         after = self.report()[0][-1]['utility_refutation']['is_closed_negation']
         result = dict(lean_generated=True, dependency='ClaimSupport.lean',
             dependency_sha256_before=old_sha, dependency_sha256_after=publication.digest(dependency),
-            coordinates_unchanged=coordinates == publication.coordinates(self.root),
-            old_closed_negation=before, new_closed_negation=after,
-            stage_exit=stage.returncode, stage_stderr=stage.stderr,
-            verify_exit=verify.returncode, verify_stderr=verify.stderr)
+            old_closed_negation=before, new_closed_negation=after)
         if output := os.environ.get('STRATALINT_DEPENDENCY_PROBE_RESULT'):
             Path(output).write_text(json.dumps(result, indent=2) + '\n')
         self.assertFalse(before)
         self.assertFalse(after)
         activity = [json.loads(line) for line in (self.root / 'activity.jsonl').read_text().splitlines()]
         self.assertEqual(sum(row['count'] for row in activity if row['kind'] == 'extract'), 1)
-        self.assertEqual(stage.returncode, 0, json.dumps(result))
-        self.assertEqual(verify.returncode, 0, json.dumps(result))
 
     def test_exported_private_dependency_invalidates_report(self):
         support = 'module\npublic section\nnoncomputable section\nprivate axiom privateInput : Nat\ndef support : Nat := privateInput\n'
@@ -740,7 +726,6 @@ class NativeSemanticConsumerTests:
         old = self.report()[0][0]['declarations'][0]['axioms']
         self.assertTrue(any('privateInput' in name for name in old))
         self.write('Support.lean', support.replace('axiom privateInput : Nat', 'def privateInput : Nat := 3'))
-        publication.validate_bundle(self.root / 'public.json', publication.coordinates(self.root), self.root)
         self.build()
         self.assertEqual(self.report()[0][0]['declarations'][0]['axioms'], [])
         self.publish()

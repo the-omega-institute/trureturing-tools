@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: the-omega-institute/trureturing
-          ref: 9919e9f3e5c4c1518e626f12d92d0ab3290b0b82
+          ref: 8f1e634c9c7348a334889593dff6b8e154bc7a93
           path: fixture
           persist-credentials: false
       - name: Install the candidate archive in the pinned consumer

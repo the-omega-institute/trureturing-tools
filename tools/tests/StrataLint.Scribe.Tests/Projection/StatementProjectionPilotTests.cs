@@ -435,7 +435,7 @@ public sealed class StatementProjectionPilotTests
 
         Assert.Equal(2, exit);
         Assert.Contains(
-            "projections --check --report <file>",
+            "content-check --scoped --report",
             error.ToString(),
             StringComparison.Ordinal);
     }

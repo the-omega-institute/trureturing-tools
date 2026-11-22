@@ -33,7 +33,7 @@ public sealed class ScribeLeanInputSelectionTests
             """);
         var snapshot = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(
             RawRepositorySnapshot.Create(sources.Select(pair => RawRepositoryEntry.FromText(pair.Key, pair.Value))))).Snapshot;
-        var reportPath = root.Resolve(".lake/build/stratalint/raw-lean-report.json");
+        var reportPath = root.Resolve(".lake/build/stratalint/scoped-lean-report.json");
         RawLeanReportArtifact.WriteFile(reportPath, snapshot, LeanAxiomReport.Create(new Dictionary<string, LeanFileReport>
         {
             [owner] = new([], []),
@@ -140,7 +140,7 @@ public sealed class ScribeLeanInputSelectionTests
             """);
         var snapshot = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(
             RawRepositorySnapshot.Create([RawRepositoryEntry.FromText(source, sourceText)]))).Snapshot;
-        var reportPath = root.Resolve(".lake/build/stratalint/raw-lean-report.json");
+        var reportPath = root.Resolve(".lake/build/stratalint/scoped-lean-report.json");
         RawLeanReportArtifact.WriteFile(reportPath, snapshot,
             LeanAxiomReport.Create(new Dictionary<string, LeanFileReport>
             {

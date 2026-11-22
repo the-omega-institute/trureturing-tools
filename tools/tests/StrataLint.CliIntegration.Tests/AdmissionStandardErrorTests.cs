@@ -23,16 +23,28 @@ public sealed class AdmissionStandardErrorTests
         const string document = "Library/notes/Fixture.md";
         var fixture = new RuleFixture();
         fixture.Files[document] = "fixture\n";
+        const string registration = """
+            {"schema":"report-producer-scope-v2","registration":"lean-report-inputs.json",
+             "scope":"scribe-content","projects":[]}
+            """;
+        const string inputs = """
+            {"inspector_sources":{"include":[],"exclude":[]},"producer_scopes":{
+             "lean-report":{"include":[],"exclude":[]},"scribe-content":{"include":[],"exclude":[]}}}
+            """;
+        fixture.Files["Meta/ReportProducers/scribe-content.json"] = registration;
+        fixture.Files["lean-report-inputs.json"] = inputs;
+        Directory.CreateDirectory(Path.Combine(temporary.Path, "Meta/ReportProducers"));
+        File.WriteAllText(Path.Combine(temporary.Path, "Meta/ReportProducers/scribe-content.json"), registration);
+        File.WriteAllText(Path.Combine(temporary.Path, "lean-report-inputs.json"), inputs);
         static RawRepositorySnapshot Snapshot(Dictionary<string, string> files) =>
             RawRepositorySnapshot.Create(files.Select(static pair => RawRepositoryEntry.FromText(pair.Key, pair.Value)));
         var current = Snapshot(fixture.Files);
-        var reportPath = Path.Combine(temporary.Path, "candidate.json");
-        var decoded = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(current));
-        RawLeanReportArtifact.WriteFile(reportPath, decoded.Snapshot, LeanAxiomReport.Create(fixture.Reports));
+        var changedPaths = Path.Combine(temporary.Path, "paths");
+        File.WriteAllText(changedPaths, document + "\0");
         var gateway = new FakeRepositoryGateway(
             RawChangeSet.Create([document]), current, Snapshot(fixture.Baseline));
         var environment = new ProductionCliEnvironment(
-            "/fixture", gateway, new FakeLeanReportSource(null),
+            temporary.Path, gateway, new FakeLeanReportSource(null),
             scribeEmissionVerifier: null, new FirstPhaseTimeProvider(emitTiming));
         using var output = new StringWriter(CultureInfo.InvariantCulture);
         using var error = new StringWriter(CultureInfo.InvariantCulture);
@@ -44,7 +56,7 @@ public sealed class AdmissionStandardErrorTests
             Console.SetOut(output);
             Console.SetError(error);
             exitCode = CliApplication.Run(
-                ["check-delta", "--protected-base", new string('a', 40), "--candidate-lean-report", reportPath],
+                ["check-delta", "--protected-base", new string('a', 40), "--changed-paths-from", changedPaths],
                 environment, new SystemCliConsole());
         }
         finally

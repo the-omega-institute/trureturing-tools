@@ -12,20 +12,19 @@ public sealed partial class ProductionEnvironmentTests
         var fixture = new RuleFixture();
         fixture.Files["Meta/ci-checks.json"] = CommonCheckRegistrationFixture.Manifest(
             "tools/StrataLint.Scribe/StrataLint.Scribe.csproj");
+        InstallScopedScribeRegistration(fixture.Files, temporary.Path);
         var snapshot = Snapshot(fixture.Files);
-        var report = Path.Combine(temporary.Path, "report.json");
-        RawLeanReportArtifact.WriteFile(report, Decode(snapshot), LeanAxiomReport.Create(fixture.Reports));
         var paths = Path.Combine(temporary.Path, "paths");
-        File.WriteAllText(paths, "Blueprint/D5/S0/Carrier/Probe.scribe.cs\0notes/selected.txt\0");
+        File.WriteAllText(paths, "Library/notes/Probe.md\0notes/selected.txt\0");
         var verifier = new FakeScribeEmissionVerifier(VerifiedScribeEmissions.Empty);
         var environment = new ProductionCliEnvironment(temporary.Path,
             new FakeRepositoryGateway(RawChangeSet.Create([]), snapshot, Snapshot(fixture.Baseline)),
             new FakeLeanReportSource(null), verifier);
 
-        var result = environment.CheckCurrent(["--candidate-lean-report", report, "--scribe-paths-from", paths]);
+        var result = environment.CheckCurrent(["--changed-paths-from", paths]);
 
         Assert.Equal(0, result.ExitCode);
-        Assert.Equal(["Blueprint/D5/S0/Carrier/Probe.scribe.cs", "notes/selected.txt"],
+        Assert.Equal(["Library/notes/Probe.md", "notes/selected.txt"],
             Assert.Single(verifier.Scopes).Paths.Select(path => path.Value).ToArray());
     }
 
@@ -39,20 +38,36 @@ public sealed partial class ProductionEnvironmentTests
         var fixture = new RuleFixture();
         fixture.Files["Meta/ci-checks.json"] = CommonCheckRegistrationFixture.Manifest(
             "tools/StrataLint.Scribe/StrataLint.Scribe.csproj");
+        InstallScopedScribeRegistration(fixture.Files, temporary.Path);
         var snapshot = Snapshot(fixture.Files);
-        var report = Path.Combine(temporary.Path, "report.json");
-        RawLeanReportArtifact.WriteFile(report, Decode(snapshot), LeanAxiomReport.Create(fixture.Reports));
         var paths = Path.Combine(temporary.Path, "paths");
-        File.WriteAllText(paths, "Blueprint/D5/S0/Carrier/Probe.scribe.cs\0");
+        File.WriteAllText(paths, "Library/notes/Probe.md\0");
         var environment = new ProductionCliEnvironment(temporary.Path,
             new FakeRepositoryGateway(RawChangeSet.Create([]), snapshot, Snapshot(fixture.Baseline)),
             new FakeLeanReportSource(null), new RejectingScribeEmissionVerifier(exitCode, message));
 
-        var result = environment.CheckCurrent(["--candidate-lean-report", report, "--scribe-paths-from", paths]);
+        var result = environment.CheckCurrent(["--changed-paths-from", paths]);
 
         Assert.Equal(exitCode, result.ExitCode);
         Assert.Contains(message, result.Error, StringComparison.Ordinal);
         Assert.Equal(infrastructure, result.Error.StartsWith("INFRASTRUCTURE_FAILURE ", StringComparison.Ordinal));
+    }
+
+    private static void InstallScopedScribeRegistration(Dictionary<string, string> files, string root)
+    {
+        const string registration = "Meta/ReportProducers/scribe-content.json";
+        const string inputs = "lean-report-inputs.json";
+        files[registration] = """
+            {"schema":"report-producer-scope-v2","registration":"lean-report-inputs.json",
+             "scope":"scribe-content","projects":[]}
+            """;
+        files[inputs] = """
+            {"inspector_sources":{"include":[],"exclude":[]},"producer_scopes":{
+             "lean-report":{"include":[],"exclude":[]},"scribe-content":{"include":[],"exclude":[]}}}
+            """;
+        Directory.CreateDirectory(Path.Combine(root, "Meta/ReportProducers"));
+        File.WriteAllText(Path.Combine(root, registration), files[registration]);
+        File.WriteAllText(Path.Combine(root, inputs), files[inputs]);
     }
 
     private sealed class RejectingScribeEmissionVerifier(int exitCode, string message) : IScribeEmissionVerifier

@@ -179,68 +179,6 @@ public sealed class ContentCheckCommandTests
         Assert.DoesNotContain("CompilationFailed", error.ToString(), StringComparison.Ordinal);
     }
 
-    [Theory]
-    [InlineData("missing")]
-    [InlineData("report-directory")]
-    [InlineData("invalid-json")]
-    [InlineData("noncanonical-json")]
-    [InlineData("wrong-schema")]
-    [InlineData("stale-source")]
-    public void ExplicitReportValidationPrecedesDefinitionExecution(string mutation)
-    {
-        using var fixture = new Fixture();
-        fixture.WriteReport();
-        switch (mutation)
-        {
-            case "missing": File.Delete(fixture.ReportPath); break;
-            case "report-directory":
-                File.Delete(fixture.ReportPath);
-                Directory.CreateDirectory(fixture.ReportPath);
-                break;
-            case "invalid-json": fixture.Write("report.json", "{"); break;
-            case "noncanonical-json":
-                fixture.Write("report.json", "{ \"modules\": [], \"schema\": \"stratalint-raw-lean-report-v3\" }\n");
-                break;
-            case "wrong-schema": fixture.Write("report.json", "{\"modules\":[],\"schema\":\"invalid\"}\n"); break;
-            case "stale-source": fixture.Write("D5/S0/Synthetic/CurrentMarkdown.lean", "namespace Changed\n"); break;
-        }
-        fixture.Write(Path, "invalid C#");
-        var error = new StringWriter();
-        Assert.Equal(2, fixture.RunWithReport(error));
-        Assert.NotEmpty(error.ToString());
-        Assert.DoesNotContain("Compilation:", error.ToString(), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ReportCannotBeOpenedFailsBeforeDefinitionExecution()
-    {
-        using var fixture = new Fixture();
-        fixture.WriteReport();
-        fixture.Write(Path, "invalid C#");
-        using var locked = new FileStream(fixture.ReportPath, FileMode.Open, FileAccess.Read, FileShare.None);
-        var error = new StringWriter();
-        Assert.Equal(2, fixture.RunWithReport(error));
-        Assert.NotEmpty(error.ToString());
-        Assert.DoesNotContain("Compilation:", error.ToString(), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ExplicitReportIsLoadedOnce()
-    {
-        using var fixture = new Fixture();
-        fixture.WriteReport();
-        var previous = RawLeanReportArtifact.Reading.Value;
-        var loads = 0;
-        RawLeanReportArtifact.Reading.Value = () => loads++;
-        try
-        {
-            var error = new StringWriter();
-            Assert.True(fixture.RunWithReport(error) == 0, error.ToString());
-            Assert.Equal(1, loads);
-        }
-        finally { RawLeanReportArtifact.Reading.Value = previous; }
-    }
-
     [Fact]
     public void DescribeReportConsumesTheExactPackWithoutExecutingDefinitions()
     {
@@ -257,42 +195,6 @@ public sealed class ContentCheckCommandTests
         Assert.Contains("scribe-describe-report-v3", output.ToString(), StringComparison.Ordinal);
         Assert.Equal(2, Run(new string('0', 64)));
         Assert.Contains("ScribePackDigestMismatch", error.ToString(), StringComparison.Ordinal);
-    }
-
-    [Theory]
-    [InlineData("emit")]
-    [InlineData("content-check")]
-    [InlineData("markdown-check")]
-    [InlineData("projections")]
-    [InlineData("describe-report")]
-    public void CommandsLoadFileReportWithoutGit(string command)
-    {
-        using var fixture = new Fixture();
-        fixture.WriteFileReport();
-        Assert.False(Directory.Exists(fixture.Root.Resolve(".git")));
-        var output = new StringWriter();
-        var error = new StringWriter();
-        Assert.True(fixture.RunCommand(command, output, error) == 0, error.ToString());
-        Assert.Empty(error.ToString());
-        if (command == "emit")
-            Assert.True(File.Exists(fixture.Root.Resolve(Markdown)));
-    }
-
-    [Theory]
-    [InlineData("emit")]
-    [InlineData("content-check")]
-    [InlineData("markdown-check")]
-    [InlineData("projections")]
-    [InlineData("describe-report")]
-    public void CommandsRejectFileReportSourceDriftWithoutGit(string command)
-    {
-        using var fixture = new Fixture();
-        fixture.WriteFileReport();
-        fixture.Write("D5/S0/Synthetic/CurrentMarkdown.lean", "namespace Changed\n");
-        var error = new StringWriter();
-        Assert.Equal(2, fixture.RunCommand(command, TextWriter.Null, error));
-        Assert.Contains("Raw Lean report source hash does not match D5/S0/Synthetic/CurrentMarkdown.lean",
-            error.ToString(), StringComparison.Ordinal);
     }
 
     private const string Path = "Blueprint/D5/S0/Synthetic/CurrentMarkdown.scribe.cs";
@@ -335,47 +237,6 @@ public sealed class ContentCheckCommandTests
         internal int Run(string selection, TextWriter output, TextWriter error) => ScribeCli.Run(
             ["content-check", "--report", "fixture.json", "--paths-from", "-"],
             Root.Path, output, error, Report, new StringReader(selection));
-        internal string ReportPath => Root.Resolve("report.json");
-        internal void WriteReport()
-        {
-            Write(".gitignore", "report.json*\n");
-            Directory.CreateDirectory(Root.Resolve(".git/objects"));
-            Directory.CreateDirectory(Root.Resolve(".git/refs/heads"));
-            Write(".git/HEAD", "ref: refs/heads/fixture\n");
-            Write(".git/config", "[core]\nrepositoryformatversion = 0\nbare = false\n");
-            var snapshot = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(
-                GitRepositorySnapshotReader.ReadCurrent(Root.Path))).Snapshot;
-            RawLeanReportArtifact.WriteFile(ReportPath, snapshot, Report);
-        }
-        internal void WriteFileReport()
-        {
-            var snapshot = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(
-                RawRepositorySnapshot.Create(Directory.EnumerateFiles(Root.Path, "*.lean", SearchOption.AllDirectories)
-                    .Select(path => new RawRepositoryEntry(System.IO.Path.GetRelativePath(Root.Path, path).Replace('\\', '/'),
-                        System.Collections.Immutable.ImmutableArray.CreateRange(File.ReadAllBytes(path))))))).Snapshot;
-            RawLeanReportArtifact.WriteFile(ReportPath, snapshot, Report);
-            RawLeanReportArtifact.WriteFile(RawLeanReportArtifact.DefaultPath(Root.Path), snapshot, Report);
-        }
-        internal int RunCommand(string command, TextWriter output, TextWriter error)
-        {
-            IReadOnlyList<string> arguments;
-            if (command == "describe-report")
-            {
-                var packPath = Root.Resolve("pack.zip");
-                var manifest = ScribeResourcePack.Write(packPath, [MarkdownCurrentCommandTests.Definition()]);
-                arguments = [command, "--scribe-pack", packPath, "--scribe-pack-digest", manifest.TotalSha256, "--json", "--check"];
-            }
-            else if (command == "projections")
-                arguments = [command, "--check", "--report", ReportPath];
-            else if (command == "emit")
-                arguments = [command, "--paths-from", "-"];
-            else
-                arguments = [command, "--report", ReportPath, "--paths-from", "-"];
-            return ScribeCli.Run(arguments, Root.Path, output, error, leanReport: null, new StringReader(Path));
-        }
-        internal int RunWithReport(TextWriter error) => ScribeCli.Run(
-            ["content-check", "--report", ReportPath, "--paths-from", "-"],
-            Root.Path, TextWriter.Null, error, leanReport: null, new StringReader(Path));
         internal void Write(string path, string text) => File.WriteAllText(Root.Resolve(path), text);
         public void Dispose() => Root.Dispose();
     }

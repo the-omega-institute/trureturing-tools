@@ -1,23 +1,17 @@
 """Synthetic inputs and execution registration tests for report consumers."""
 import copy
-import hashlib
-import io
 import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-import zipfile
-import zlib
 
 HERE = Path(__file__).resolve().parents[1]
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
-import materials
 import publication
 
 EXECUTION = dict(toolchain='lean-toolchain', tools=['lake', 'lean'], platform=['system', 'machine'],
@@ -54,9 +48,6 @@ class ReuseTests(unittest.TestCase):
             path.parent.mkdir(exist_ok=True)
             path.write_text('#!/bin/sh\n[ "$1" = --version ] || exit 91\nprintf "%s\\n" "fixture ' + name + ' 1"\n')
             path.chmod(0o755)
-        self.report = self.root / 'seed' / publication.RAW
-        self.report.parent.mkdir()
-        self.output = self.root / 'output' / publication.RAW
         self.environment = patch.dict(os.environ, {name: '' for name in EXECUTION['environment']})
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -68,22 +59,6 @@ class ReuseTests(unittest.TestCase):
 
     def write_policy(self):
         self.write('lean-report-inputs.json', json.dumps(self.policy))
-
-    def bundle(self):
-        inputs = publication.selection.Selection(self.root)
-        rows = [dict(module=name, source_path=path,
-                     source_sha256='sha256:' + publication.digest(inputs.safe_file(path)),
-                     imports=[], declarations=[]) for name, path in sorted(inputs.modules().items())]
-        self.report.write_bytes(materials.canonical_json(dict(schema=materials.REPORT_SCHEMA, modules=rows)))
-        with zipfile.ZipFile(publication.member(self.report, '.materials.zip'), 'w'):
-            pass
-        origins = {row['module']: dict(module=row['module'],
-            report_sha256=hashlib.sha256(materials.canonical_json(
-                dict(schema=materials.REPORT_SCHEMA, modules=[row]))).hexdigest(),
-
-            input_projection=dict(schema='stratalint-judge-input-projection-v1', module=row['module'], inputs=[]), producer_sources_sha256='a' * 64,
-            inspector_executable_sha256='b' * 64) for row in rows}
-        publication.write_sidecars(self.report, publication.coordinates(self.root), origins)
 
     def test_execution_registration_is_explicit_and_strict(self):
         try:

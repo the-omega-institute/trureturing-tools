@@ -2,23 +2,6 @@ namespace StrataLint.Engine;
 
 public static class LeanCompiledArtifactReports
 {
-    public static LeanAxiomReport ReadRepositoryFiles(string repositoryRoot, string? reportPath = null)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRoot);
-        var root = Path.GetFullPath(repositoryRoot);
-        var artifactPath = reportPath is null
-            ? ResolveReportPath(root)
-            : Path.GetFullPath(reportPath, root);
-        if (!File.Exists(artifactPath))
-        {
-            throw new InvalidOperationException(
-                $"Precomputed raw Lean report is unavailable at {artifactPath}; "
-                + "provide an existing report artifact.");
-        }
-
-        return RawLeanReportArtifact.ReadFile(artifactPath, ReadSources(root));
-    }
-
     public static LeanAxiomReport ReadScopedRepositoryFiles(
         string repositoryRoot, IEnumerable<string> targetPaths, string? reportPath = null)
     {
@@ -94,7 +77,7 @@ public static class LeanCompiledArtifactReports
         var root = Path.GetFullPath(repositoryRoot);
         var configured = Environment.GetEnvironmentVariable("STRATALINT_LEAN_REPORT");
         return string.IsNullOrWhiteSpace(configured)
-            ? RawLeanReportArtifact.DefaultPath(root)
+            ? Path.Combine(root, ".lake/build/stratalint/scoped-lean-report.json")
             : Path.GetFullPath(configured, root);
     }
 

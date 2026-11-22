@@ -95,6 +95,7 @@ sys.path.insert(0, str(HERE))
 import publication
 import materials
 import native
+import scoped
 
 
 class NativeTestSupport:
@@ -607,17 +608,24 @@ defaultFacets = ["static"]
             artifacts = [state / 'modules' / (name + '.zip') for name in config['modules']]
         with patch.dict(os.environ, dict(self.env, STRATALINT_INSPECTOR_ACTIVITY="")):
             return native.aggregate(self.root, output, *artifacts,
-                config=dict(modules=config['modules'], coordinates=publication.coordinates(self.root)),
-                schema=materials.REPORT_SCHEMA, write_sidecars=publication.write_sidecars)
+                config=dict(modules=config['modules'], coordinates={}),
+                schema=scoped.SCHEMA, write_sidecars=scoped.write_sidecars)
 
     def report(self):
         with tempfile.TemporaryDirectory(dir=self.root) as directory:
             path = Path(directory) / 'collection.zip'
             self.collection(path)
             report = publication.unpack(path, directory)
-            publication.validate_bundle(report)
-            rows = list(publication.report_rows(report, materials.REPORT_SCHEMA))
+            rows = self.validate_collection(report)
             return rows, report.read_bytes(), publication.member(report, '.materials.zip').read_bytes()
+
+    def validate_collection(self, report):
+        origins = publication.read_json(publication.member(report, '.provenance.json').read_bytes())['module_origins']
+        rows = list(publication.validated_rows(report, publication.member(report, '.materials.zip'), schema=scoped.SCHEMA))
+        materials.require_keys(origins, {row['module'] for row in rows}, 'scoped production origins')
+        for row in rows:
+            publication.check_origin(origins[row['module']], row)
+        return rows
 
     def origins(self):
         modules = native.state(self.root) / 'modules'
@@ -643,8 +651,7 @@ defaultFacets = ["static"]
             self.collection(path)
             report = publication.unpack(path, directory)
             with patch.dict(os.environ, self.env):
-                publication.publish(report, self.root / 'public.json',
-                                    publication.coordinates(self.root), self.root)
+                publication.publish(report, self.root / 'public.json', validator=self.validate_collection)
 
 
 

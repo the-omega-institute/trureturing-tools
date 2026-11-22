@@ -1,9 +1,7 @@
 using StrataLint.Runtime;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using StrataLint.Engine;
-using Trureturing.Truth;
 
 namespace StrataLint.LeanReportScript.Tests;
 
@@ -114,54 +112,7 @@ public sealed partial class LeanReportInputScriptTests
     }
 
     [Fact]
-    public void VerifyRejectsAttestedProducerThatDiffersFromCurrentProducer()
-    {
-        using var fixture = new LeanReportInputFixture();
-        Assert.Equal(0, fixture.CaptureProductionInput().ExitCode);
-        fixture.RewriteAttestedProducer(new string('0', 64));
-
-        var result = fixture.Verify();
-
-        Assert.Equal(2, result.ExitCode);
-        Assert.Contains(
-            "producer",
-            Encoding.UTF8.GetString(result.StandardError),
-            StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public void VerifyRejectsEmptyProducerPreimageWhenCompileClosureFails()
-    {
-        using var fixture = new LeanReportInputFixture();
-        fixture.AttestEmptyProducerPreimage();
-        Assert.Equal(2, fixture.Verify().ExitCode);
-        fixture.BreakProducerClosureEvaluation();
-
-        var result = fixture.Verify();
-
-        Assert.Equal(2, result.ExitCode);
-        Assert.Empty(result.StandardOutput);
-        Assert.Contains("lean-report-inputs.json", Encoding.UTF8.GetString(result.StandardError));
-    }
-
-    [Fact]
-    public void VerifyRejectsTheSameReportAcrossCSharpDriftWhenCompileClosureFails()
-    {
-        using var fixture = new LeanReportInputFixture();
-        fixture.AttestEmptyProducerPreimage();
-        fixture.BreakProducerClosureEvaluation();
-        var before = fixture.Verify();
-
-        fixture.Append(LeanModelsPath, "// C#-only drift\n");
-        var after = fixture.Verify();
-
-        Assert.Equal(2, before.ExitCode);
-        Assert.Equal(2, after.ExitCode);
-        Assert.Contains("lean-report-inputs.json", Encoding.UTF8.GetString(after.StandardError));
-    }
-
-    [Fact]
-    public void CompleteProducerClosureHasStableAddressAndVerifies()
+    public void CompleteProducerClosureHasStableAddress()
     {
         using var fixture = new LeanReportInputFixture();
 
@@ -171,8 +122,6 @@ public sealed partial class LeanReportInputScriptTests
         Assert.Equal(0, first.ExitCode);
         Assert.Equal(0, second.ExitCode);
         Assert.Equal(first.StandardOutput, second.StandardOutput);
-        Assert.Equal(0, fixture.CaptureProductionInput().ExitCode);
-        Assert.Equal(0, fixture.Verify().ExitCode);
     }
 
     [Fact]
@@ -356,22 +305,16 @@ public sealed partial class LeanReportInputScriptTests
     public void RepositoryInputDriftRespectsSemanticCompatibility(string mutation, bool invalidates)
     {
         using var fixture = new LeanReportInputFixture();
-        Assert.Equal(0, fixture.CaptureProductionInput().ExitCode);
-        Assert.Equal(0, fixture.Verify().ExitCode);
 
+        var before = fixture.Address();
         fixture.Mutate(mutation);
-
-        var result = fixture.Verify();
-        Assert.Equal(invalidates ? 2 : 0, result.ExitCode);
-        if (invalidates)
-            Assert.Contains("stale", Encoding.UTF8.GetString(result.StandardError), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(invalidates, before != fixture.Address());
     }
 
     private sealed partial class LeanReportInputFixture : IDisposable
     {
         private readonly TemporaryDirectory temporary = new();
         private readonly string repository;
-        private readonly string report;
         private readonly string script;
         private readonly string inspectorScriptPath = string.Join(
             '/', "tools", "lean-inspector", "inspect.sh");
@@ -381,7 +324,6 @@ public sealed partial class LeanReportInputScriptTests
         internal LeanReportInputFixture(string repositoryName = "repository")
         {
             repository = Path.Combine(temporary.Path, repositoryName);
-            report = Path.Combine(temporary.Path, "raw-lean-report.json");
             script = Path.Combine(
                 TestRepositoryLayout.FindRoot(),
                 "tools", "scripts", "report", "lean-report-input.sh");
@@ -462,25 +404,6 @@ public sealed partial class LeanReportInputScriptTests
             Write(TruthLockPath, "{}\n");
             Write("global.json", "{}\n");
             LeanReportRegistrationFixture.Install(repository);
-            // Synthetic module rows carry the same source/origin contract as
-            // native bundles; no mathematical declarations are manufactured.
-            var modules = new[] { "D5/Probe.lean", "Trureturing.lean" }.Select(path => new
-            {
-                module = path[..^5].Replace('/', '.'), source_path = path,
-                source_sha256 = "sha256:" + Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(repository, path)))),
-                imports = Array.Empty<string>(), declarations = Array.Empty<object>(),
-            });
-            File.WriteAllBytes(report, StructuredCanonicalWriter.WriteJson(JsonSerializer.SerializeToElement(
-                new { schema = "stratalint-raw-lean-report-v3", modules })).ToArray());
-            var digest = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(report)));
-            File.WriteAllText(
-                report + ".sha256",
-                $"{digest}  {Path.GetFileName(report)}\n",
-                new UTF8Encoding(false));
-            File.WriteAllText(
-                report + ".provenance.json",
-                "{}\n",
-                new UTF8Encoding(false));
         }
 
         internal void RegisterProducer(string path, string scope = "lean-report") =>
@@ -490,55 +413,8 @@ public sealed partial class LeanReportInputScriptTests
 
         internal string MemoFile => Path.Combine(MemoRoot, "memo.v1");
 
-        internal ProcessOutput CaptureProductionInput()
-        {
-            var result = Run("address");
-            if (result.ExitCode != 0) return result;
-            var addressParts = Encoding.UTF8.GetString(result.StandardOutput)
-                .Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            var address = addressParts[0];
-            var producer = addressParts[1];
-            WriteFixtureOrigins(repository, report);
-            var reportSha = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(report)));
-            File.WriteAllText(
-                report + ".input.attestation",
-                "schema=stratalint-lean-report-input-attestation-v1\n"
-                + $"repository_input_sha256={address}\n"
-                + $"producer_sha256={producer}\n"
-                + $"report_sha256={reportSha}\n",
-                new UTF8Encoding(false));
-            return result;
-        }
-
-        internal ProcessOutput Verify() => Run("verify");
-
-        internal void AttestEmptyProducerPreimage()
-        {
-            var sources = ManifestHash("Trureturing.lean", "D5/Probe.lean", inspectorSourcePath);
-            var config = ManifestHash("lean-toolchain", "lake-manifest.json", "lakefile.toml");
-            var preimage = "schema=stratalint-lean-report-repository-input-v1\n"
-                + "repository_inspector_sha256=\n"
-                + $"lean_sources_sha256={sources}\nlean_config_sha256={config}\n";
-            var address = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(preimage)));
-            var reportSha = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(report)));
-            File.WriteAllText(
-                report + ".input.attestation",
-                "schema=stratalint-lean-report-input-attestation-v1\n"
-                + $"repository_input_sha256={address}\nproducer_sha256={sources}\nreport_sha256={reportSha}\n",
-                new UTF8Encoding(false));
-        }
-
         internal void BreakProducerClosureEvaluation() =>
             Append("lean-report-inputs.json", "<");
-
-        internal void RewriteAttestedProducer(string producer)
-        {
-            var path = report + ".input.attestation";
-            var lines = File.ReadAllLines(path, Encoding.UTF8);
-            Assert.Equal(4, lines.Length);
-            lines[2] = $"producer_sha256={producer}";
-            File.WriteAllLines(path, lines, new UTF8Encoding(false));
-        }
 
         internal void Mutate(string mutation)
         {
@@ -691,7 +567,7 @@ public sealed partial class LeanReportInputScriptTests
             };
             arguments.AddRange(
             [
-                "bash", script, command, "--repository", repository, "--report", report,
+                "bash", script, command, "--repository", repository,
             ]);
             return TestProcessRunner.Run(
                 "env",

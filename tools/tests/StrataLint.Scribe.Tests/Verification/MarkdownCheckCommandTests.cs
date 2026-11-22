@@ -46,7 +46,7 @@ public sealed class MarkdownCheckCommandTests
 
         Assert.Equal(2, exit);
         Assert.Contains(
-            "markdown-check --report <file> --paths-from <file|->",
+            "content-check --scoped --report",
             error.ToString(),
             StringComparison.Ordinal);
     }

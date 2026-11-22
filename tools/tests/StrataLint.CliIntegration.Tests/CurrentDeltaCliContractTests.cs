@@ -40,7 +40,7 @@ public sealed class CurrentDeltaCliContractTests
     }
 
     [Fact]
-    public void CurrentReadsAParentlessRemotelessRepositoryBeforeReportingMissingReport()
+    public void CurrentReadsAParentlessRemotelessRepositoryBeforeReportingMissingChangedPaths()
     {
         using var fixture = new TemporaryDirectory();
         void Git(params string[] args) => Assert.Equal(0, TestProcessRunner.Run("git", args, fixture.Path,
@@ -49,10 +49,10 @@ public sealed class CurrentDeltaCliContractTests
         Git("init", "-q"); Git("add", ".");
         Git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "parentless");
         var result = TestProcessRunner.Run("dotnet", [typeof(StrataLint.Cli.Program).Assembly.Location, "check-current",
-            "--candidate-lean-report", Path.Combine(fixture.Path, "absent-report.json")], fixture.Path,
+            "--changed-paths-from", Path.Combine(fixture.Path, "absent-changed-paths")], fixture.Path,
             TestBudgets.ScriptProcessHangGuard, 64 * 1024);
         Assert.Equal(2, result.ExitCode);
-        Assert.Contains("absent-report.json", Encoding.UTF8.GetString(result.StandardError));
+        Assert.Contains("absent-changed-paths", Encoding.UTF8.GetString(result.StandardError));
         Assert.False(Directory.Exists(Path.Combine(fixture.Path, "build/ci")));
     }
 
