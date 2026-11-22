@@ -197,6 +197,35 @@ class VolumeDownloads(unittest.TestCase):
                 self.assertEqual(max(observed), 48)
 
 
+class NativeReleaseProducts(unittest.TestCase):
+    def test_cross_platform_and_mixed_seed_invalidate_only_native_products(self):
+        from lean_cache_release_io import check_native_products
+
+        elf = bytes.fromhex("7f454c46020101").ljust(18, b"\0") + (183).to_bytes(2, "little")
+        macho = bytes.fromhex("cffaedfe0c000001").ljust(32, b"\0")
+        for source in ("darwin-arm64", "linux-arm64"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                files = {"bin/tool": macho, "bin/tool.trace": b"trace", "bin/tool.rsp": b"objects",
+                         "ir/D5/A.c.o.export": elf, "ir/D5/A.c.o.export.hash": b"hash",
+                         "lib/libD5.a": b"!<arch>\n", "bin/portable": b"#!/bin/sh\n",
+                         "ir/D5/A.c": b"int a;", "lib/lean/D5/A.olean": b"portable"}
+                for name, data in files.items():
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                with patch("lean_cache.binary_platform", return_value=("linux", "arm64")):
+                    with self.assertRaisesRegex(ValueError, "foreign native Lake product"):
+                        check_native_products(root, "revision/linux-arm64")
+                    self.assertTrue((root / "bin/tool").is_file())
+                    self.assertEqual(check_native_products(root, "revision/" + source, staging=True), 3)
+                    self.assertEqual({str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()},
+                                     {"bin/portable", "ir/D5/A.c", "lib/lean/D5/A.olean"})
+                    (root / "bin/tool").write_bytes(elf)
+                    self.assertEqual(check_native_products(root, "revision/linux-arm64", staging=True), 0)
+                    self.assertEqual((root / "bin/tool").read_bytes(), elf)
+
+
 class VolumeReleases(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

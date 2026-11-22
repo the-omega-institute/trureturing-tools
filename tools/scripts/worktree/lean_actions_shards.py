@@ -29,7 +29,7 @@ from lean_artifact_inventory import (
     required_compiler_paths, workspace_modules,
 )
 from lean_cache_release import cache_guard, has_unsafe_parent, install_scoped, report_reuse
-from lean_cache_release_io import archive_sha, copy_chunks
+from lean_cache_release_io import archive_sha, check_native_products, copy_chunks
 from lean_cache_shards import group_identity, make_layout
 from lean_release_index import safe_path, valid_digest
 
@@ -261,6 +261,7 @@ def prepare(root, identity, state, previous, anchor, targets=(), available=froze
         if state == "complete":
             report = root / PROJECT_BUILD / REPORT_PATH
             report_reuse.read_receipt(report, report_reuse.capture(root))
+            check_native_products(root / PROJECT_BUILD)
         modules = workspace_modules(root)
         graph = project_imports(root, modules)
         inventory = build_inventory(root, modules)
@@ -461,6 +462,8 @@ def install(root, record, targets=None, *, require_complete=False, preparation=N
                     available.add(digest_value)
         extract_seconds = time.monotonic() - extract_started
         install_started = time.monotonic()
+        if unpacked.is_dir() and not (require_complete and missing):
+            check_native_products(unpacked)
         if require_complete and missing:
             available.clear()
         elif continuation:
