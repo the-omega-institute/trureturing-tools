@@ -1132,9 +1132,9 @@ def restore_snapshot(root, partition, tag, stage, deadline, expected=None, refre
                         extract_members(archive, unpacked, members, deadline)
                 if not source.is_dir():
                     raise ValueError("archive has no project build")
-                invalidated = check_native_products(source, manifest["partition"], staging=True)
+                invalidated = check_native_products(source, partition, staging=True)
                 if invalidated:
-                    receipt("native", "invalidated", products=invalidated, partition=manifest["partition"])
+                    receipt("native", "invalidated", products=invalidated, partition=partition)
                 if approved_producer is not None or require_compatible_seed:
                     checked = report_reuse.seed_format(source / "stratalint/raw-lean-report.json")
                     if not checked["compatible"]:
