@@ -42,11 +42,11 @@ def main(argv):
                 op.run('git', 'fetch', '-q', 'origin', 'dev')
                 pages = json.loads(op.run('gh', 'api', 'repos/' + op.ctx.slug + '/releases?per_page=100',
                                               '--paginate', '--slurp').stdout)
-                releases = [r for page in pages for r in page if r['tag_name'].startswith('lean-cache-v3-')]
+                releases = [r for page in pages for r in page if r['tag_name'].startswith('lean-cache-v2-')]
                 releases.sort(key=lambda r: r['created_at'], reverse=True)
                 if releases:
                     tag = releases[0]['tag_name']
-                    if not re.fullmatch(r'lean-cache-v3-[A-Za-z0-9._-]+', tag): fail(13, 'invalid cache tag')
+                    if not re.fullmatch(r'lean-cache-v2-[A-Za-z0-9._-]+', tag): fail(13, 'invalid cache tag')
                     with tempfile.TemporaryDirectory(prefix='op-warm __manifest__ ') as tmp:
                         op.gh('release', 'download', tag, '--pattern', 'manifest.json', '--dir', tmp)
                         producer = sha(json.loads((Path(tmp) / 'manifest.json').read_text())['producer_commit_sha'])

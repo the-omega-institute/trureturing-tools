@@ -95,7 +95,7 @@ internal sealed class LeanCacheChunkFixture : IDisposable
     internal JsonObject CacheKey { get; }
     internal byte[] ArchiveBytes { get; private set; }
     internal string Tag => CandidateTag(4242);
-    internal string CandidateTag(int run, string? partition = null) => $"lean-cache-v3-{(partition ?? Partition).Replace('/', '-')}-report-{CacheKey["report_format"]!.GetValue<string>()}-env-{CacheKey["execution_sha256"]!.GetValue<string>()[..12]}-ci-{run}-1";
+    internal string CandidateTag(int run, string? partition = null) => $"lean-cache-v2-{(partition ?? Partition).Replace('/', '-')}-report-{CacheKey["report_format"]!.GetValue<string>()}-env-{CacheKey["execution_sha256"]!.GetValue<string>()[..12]}-ci-{run}-1";
     internal string? Unpacked => ReadInstalled("build/lib/lean/cache.olean");
     internal string? UnpackedReport => ReadInstalled("build/lean-inspector/modules/Trureturing.zip");
     internal string[] DownloadPatterns => ScriptHarnessScratch.ReadRecordedCalls(Path.Combine(temporary.Path, "download-patterns"));

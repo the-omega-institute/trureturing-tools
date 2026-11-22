@@ -88,12 +88,6 @@ def protect(names):
 names = [str(log), "tools", ".lake", "build/lean-cache", "lean-report-inputs.json", "Makefile",
          "Directory.Build.props", "Directory.Build.targets", "Directory.Packages.props",
          "global.json", ".editorconfig", ".globalconfig", "NuGet.Config", "NuGet.config", "nuget.config", "Meta"]
-report = os.environ.get("LEAN_REPORT", ".lake/build/stratalint/raw-lean-report.json")
-seed = os.environ.get("STRATALINT_LEAN_REPORT_REUSE", report)
-for output in (report, seed, ".lake/build/stratalint/raw-lean-report.json"):
-    names.extend(output + suffix for suffix in ("", ".sha256", ".input.attestation",
-                 ".provenance.json", ".materials.zip", ".reuse.json"))
-names.append(os.environ.get("STRATALINT_LEAN_REPORT_LOG_DIR", report + ".logs"))
 names.append(os.environ.get("STRATALINT_LEAN_BUILD_WORK_FILE", "build/lean-cache/build-work.json"))
 if os.environ.get("STRATALINT_LEAN_PRODUCER_DLL"):
     names.append(os.environ["STRATALINT_LEAN_PRODUCER_DLL"])
