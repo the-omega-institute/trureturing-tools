@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import tempfile
 
-from lean_artifact_inventory import import_closure, lake_configuration, project_imports, workspace_modules
+from lean_artifact_inventory import import_closure, matches_lake_configuration, project_imports, workspace_modules
 import lean_compile_layers as compiler
 import lean_release_index as index
 from lean_cache_release_io import SPARSE_PLAN, check_native_products
@@ -20,7 +20,7 @@ SCHEMA = "lean-release-sparse-plan-v1"
 def sparse_plan(root, tag, manifest, digest, tree, target, *, extra_roots=()):
     """Return None when the protected publisher should use ordinary full preparation."""
     if (manifest["schema"] != "lean-release-seed-v6"
-            or manifest["lake_inputs_sha256"] != lake_configuration(root)
+            or not matches_lake_configuration(root, manifest["lake_inputs_sha256"])
             or compiler.checkout(root) != target):
         return None
     base = manifest["producer_commit_sha"]

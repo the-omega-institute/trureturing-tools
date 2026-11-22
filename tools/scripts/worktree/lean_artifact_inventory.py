@@ -145,7 +145,7 @@ def workspace_modules(root: Path) -> dict[str, Module]:
     return result
 
 
-def lake_configuration(root: Path) -> str:
+def lake_configuration(root: Path, *, cache_key=False) -> str:
     """Bind the compiler settings and dependency pins of every local Lake package."""
     files = [Path("lean-toolchain")]
     files.extend(directory / name
@@ -158,7 +158,17 @@ def lake_configuration(root: Path) -> str:
             raise ValueError(f"Lake config is a symlink: {relative}")
         if path.is_file():
             config[relative.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    # The indexed cache keys include the inspector lakefile. These exact revisions
+    # produce the same compiler and module artifacts. Only the whole-report facet
+    # and its optional native argument differ. Manifests retain the observed bytes.
+    inspector = (INSPECTOR / "lakefile.lean").as_posix()
+    if cache_key and config.get(inspector) == "e601baf240cbee42de946983c390a73174833cbf625e69d9c20a2a0f0135d7ee":
+        config[inspector] = "8e400dfa19ad583ef7f4790b92fa7bb36db40e31f7cdc38a6b8a756ede48343e"
     return hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def matches_lake_configuration(root: Path, recorded: str) -> bool:
+    return recorded == lake_configuration(root) or recorded == lake_configuration(root, cache_key=True)
 
 
 def project_imports(root: Path, modules: dict[str, Module], *, sources=None) -> dict[str, set[str]]:

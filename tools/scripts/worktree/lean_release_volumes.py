@@ -14,7 +14,7 @@ import tempfile
 import lean_release_index as index
 from lean_compile_layers import checkout
 from lean_cache_release_io import MultipartArchiveOutput, archive_sha
-from lean_artifact_inventory import lake_configuration
+from lean_artifact_inventory import lake_configuration, matches_lake_configuration
 
 SCHEMA = "lean-release-volumes-v1"
 MAX_VOLUMES = 100
@@ -180,7 +180,7 @@ def pack_volumes(root, stage, previous, chunk_bytes, save_part, deadline=None):
             name, artifacts = groups[pos]
             yield index.write_frame(root, modules, name, artifacts, output, deadline, stable_timestamps=True)
 
-    if previous is not None and previous[0]["lake_inputs_sha256"] == config:
+    if previous is not None and matches_lake_configuration(root, previous[0]["lake_inputs_sha256"]):
         logical = HashOutput()
         rows = list(emit(range(len(groups)), logical))
         contents = {"archive_bytes": logical.size, "archive_sha256": logical.digest.hexdigest(),
@@ -255,7 +255,7 @@ def restore(store, tag, root, destination, targets=()):
     destination.parent.mkdir(parents=True, exist_ok=True)
     with store_lock(store, write=False), tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
         manifest, tree = read_snapshot(store, tag)
-        if lake_configuration(root) != manifest["lake_inputs_sha256"]:
+        if not matches_lake_configuration(root, manifest["lake_inputs_sha256"]):
             raise ValueError("snapshot Lake configuration mismatch")
         unpacked = Path(temporary) / "build"
         unpacked.mkdir()

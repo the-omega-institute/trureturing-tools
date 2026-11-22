@@ -55,7 +55,7 @@ def binding(root, state):
         "mathlib": backend["mathlib_revision"],
         "os": backend["os"],
         "arch": backend["arch"],
-        "config": lake_configuration(root),
+        "config": lake_configuration(root, cache_key=True),
         "execution": dependency_inputs(root),
     }
     if state == "resume":

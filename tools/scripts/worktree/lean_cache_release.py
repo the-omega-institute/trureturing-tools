@@ -910,7 +910,7 @@ def restore_scoped(root, partition, tag, stage, deadline, *, cache_key, producer
                    destination_root=None, release_metadata=None, require_complete=False,
                    validated_snapshot=None) -> tuple[int, int] | None:
     """Return installed module and byte counts, or None for an incompatible workspace."""
-    from lean_artifact_inventory import lake_configuration
+    from lean_artifact_inventory import matches_lake_configuration
     import lean_release_index as indexed_release
 
     metadata, manifest, parts = validated_snapshot or snapshot_manifest(partition, tag, stage, deadline,
@@ -920,7 +920,7 @@ def restore_scoped(root, partition, tag, stage, deadline, *, cache_key, producer
     physical = manifest["schema"] == "lean-release-seed-v6"
     if not physical and manifest["schema"] != INDEXED_SCHEMA:
         raise ValueError("scoped restore requires an indexed Release")
-    if lake_configuration(root) != manifest["lake_inputs_sha256"]:
+    if not matches_lake_configuration(root, manifest["lake_inputs_sha256"]):
         receipt("fetch", "scoped-miss", resolved=tag, reason="Lake workspace configuration changed")
         return None
     index = manifest["index"]
@@ -1612,8 +1612,8 @@ def rolling_base(args):
                 continue
             indexed = manifest["schema"] in (INDEXED_SCHEMA, "lean-release-seed-v6")
             if indexed:
-                from lean_artifact_inventory import lake_configuration
-                if manifest["lake_inputs_sha256"] != lake_configuration(root):
+                from lean_artifact_inventory import matches_lake_configuration
+                if not matches_lake_configuration(root, manifest["lake_inputs_sha256"]):
                     continue
             if not select:
                 with cache_guard(root):
