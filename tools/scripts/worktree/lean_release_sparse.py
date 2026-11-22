@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import tempfile
 
-from lean_artifact_inventory import import_closure, lake_configuration, project_imports, workspace_modules
+from lean_artifact_inventory import inspector_build_path, import_closure, lake_configuration, project_imports, workspace_modules
 import lean_compile_layers as compiler
 import lean_release_index as index
 from lean_cache_release_io import SPARSE_PLAN, check_native_products
@@ -49,16 +49,15 @@ def sparse_plan(root, tag, manifest, digest, tree, target, *, extra_roots=()):
     graph = project_imports(root, modules)
     scope = import_closure(graph, compiler.production_targets(root, modules) | set(extra_roots))
     rows = tree["members"]
-    # An existing, non-default member also belongs to the logical snapshot. Keep it if
-    # compatible and rebuild it if a changed transitive input invalidated its frame.
     prior_names = {row["module"] for row in rows if row["module"] is not None}
-    scope |= import_closure(graph, prior_names & modules.keys())
+    non_inspector = {name for name in prior_names & modules.keys() if not inspector_build_path(modules[name].build)}
+    scope |= import_closure(graph, non_inspector)
     compatible = index.compatible_modules(root, rows, modules, graph, scope)
     changed = scope - compatible
     prerequisites = import_closure(graph, changed | set(extra_roots)) & compatible
     return dict(schema=SCHEMA, base_tag=tag, base_commit=base, base_manifest_sha256=digest,
                 target_commit=target, rebuild_modules=sorted(changed),
-                removed_modules=sorted(prior_names - modules.keys()), restore_modules=sorted(prerequisites),
+                removed_modules=sorted(prior_names - scope), restore_modules=sorted(prerequisites),
                 inherit_modules=sorted(compatible))
 
 def plan_path(root):
@@ -71,7 +70,10 @@ def native_fallback(build, paths, tree, plan):
     if not changed:
         return None
     old = {row["module"]: row for row in tree["members"] if row["module"] in changed}
-    prior_bitcode = next((path for row in old.values() for path in row["paths"] if path.endswith(".bc")), None)
+    removed = set(plan["removed_modules"])
+    prior_bitcode = next((path for name, row in old.items() for path in row["paths"]
+                          if path.endswith(".bc") and not (name in removed and inspector_build_path(PurePosixPath(path)))),
+                         None)
     if prior_bitcode is not None:
         return prior_bitcode
     # Lake stores per-module object variants and their sidecars alongside its C or bitcode.
@@ -152,6 +154,14 @@ def install(host, root, stage, tag, manifest, digest, target, source_ref, verifi
         unpacked.mkdir()
         spans = remote.asset_ranges(host, manifest, tree, selected, deadline, {})
         requests, transferred = index.extract_ranges(host.range_blocks, spans, selected, unpacked, reserved, deadline)
+        # Older residual frames may mix reports and native programs with ordinary
+        # cache data. Only a selected module frame can supply inspector compiler files.
+        compiler_paths = {PurePosixPath(path) for row in selected if row["module"] is not None
+                          for path in row["paths"]}
+        for path in tuple(reserved):
+            if inspector_build_path(path) and path not in compiler_paths:
+                (unpacked / path).unlink(missing_ok=True)
+                reserved.remove(path)
         invalidated = check_native_products(unpacked, manifest["partition"], staging=True)
         if invalidated:
             host.receipt("sparse-seed", "full-fallback", tag=tag, native_products=invalidated)
@@ -275,23 +285,9 @@ def full_fallback(host, root, partition, key, verification, plan, deadline):
 
 
 def prepare_cache(host, root, command, partition, verification, plan):
-    def retry_full():
+    if plan.get("restoring_full"):
         full_fallback(host, root, partition, host.release_key(root), verification, plan, host.operation_deadline())
         return subprocess.run(command, cwd=root, env=dict(os.environ, PARTIAL_INDEXED_PROJECT="true"))
-
-    if plan.get("restoring_full"):
-        return retry_full()
-    compiler.compile_roots(root, workspace_modules(root), plan["rebuild_modules"])
-    with tempfile.TemporaryDirectory(prefix="lean-sparse-cache-") as directory:
-        fallback = Path(directory) / "fallback.json"
-        env = dict(os.environ, LEAN_CACHE_SPARSE_PLAN=str(plan_path(root)),
-                   LEAN_CACHE_SPARSE_FALLBACK_FILE=str(fallback))
-        result = subprocess.run(command, cwd=root, env=env)
-        if not result.returncode or not fallback.is_file():
-            return result
-        reason = json.loads(fallback.read_bytes())
-        if (reason.get("target_commit") != plan["target_commit"]
-                or reason.get("base_manifest_sha256") != plan["base_manifest_sha256"]
-                or not isinstance(reason.get("reason"), str) or not reason["reason"]):
-            raise ValueError("unbound sparse cache fallback")
-    return retry_full()
+    if plan["rebuild_modules"]:
+        compiler.compile_roots(root, workspace_modules(root), plan["rebuild_modules"])
+    return subprocess.CompletedProcess(command, 0)

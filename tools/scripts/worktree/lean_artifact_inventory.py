@@ -237,6 +237,21 @@ def _owner(path, module_paths, modules):
     return None, "other"
 
 
+def inspector_build_path(path):
+    return path.parts[:1] == ("lean-inspector",)
+
+
+def release_scope(root, modules, graph):
+    """An ordinary compiler build refreshes only the default inspector import closure."""
+    inspector = {name for name, mod in modules.items() if inspector_build_path(mod.build)}
+    if not inspector:
+        return set(modules)
+    from lean_compile_layers import production_targets
+
+    defaults = import_closure(graph, production_targets(root, modules))
+    return (modules.keys() - inspector) | defaults
+
+
 def retired_report_path(path):
     if path.parent == PurePosixPath("stratalint"):
         return path.name.startswith("raw-lean-report.json")

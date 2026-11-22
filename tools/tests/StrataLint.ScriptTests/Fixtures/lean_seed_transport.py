@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from lean_seed_transport_fake import FAKE_GH
 
-from lean_seed_support import REPORT_BUILD, OTHER, PUBLISH, REV, ROOT, PartitionFixture, digest, prepare_release_report, write
+from lean_seed_support import COMPILER_BUILD, OTHER, PUBLISH, REV, ROOT, PartitionFixture, digest, prepare_release_report, write
 
 sys.path.insert(0, str(PUBLISH.parent))
 from lean_cache_release import checkout_topology
@@ -32,10 +32,10 @@ class ReleaseTransportCases(PartitionFixture):
               '{"modules":[],"schema":"stratalint-raw-lean-report-v3"}\n')
         write(self.bin / "make", '''#!/bin/sh
 printf "%s\\n" "$*" >> "$FAKE_BUILD_LOG"
-if [ "$1" = "lean-cache-prepare" ] && [ "${FAKE_BUILD_EXIT:-0}" = "0" ]; then
-    if [ "${FAKE_REPORT_PRESERVE:-0}" != "1" ]; then
-        python3 -B "$FAKE_REPORT_FACTORY" write-release-report "$PWD"
-    fi
+if [ "$1" = "lean" ] && [ "${FAKE_BUILD_EXIT:-0}" = "0" ] && [ "${FAKE_COMPILER_PRESERVE:-0}" != "1" ]; then
+    mkdir -p .lake/build/lib/lean/D5
+    test -f .lake/build/lib/lean/Trureturing.olean || echo fixture > .lake/build/lib/lean/Trureturing.olean
+    test -f .lake/build/lib/lean/D5/A.olean || printf locally-produced-olean > .lake/build/lib/lean/D5/A.olean
 fi
 exit "${FAKE_BUILD_EXIT:-0}"
 ''')
@@ -85,7 +85,6 @@ exit "${FAKE_BUILD_EXIT:-0}"
             "FAKE_REMOTE": str(self.remote), "GITHUB_SHA": head, "GITHUB_RUN_ID": run,
             "GITHUB_ACTIONS": "true", "FAKE_DEV_BRANCH": json.dumps(dev),
             "FAKE_DEV_COMPARE": json.dumps({"status": "identical", "merge_base_commit": {"sha": head}}),
-            "FAKE_REPORT_FACTORY": str(ROOT / "tools/tests/StrataLint.ScriptTests/Fixtures/lean_seed_support.py"),
             "GITHUB_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": "schedule", "GITHUB_REF": "refs/heads/dev",
             "STRATALINT_CHECK_SUCCEEDED": "true", "STRATALINT_ACTIONS_CACHE_SEEDED": "", **observed, **extra}
 
@@ -568,8 +567,7 @@ shutil.copytree, lean_cache_release_io.extract_members, pathlib.Path.rename = co
         extracted = next(event for event in events if event["operation"] == "extract")
         self.assertEqual((self.root / ".lake").resolve(), pathlib.Path(extracted["path"]).parent.resolve())
         materials = [event for event in events if event["operation"] == "material"]
-        self.assertEqual({"build/lib/lean/D5/A.olean", "build/lean-inspector/modules/D5.A.zip",
-                          "build/lean-inspector/modules/Trureturing.zip"}, {row["name"] for row in materials})
+        self.assertEqual({"build/lib/lean/D5/A.olean", "build/lib/lean/Trureturing.olean"}, {row["name"] for row in materials})
         for material in materials:
             status = (self.root / ".lake" / material["name"]).stat()
             self.assertEqual((material["device"], material["inode"]), (status.st_dev, status.st_ino))
@@ -927,7 +925,7 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
                     self.assertEqual([1] * len(self.gh_budgets()),
                                      [call["timeout"] for call in self.gh_budgets()])
                     self.assertFalse((self.root / ".lake/build").exists())
-        self.assertEqual([REPORT_BUILD] + ["-C " + str(self.root) + " lean"] * 6,
+        self.assertEqual([COMPILER_BUILD] + ["-C " + str(self.root) + " lean"] * 6,
                          (self.root / "build-runs").read_text().splitlines())
 
     def test_fetch_deadline_is_shared_across_snapshots(self):
@@ -1033,7 +1031,7 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
                     self.assertEqual(build_exit, result.returncode, result.stdout + result.stderr)
                     self.assertIn('"status":"miss"', result.stdout)
                     self.assertFalse((self.root / ".lake/build").exists())
-        self.assertEqual([REPORT_BUILD] + ["-C " + str(self.root) + " lean"] * 4,
+        self.assertEqual([COMPILER_BUILD] + ["-C " + str(self.root) + " lean"] * 4,
                          (self.root / "build-runs").read_text().splitlines())
 
     def test_optional_fetch_valid_seed_still_reaches_build(self):
@@ -1042,7 +1040,7 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         result = self.fetch_then_build()
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn('"status":"unpacked"', result.stdout)
-        self.assertEqual([REPORT_BUILD, "-C " + str(self.root) + " lean"],
+        self.assertEqual([COMPILER_BUILD, "-C " + str(self.root) + " lean"],
                          (self.root / "build-runs").read_text().splitlines())
 
     def test_unavailable_lock_is_an_explicit_fetch_miss(self):
@@ -1054,9 +1052,18 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         self.assertIn("fcntl", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_missing_publisher_dependency_fails_after_build_success(self):
+        write(self.bin / "sitecustomize.py", 'import sys\nsys.modules["lean_artifact_inventory"] = None\n')
+        result = self.transport("publish", PYTHONPATH=str(self.bin))
+        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+        self.assertIn('"status":"failed"', result.stdout)
+        self.assertIn("lean_artifact_inventory", result.stdout)
+        self.assertNotIn("POSIX cache locking", result.stdout)
+        self.assertEqual([], list(self.remote.iterdir()))
+
     def test_unavailable_lock_skips_publication_after_build_success(self):
         write(self.bin / "sitecustomize.py", 'import sys\nsys.modules["fcntl"] = None\n')
-        result = self.transport("publish", PYTHONPATH=str(self.bin), FAKE_REPORT_PRESERVE="1")
+        result = self.transport("publish", PYTHONPATH=str(self.bin), FAKE_COMPILER_PRESERVE="1")
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn('"status":"skipped"', result.stdout)
         self.assertIn("POSIX cache locking unavailable", result.stdout)
@@ -1065,7 +1072,7 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         failed = self.transport("publish", PYTHONPATH=str(self.bin), FAKE_BUILD_EXIT="19")
         self.assertEqual(19, failed.returncode, failed.stdout + failed.stderr)
         self.assertEqual([], list(self.remote.iterdir()))
-        self.assertEqual([REPORT_BUILD, REPORT_BUILD], (self.root / "build-runs").read_text().splitlines())
+        self.assertEqual([COMPILER_BUILD, COMPILER_BUILD], (self.root / "build-runs").read_text().splitlines())
 
     def test_fetch_cannot_enable_cross_partition_selection(self):
         self.assertEqual(0, self.transport("publish").returncode)
@@ -1109,7 +1116,7 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
             self.assertEqual(b"locally-produced-olean", archive.extractfile("build/lib/lean/D5/A.olean").read())
             self.assertNotIn(report_path, archive.getnames())
             self.assertNotIn("build/stratalint/raw-lean-report.json", archive.getnames())
-            self.assertTrue(archive.extractfile("build/lean-inspector/modules/D5.A.zip").read().startswith(b"PK"))
+            self.assertNotIn("build/lean-inspector/modules/D5.A.zip", archive.getnames())
             for path in setup_paths:
                 self.assertNotIn(path, archive.getnames())
                 self.assertEqual("compiler setup", (self.root / ".lake" / path).read_text())
@@ -1121,7 +1128,7 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         self.assertEqual(0, restored.returncode, restored.stdout + restored.stderr)
         self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
         self.assertFalse((self.root / ".lake" / report_path).exists())
-        self.assertTrue((self.root / ".lake/build/lean-inspector/modules/D5.A.zip").is_file())
+        self.assertFalse((self.root / ".lake/build/lean-inspector/modules").exists())
         for path in setup_paths:
             self.assertFalse((self.root / ".lake" / path).exists())
         for path in retained_paths:

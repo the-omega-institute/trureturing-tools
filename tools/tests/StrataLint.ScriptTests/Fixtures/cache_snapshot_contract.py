@@ -187,7 +187,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
         compiler_paths = set(map(str, inventory.required_compiler_paths(name, module)))
         module_paths = compiler_paths | {"lean-inspector/modules/D5.Fixture.zip"}
         legacy_report = "stratalint/raw-lean-report.json"
-        report_paths = {legacy_report + suffix for suffix in (*shards.publication.SUFFIXES, ".reuse.json")}
+        report_paths = {legacy_report + suffix for suffix in ("", ".sha256", ".input.attestation", ".provenance.json", ".materials.zip", ".reuse.json")}
         aggregate_paths = {"lean-inspector/report.zip", "lean-inspector/report.zip.trace",
                            "lean-inspector/report.zip.hash"}
         inspector = "lean-inspector/producer/bin/reportInspector"
@@ -207,7 +207,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                 mock.patch.object(shards, "resume_spec"), \
                 mock.patch.object(shards, "project_publication", return_value=(True, "new-work", 1)), \
                 mock.patch.object(shards, "actions_keys", return_value={"project_save_allowed": True}), \
-                mock.patch.object(shards.publication.selection, "Selection") as selection, \
+                mock.patch.object(shards.report_selection, "Selection") as selection, \
                 contextlib.redirect_stdout(io.StringIO()):
             selection.return_value.modules.return_value = {name: {}}
             index = self.root / "shards.json"

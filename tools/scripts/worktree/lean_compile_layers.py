@@ -21,7 +21,7 @@ from lean_artifact_inventory import (
     lean_artifact_paths, project_imports, required_compiler_paths, workspace_modules, library_globs, matches_module_glob,
 )
 from lean_cache import binary_platform
-from lean_cache_release import cache_guard, install_scoped, publication
+from lean_cache_release import cache_guard, install_scoped, report_selection
 from lean_cache_release_io import copy_chunks
 from lean_release_index import MemberInput, check_compiler_outputs, safe_path
 
@@ -104,21 +104,21 @@ def partition(graph, targets):
 
 
 def production_targets(root, modules):
-    # Include the ordinary default libraries and both report executables.
+    # lean-cache-run --build enters the root, Reg, inspector and reg-inspector
+    # workspaces. Imported interface modules are discovered through their edges.
     output = subprocess.check_output(
         ["lake", "-d", str(REG_INSPECTOR), "--json", "query", "@leanInspector/LeanInformationAudit:modules"],
         cwd=root, text=True,
     )
-    targets = set(publication.selection.Selection(root).modules())
+    targets = set(report_selection.Selection(root).modules())
     targets.update(json.loads(output))
-    for directory in (Path("."), Path("Reg"), REG_INSPECTOR, Path("tools/lean-inspector-interface")):
+    for directory in (Path("."), Path("Reg"), REG_INSPECTOR):
         config = tomllib.loads((root / directory / "lakefile.toml").read_text())
         names = set(config["defaultTargets"])
         globs = [pattern for lib in config["lean_lib"] if lib["name"] in names
                  for pattern in library_globs(lib)]
         targets.update(name for name, mod in modules.items() if mod.package == config["name"]
                        and any(matches_module_glob(name, pattern) for pattern in globs))
-    targets.update(("Inspector", "LeanInformationAudit.Contract.InputDiscovery"))
     return targets
 
 
@@ -221,7 +221,7 @@ def recover(root, modules, source, identity):
                     if entry.name == MANIFEST:
                         if entry.size > 1024 + len(allowed) * 512:
                             raise ValueError("oversized compile layer manifest")
-                        manifest = publication.read_json(data.read())
+                        manifest = json.loads(data.read(), object_pairs_hook=report_selection.unique_object)
                         continue
                     if path not in allowed or entry.name in hashes:
                         raise ValueError(f"unexpected compile layer output: {path}")

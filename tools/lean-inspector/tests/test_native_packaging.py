@@ -35,9 +35,21 @@ class NativeReleaseSupport:
         self.copy('tools/Makefile')
         self.copy('tools/lean-inspector/build_inputs.py')
 
-        for name in ('lean-cache-publish.sh', 'lean_cache_release.py', 'lean_cache_release_io.py', 'lean_cache_topology.py'):
+        for name in ('lean-cache-publish.sh', 'lean_cache_release.py', 'lean_cache_release_io.py',
+                     'lean_cache_topology.py', 'lean_artifact_inventory.py', 'lean_compile_layers.py', 'lean_release_index.py'):
             self.copy('tools/scripts/worktree/' + name)
         policy = json.loads((self.root / 'lean-report-inputs.json').read_text())
+        # Use the production root-module address for this Release consumer.
+        policy['report_modules']['include'][0]['pattern'] = 'Trureturing.lean'
+        self.write('Trureturing.lean', 'import Fixture\n')
+        config = self.root / 'lakefile.toml'
+        config.write_text(config.read_text().replace('["Fixture", "D5"]', '["Trureturing", "Fixture", "D5"]')
+                          .replace('["Fixture", "D5.+"]', '["Trureturing", "Fixture", "D5.+"]'))
+        self.write('tools/lean-inspector/lakefile.lean', 'import Lake\nopen Lake DSL\n'
+                   'package leanInspector where\n  buildDir := "../../.lake/build/lean-inspector/producer"\n'
+                   '@[default_target] lean_lib LeanInformationAudit where\n'
+                   '  globs := #[.one `LeanInformationAudit.CompiledMetadata]\n'
+                   'lean_exe reportInspector where\n  root := `Inspector\n')
         policy['report_execution'] = json.loads((ROOT / 'lean-report-inputs.json').read_text())['report_execution']
         self.write('lean-report-inputs.json', json.dumps(policy))
         self.env['STRATALINT_LEAN_BUILD_TARGETS'] = json.dumps(
@@ -541,9 +553,9 @@ class NativePackageConsumerTests(NativeReleaseSupport):
         self.assertIn('"status":"published"', first.stdout)
         state = native.state(self.root)
         self.assertFalse((state / 'report.zip').exists())
-        expected = {path.name: path.read_bytes() for path in (state / 'modules').glob('*.zip')}
-        self.assertEqual(set(expected), {'D5.A.zip', 'D5.Alone.zip', 'D5.B.zip', 'Fixture.zip'})
-        stamps, origins = self.stamps(), self.origins()
+        self.assertEqual({}, self.stamps())
+        compiler = self.root / '.lake/build/lib/lean/D5/A.olean'
+        expected_compiler = publication.digest(compiler)
         tag = address['release_prefix'] + 'ci-4242-1'
         manifest = json.loads((self.root / 'releases' / tag / 'manifest.json').read_text())
         self.assertEqual(address['partition'], manifest['partition'])
@@ -557,22 +569,21 @@ class NativePackageConsumerTests(NativeReleaseSupport):
         shutil.rmtree(self.root / '.lake/build')
         restored = self.release_run('fetch')
         self.assertIn('"resolved":"' + tag + '"', restored.stdout)
-        self.assertEqual(expected, {path.name: path.read_bytes() for path in (state / 'modules').glob('*.zip')})
+        self.assertEqual(expected_compiler, publication.digest(compiler))
+        self.assertEqual({}, self.stamps())
         self.assertFalse((state / 'report.zip').exists())
-        self.assertTrue((self.root / '.lake/build/lean-inspector/producer/bin/reportInspector').is_file())
-        restored_stamps = self.stamps()
+        self.assertFalse((self.root / '.lake/build/lean-inspector/producer/bin/reportInspector').exists())
         self.env['GITHUB_RUN_ID'] = '4243'
         unchanged = self.release_run('publish')
         self.assertIn('"status":"published"', unchanged.stdout)
-        self.assertEqual(restored_stamps, self.stamps())
-        self.assertEqual({k: v[1] for k, v in stamps.items()}, {k: v[1] for k, v in self.stamps().items()})
-        self.assertEqual(origins, self.origins())
+        self.assertEqual({}, self.stamps())
+        self.assertEqual(expected_compiler, publication.digest(compiler))
         releases = {path.name for path in (self.root / 'releases').iterdir()}
-        support = self.root / 'ClaimSupport.lean'
+        support = self.root / 'D5/A.lean'
         saved_support = support.read_bytes()
-        self.write('ClaimSupport.lean', 'def claimSupport : Prop := missingClaimSupport\n')
+        self.write('D5/A.lean', 'def a : Nat := missingCompilerInput\n')
         failed = self.release_run('publish', success=False)
-        self.assertIn('missingClaimSupport', failed.stdout + failed.stderr)
+        self.assertIn('missingCompilerInput', failed.stdout + failed.stderr)
         self.assertEqual(releases, {path.name for path in (self.root / 'releases').iterdir()})
         support.write_bytes(saved_support)
         self.write('Audit.lean', 'this is not valid Lean\n')

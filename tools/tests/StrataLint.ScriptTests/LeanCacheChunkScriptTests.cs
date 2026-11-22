@@ -21,7 +21,7 @@ public sealed class LeanCacheChunkScriptTests
         fixture.ClearPrivateBuild();
         fixture.AssertSuccess(fixture.Fetch());
         Assert.Equal("01234567", fixture.Unpacked);
-        Assert.Equal("report-seed", fixture.UnpackedReport);
+        Assert.Null(fixture.UnpackedReport);
         Assert.Equal(new[] { "manifest.json", "manifest.json", "lean-build.tgz" }, fixture.DownloadPatterns);
     }
 
@@ -136,7 +136,7 @@ public sealed class LeanCacheChunkScriptTests
         fixture.AssertSuccess(fixture.Fetch());
 
         Assert.Equal(LeanCacheChunkFixture.Archive, fixture.Unpacked);
-        Assert.Equal("report-seed", fixture.UnpackedReport);
+        Assert.Null(fixture.UnpackedReport);
         Assert.Equal(["manifest.json", "manifest.json", .. names], fixture.DownloadPatterns);
     }
 
@@ -144,7 +144,7 @@ public sealed class LeanCacheChunkScriptTests
     public void CurrentFormatFetchKeepsManifestProducerDistinctFromReleaseTarget()
     {
         if (OperatingSystem.IsWindows()) return;
-        using var fixture = new LeanCacheChunkFixture();
+        using var fixture = new LeanCacheChunkFixture(legacyReport: true);
         fixture.AddRelease(fixture.Tag);
         var producer = fixture.Manifest(fixture.Tag)["producer_commit_sha"]!.GetValue<string>();
         var target = fixture.Metadata(fixture.Tag)["target_commitish"]!.GetValue<string>();
@@ -239,7 +239,7 @@ public sealed class LeanCacheChunkScriptTests
     public void FetchContinuesToNextSamePartitionCandidate(string deviation, bool multipartFallback)
     {
         if (OperatingSystem.IsWindows()) return;
-        using var fixture = new LeanCacheChunkFixture();
+        using var fixture = new LeanCacheChunkFixture(legacyReport: true);
         var valid = fixture.CandidateTag(4241);
         fixture.AddRelease(fixture.Tag, deviation: deviation);
         fixture.AddRelease(valid, chunked: multipartFallback);
@@ -308,7 +308,7 @@ public sealed class LeanCacheChunkScriptTests
         Assert.Contains("\"status\":\"failed\"", result.Text, StringComparison.Ordinal);
         Assert.Contains("suffix requires a run ID and attempt", result.Text, StringComparison.Ordinal);
         Assert.False(fixture.HasRelease);
-        Assert.Equal(new[] { "lean-cache-prepare" }, fixture.BuildRuns);
+        Assert.Equal(new[] { "lean FULL_BUILD=1" }, fixture.BuildRuns);
     }
 
     [Fact]
@@ -356,7 +356,7 @@ public sealed class LeanCacheChunkScriptTests
         fixture.ClearPrivateBuild();
         fixture.AssertSuccess(fixture.Fetch());
         Assert.Equal(LeanCacheChunkFixture.Archive, fixture.Unpacked);
-        Assert.Equal("report-seed", fixture.UnpackedReport);
+        Assert.Null(fixture.UnpackedReport);
     }
 
     private static void AssertMiss(LeanCacheChunkFixture.Attempt result, string reason)

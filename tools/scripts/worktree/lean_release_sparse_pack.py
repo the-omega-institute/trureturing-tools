@@ -60,14 +60,14 @@ def overlay_frames(root, tree, plan):
     restored = planned_modules(plan, "restore_modules")
     expected = inherit | rebuild
     if (inherit & rebuild or not restored <= inherit or not inherit <= old.keys() or not expected <= modules.keys()
-            or removed != old.keys() - modules.keys() or not old.keys() - removed <= expected):
+            or removed != old.keys() - expected):
         raise ValueError("sparse plan does not cover the predecessor and target modules")
 
     live = {}
     residual = []
     removed_paths = {path for name in removed for path in old[name]["paths"]}
     inventory = build_inventory(root, modules)
-    for name, artifacts in index.member_groups(inventory, graph):
+    for name, artifacts in index.member_groups(inventory, graph, expected):
         if name is None:
             if any(str(item.path) in removed_paths for item in artifacts):
                 raise ValueError("removed module artifacts remain in the sparse build")

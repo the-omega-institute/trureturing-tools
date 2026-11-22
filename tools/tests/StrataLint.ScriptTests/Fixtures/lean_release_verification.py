@@ -9,7 +9,7 @@ import subprocess
 import tarfile
 import tempfile
 
-from lean_seed_support import REPORT_BUILD, ROOT, digest, write
+from lean_seed_support import COMPILER_BUILD, ROOT, digest, write
 
 
 class ReleaseVerificationCases:
@@ -283,7 +283,7 @@ os.execv({real_git}, [{real_git}, *sys.argv[1:]])
         self.assertIn('"status":"unpacked"', fetched.stdout)
         self.assertIn(tag, fetched.stdout)
         self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
-        self.assertEqual([REPORT_BUILD, REPORT_BUILD], (self.root / "build-runs").read_text().splitlines())
+        self.assertEqual([COMPILER_BUILD, COMPILER_BUILD], (self.root / "build-runs").read_text().splitlines())
 
     def test_fresh_verification_dispatch_binds_the_protected_workflow_and_commit(self):
         self.verification_fixture(branch="integration-ci-cache-tests")
@@ -677,7 +677,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertNotEqual(0, result.returncode)
         self.assertIn('"status":"failed"', result.stdout)
         self.assertNotIn('"status":"published"', result.stdout)
-        self.assertEqual([REPORT_BUILD], (self.root / "build-runs").read_text().splitlines())
+        self.assertEqual([COMPILER_BUILD], (self.root / "build-runs").read_text().splitlines())
 
     def test_verification_truncated_gzip_normalizes_fetch_and_publish_failures(self):
         self.verification_fixture()
@@ -793,9 +793,9 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertFalse(any(call[:2] in (["api", "graphql"], ["release", "list"], ["release", "delete"]) or
                              (call[0] == "api" and "/branches/dev" in call[1]) for call in calls))
 
-    def test_candidate_publish_only_rejects_missing_module_without_building(self):
+    def test_candidate_publish_only_rejects_missing_compiler_output_without_building(self):
         self.candidate_fixture()
-        (self.root / ".lake/build/lean-inspector/modules/D5.A.zip").unlink()
+        (self.root / ".lake/build/lib/lean/D5/A.olean").unlink()
         result = self.candidate_transport("publish")
         self.assertNotEqual(0, result.returncode)
         self.assertFalse((self.root / "build-runs").exists())
@@ -895,7 +895,8 @@ if sys.argv[0].endswith("lean_cache_release.py"):
             stage = pathlib.Path(temporary)
             with tarfile.open(archive) as source:
                 source.extractall(stage, filter="data")
-            shutil.rmtree(stage / "build/lean-inspector/modules")
+            self.assertFalse((stage / "build/lean-inspector/modules").exists())
+            write(stage / "build/lean-inspector/modules/D5.A.zip", "legacy module report")
             for member in retired:
                 write(stage / member, "legacy aggregate")
             with tarfile.open(archive, "w:gz") as output:
@@ -915,6 +916,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
             "--source-commit", manifest["producer_commit_sha"]), **consumer)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
+        self.assertEqual((self.root / ".lake/build/lean-inspector/modules/D5.A.zip").read_text(), "legacy module report")
         for member in retired:
             self.assertFalse((self.root / ".lake" / member).exists())
 
