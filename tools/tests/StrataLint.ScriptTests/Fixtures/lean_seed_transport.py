@@ -32,7 +32,7 @@ class ReleaseTransportCases(PartitionFixture):
               '{"modules":[],"schema":"stratalint-raw-lean-report-v3"}\n')
         write(self.bin / "make", '''#!/bin/sh
 printf "%s\\n" "$*" >> "$FAKE_BUILD_LOG"
-if [ "$1" = "check-lean-report" ] && [ "${FAKE_BUILD_EXIT:-0}" = "0" ]; then
+if [ "$1" = "lean-cache-prepare" ] && [ "${FAKE_BUILD_EXIT:-0}" = "0" ]; then
     if [ "${FAKE_REPORT_PRESERVE:-0}" != "1" ]; then
         python3 -B "$FAKE_REPORT_FACTORY" write-release-report "$PWD"
     fi

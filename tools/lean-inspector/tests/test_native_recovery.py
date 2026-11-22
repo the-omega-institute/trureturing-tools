@@ -246,6 +246,29 @@ class NativeBatchCompatibilityConsumerTests:
                     materials_sha256=hashlib.sha256(report[2]).hexdigest()))
 
 class NativeBatchCapacityConsumerTests:
+    def test_cache_preparation_uses_module_reports_and_records_warm_work(self):
+        self.ensure()
+        self.restore_compiler()
+        expected = {'D5.A', 'D5.Alone', 'D5.B', 'Fixture'}
+        environment = dict(self.env, STRATALINT_ACCEPT_COLD_BUILD='1', GITHUB_RUN_ID='17',
+                           GITHUB_RUN_ATTEMPT='2')
+        state = native.state(self.root)
+        command = [sys.executable, '-B', 'tools/lean-inspector/build_inputs.py', 'prepare-cache']
+
+        def prepare(*extra):
+            result = self.guarded_command([*command, *extra], env=environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            fact = json.loads((self.root / 'build/lean-cache/build-work.json').read_text())
+            self.assertEqual((fact['run_id'], fact['run_attempt']), ('17', '2'))
+            self.assertEqual({path.stem for path in (state / 'modules').glob('*.zip')}, expected)
+            self.assertFalse((state / 'report.zip').exists())
+            return fact
+
+        first = prepare()
+        self.assertGreaterEqual(first['report'], len(expected))
+        self.assertEqual(prepare()['report'], 0)
+        self.assertGreaterEqual(prepare('--regenerate')['report'], len(expected))
+
     def test_runtime_capacity_through_report_entry(self):
         # Real pinned compiler/extractor, using the existing statement-only fixture.
         # No mathematical registration-assessment or Linux memory claim is made.

@@ -1,4 +1,4 @@
-"""Explicit compilation and checked publication for consumers that request a built report."""
+"""Prepare compiler inputs and module reports for Lean consumers."""
 import argparse
 import json
 import os
@@ -11,7 +11,6 @@ import tempfile
 
 import build_work
 import publication
-import reuse
 
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCER = ROOT / 'tools/StrataLint.Lean/bin/Release/net10.0/StrataLint.Lean.dll'
@@ -77,46 +76,34 @@ def prepare(roots, directory, need_inputs=True):
         result.check_returncode()
 
 
-def checked_report(directory, output, seed, program_logs, work_file, *, try_seed):
-    captured = reuse.capture(ROOT)
-    candidate = directory / publication.RAW
-    logs = Path(os.environ.get('STRATALINT_LEAN_REPORT_LOG_DIR', str(output) + '.logs')).resolve()
-    reused = False
-    seed_commit = None
-    if try_seed:
-        with reuse.publication_guard(ROOT, seed):
-            if seed == reuse.canonical_seed(ROOT):
-                seed_commit = reuse.read_seed_base(ROOT)
-            reused = (captured.get('covers_compiler_dependencies', False)
-                      and not reuse._reuse(ROOT, seed, candidate)['needs_lake'])
-        if not reused:
-            # Seed bytes changed since resource planning. Prepare the compiler inputs for extraction.
-            prepare('', program_logs)
-    if not reused:
-        env = dict(os.environ, STRATALINT_LEAN_REPORT_LOG_DIR=str(logs),
-                   STRATALINT_LEAN_BUILD_WORK_FILE=str(directory / 'report-work.json'))
-        subprocess.run(['make', 'lean-report', 'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build',
-                        'LEAN_REPORT=' + str(candidate)], cwd=ROOT, env=env, check=True)
-    with reuse.publication_guard(ROOT, output):
-        publish_checked(candidate, output, captured, reused, seed_commit)
-    try:
-        logs.mkdir(parents=True, exist_ok=True)
-        for path in program_logs.glob('programs.*.log'):
-            shutil.copyfile(path, logs / path.name)
-        phases = [] if reused else ['report']
-        if (program_logs / 'programs.exit.log').exists():
-            phases.append('programs')
-        build_work.record(ROOT, logs, work_file, *phases)
-    except (OSError, ValueError, TypeError, KeyError) as error:
-        print('LEAN_BUILD_WORK_UNKNOWN ' + str(error), file=sys.stderr)
-
-
-def publish_checked(candidate, output, captured, reused, seed_commit):
-    if reuse.capture(ROOT) != captured:
-        raise ValueError('inputs changed during report check')
-    identity = publication.publish(candidate, output, publication.coordinates(ROOT), ROOT, validate=False)
-    publication.member(output, reuse.SUFFIX).unlink(missing_ok=True)
-    reuse._seal(ROOT, output, captured, identity, checked=True, reused=reused, seed_commit=seed_commit)
+def prepare_cache(logs, regenerate):
+    work_file = Path(os.environ.get('STRATALINT_LEAN_BUILD_WORK_FILE', ROOT / 'build/lean-cache/build-work.json'))
+    work_file.unlink(missing_ok=True)
+    prepare('', logs)
+    activity = logs / 'native-work.jsonl'
+    phases = logs / 'native-phases.jsonl'
+    for path in (activity, phases):
+        path.write_text('')
+    environment = dict(os.environ, STRATALINT_INSPECTOR_ACTIVITY=str(activity),
+                       STRATALINT_INSPECTOR_PHASES=str(phases))
+    command = ['bash', 'tools/scripts/worktree/lean-cache-run.sh', '--prebuilt']
+    if regenerate:
+        command.extend([sys.executable, '-B', 'tools/lean-inspector/native.py', 'regenerate', str(ROOT)])
+    lake = os.environ.get('LAKE_BIN') or shutil.which('lake')
+    if not lake:
+        raise ValueError('an installed Lake toolchain is required (LAKE_BIN)')
+    command.extend([lake, '--log-level=error', '-d', str(ROOT / 'tools/lean-inspector-reg'),
+                    'build', ':moduleReports'])
+    with (logs / 'report.stdout.log').open('w') as stdout, (logs / 'report.stderr.log').open('w') as stderr:
+        result = subprocess.run(command, cwd=ROOT, env=environment, stdout=stdout, stderr=stderr)
+    (logs / 'report.exit.log').write_text(str(result.returncode) + '\n')
+    if result.returncode:
+        for name in ('report.stdout.log', 'report.stderr.log'):
+            with (logs / name).open() as stream:
+                for line in stream:
+                    print(line, end='', file=sys.stderr)
+        result.check_returncode()
+    build_work.record(ROOT, logs, work_file, 'programs', 'report')
 
 
 def compile_scope(roots):
@@ -134,36 +121,20 @@ def compile_scope(roots):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['prepare', 'check', 'compile-scope-with-writer'])
+    parser.add_argument('action', choices=['prepare', 'prepare-cache', 'compile-scope-with-writer'])
     parser.add_argument('--targets', default='')
-    parser.add_argument('--output', type=Path, default=reuse.canonical_seed(ROOT))
+    parser.add_argument('--regenerate', action='store_true')
     args = parser.parse_args()
     if args.action == 'compile-scope-with-writer':
         compile_scope(args.targets)
         return
-    if args.action == 'check' and (args.targets or os.environ.get('FULL_BUILD') != '1'):
-        raise ValueError('checking the full report requires FULL_BUILD=1')
-    work_file = Path(os.environ.get('STRATALINT_LEAN_BUILD_WORK_FILE', ROOT / 'build/lean-cache/build-work.json'))
-    if args.action == 'check':
-        work_file.unlink(missing_ok=True)
-    output = args.output.resolve()
-    seed = Path(os.environ.get('STRATALINT_LEAN_REPORT_REUSE', output)).resolve()
-    force = (os.environ.get('REBUILD_REPORT_CACHE') == '1'
-             or os.environ.get('REGENERATE_REPORT_ARTIFACTS') == '1')
-    if args.action == 'check' and not force and os.environ.get('LEAN_REPORT_CACHE_MISS_POLICY') == 'fetch-or-fail':
-        with reuse.compatible_seed(ROOT, seed) as compatible:
-            seed = compatible
-    need_inputs = (args.action == 'prepare' or force
-                   or reuse.probe(ROOT, seed, require_covered_dependencies=True)['needs_lake'])
+    if args.action == 'prepare-cache' and (args.targets or os.environ.get('FULL_BUILD') != '1'):
+        parser.error('preparing the project cache requires FULL_BUILD=1')
     with tempfile.TemporaryDirectory(prefix='lean-programs.') as logs:
-        program_logs = Path(logs)
-        prepare(args.targets, program_logs, need_inputs)
-        if args.action == 'check':
-            # Keep candidate bytes outside the build archive read by release publishers.
-            staging_parent = ROOT / '.lake' if output.is_relative_to(ROOT / '.lake/build') else output.parent
-            staging_parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix='.lean-report-build.', dir=staging_parent) as staging:
-                checked_report(Path(staging), output, seed, program_logs, work_file, try_seed=not need_inputs)
+        if args.action == 'prepare-cache':
+            prepare_cache(Path(logs), args.regenerate)
+        else:
+            prepare(args.targets, Path(logs))
 
 
 if __name__ == '__main__':

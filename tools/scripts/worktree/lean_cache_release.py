@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import re
 import shlex
 import shutil
@@ -31,9 +32,9 @@ from lean_cache_topology import checkout_topology, git_absolute_path, warm_dev_r
 from lean_cache_release_io import (OperationBudget, remaining, MultipartArchiveOutput, ArchiveInput, archive_sha,
                                    copy_chunks, extract_members)
 
-# Use the report entry's declared format and execution capture, never program hashes.
+# Reuse the registered compiler and module report input format.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "lean-inspector"))
-import reuse as report_reuse
+import publication
 
 ASSET = "lean-build.tgz"
 MANIFEST = "manifest.json"
@@ -46,7 +47,7 @@ CHUNK_BYTES = 1610612736
 # for large multipart Release work. The asset stream itself is outside this
 # budget; its integrity is checked before any cache bytes are installed. This is
 # a policy choice, not a throughput derivation.
-# Fetch includes all snapshot attempts; publish starts only after the current report succeeds.
+# Fetch includes all snapshot attempts; publish starts after the project cache is prepared.
 RELEASE_OPERATION_TIMEOUT_SECONDS = 1800
 RELEASE_OPERATION_TIMEOUT_MAX_SECONDS = 21600
 # Asset downloads have no total-duration deadline. User cancellation still
@@ -239,16 +240,22 @@ def existing_release(tag, deadline):
 
 
 def partition_prefix(partition, verification=False):
-    namespace = "lean-cache-verify-v1-" if verification else "lean-cache-v2-"
+    namespace = "lean-cache-verify-v2-" if verification else "lean-cache-v3-"
     return namespace + partition.replace("/", "-") + "-"
 
 
-def release_key(root, captured=None):
-    """Project the report receipt's explicit execution onto the seed platform family."""
-    captured = report_reuse.capture(root) if captured is None else captured
-    if not captured['eligible']:
-        raise ValueError("Release key requires registered execution: " + captured['reason'])
-    execution = captured['execution']
+def release_key(root):
+    selection = publication.selection.Selection(root)
+    selection.validate('lean-report')
+    registered = selection.data.get('report_execution')
+    if registered is None:
+        raise ValueError("Release key requires registered execution")
+    environment = {name: os.environ.get(name, '') for name in registered['environment']}
+    if any(environment[name] for name in ('LEAN_PATH', 'LEAN_SRC_PATH', 'LEAN_SYSROOT', 'LEAN_OPTS')):
+        raise ValueError("Release key requires a registered semantic environment")
+    execution = dict(registered,
+                     platform={name: getattr(platform, name)() for name in registered['platform']},
+                     environment=environment)
     system, machine = normalized_platform(execution['platform']['system'], execution['platform']['machine'])
     platform_name = system + "-" + machine
     family = next((group for group in SHARED_SEED_PLATFORMS if platform_name in group), (platform_name,))
@@ -256,7 +263,7 @@ def release_key(root, captured=None):
         tools=sorted(execution['tools']), platform="+".join(sorted(family)),
         environment=execution['environment'])
     digest = hashlib.sha256(json.dumps(projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return dict(report_format=report_reuse.publication.selection.REPORT_FORMAT, execution_sha256=digest)
+    return dict(report_format=publication.selection.REPORT_FORMAT, execution_sha256=digest)
 
 
 def prefix(partition, cache_key, verification=False):
@@ -540,42 +547,56 @@ def fetch_staging_cleanup(root, *, now):
     return results
 
 
-def publish(root, partition, verification=None, *, build_report=True):
+def validate_project_cache(build):
+    for name in ("lib/lean", "lean-inspector/modules"):
+        directory = build / name
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("project cache is missing " + name)
+
+
+def cache_tar_member(member):
+    path = pathlib.PurePosixPath(member.name)
+    if path.parts[:2] == ("build", "stratalint") and len(path.parts) > 2:
+        if path.parts[2].startswith("raw-lean-report.json"):
+            return None
+    if len(path.parts) == 3 and path.parts[:2] == ("build", "lean-inspector"):
+        if path.name.startswith("report.zip") or path.name in {"inputs.json", "producer-resume.json"}:
+            return None
+    if member.isfile() and path.name.endswith(".setup.json"):
+        return None
+    return member
+
+
+def publish(root, partition, verification=None, *, build_cache=True):
     # Build/content and local archive failures remain failures. Remote transport is optional;
     # explicit verification succeeds only after the uploaded bytes restore.
-    # A caller's LEAN_REPORT override must not move publication outside buildDir.
-    if build_report:
+    if build_cache:
         if os.environ.get("FULL_BUILD") != "1":
             print("cache production requires explicit FULL_BUILD=1", file=sys.stderr)
             return 2
-        build = subprocess.run(["make", "check-lean-report",
-            "LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build",
-            "LEAN_REPORT=.lake/build/stratalint/raw-lean-report.json"], cwd=root)
+        build = subprocess.run(["make", "lean-cache-prepare"], cwd=root)
         if build.returncode:
             _observe("publish", "failed", phase="build",
                      error=subprocess.CalledProcessError(build.returncode, "make"))
             return build.returncode
-    report = root / ".lake/build/stratalint/raw-lean-report.json"
     content_validated = False
     preparing = False
     try:
         deadline = operation_deadline()
         with contextlib.ExitStack() as lifetime, tempfile.TemporaryDirectory(prefix="lean-release-") as temporary:
             stage = pathlib.Path(temporary)
-            # Validate and pack under one read lock so a cache writer cannot
-            # replace the validated report/build before the snapshot is packed.
+            # Validate the layout and take the snapshot under the same read lock.
             with cache_guard(root, shared=True):
                 if (root / ".lake").is_symlink() or not (root / ".lake/build").is_dir():
                     raise ValueError("no private project build to publish")
-                captured = report_reuse.capture(root)
-                report_receipt = report_reuse.read_receipt(report, captured)
-                if report_receipt['completed'] not in report_reuse.CHECKED_STEPS:
-                    raise ValueError("Release publication requires a checked full report. "
-                                     "Run make check-lean-report FULL_BUILD=1 before publishing.")
-                report_reuse.publication.validate_bundle(report, repository=root)
+                build = root / ".lake/build"
+                validate_project_cache(build)
+                for module in publication.selection.Selection(root).modules():
+                    if not (build / "lean-inspector/modules" / (module + ".zip")).is_file():
+                        raise ValueError("project cache is missing the module report for " + module)
                 if partition != partition_path(root):
                     raise ValueError("publication partition differs from the local tree")
-                cache_key = release_key(root, captured)
+                cache_key = release_key(root)
                 identity = publication_identity(root, deadline, verification)
                 content_validated = True
                 tag = prefix(partition, cache_key, verification is not None) + identity['publication_id']
@@ -594,9 +615,7 @@ def publish(root, partition, verification=None, *, build_report=True):
                 with MultipartArchiveOutput(stage, ASSET, CHUNK_BYTES, deadline) as output:
                     with tarfile.open(stage / ASSET, "w:gz", compresslevel=1,
                                       fileobj=output) as archive:
-                        archive.add(root / ".lake/build", arcname="build",
-                                    filter=lambda member: None if member.isfile()
-                                    and member.name.endswith(".setup.json") else member)
+                        archive.add(build, arcname="build", filter=cache_tar_member)
             metadata = {"schema": "lean-release-seed-v4", "partition": partition, "cache_key": cache_key,
                 **identity, **output.metadata()}
             (stage / MANIFEST).write_text(json.dumps(metadata, sort_keys=True) + "\n")
@@ -606,7 +625,7 @@ def publish(root, partition, verification=None, *, build_report=True):
             # at most a draft, which fetch never considers an applicable seed.
             # The server's default branch anchors only the storage container.
             gh(deadline, "release", "create", tag, "--repo", REPO, "--draft",
-               "--title", "Lean cache " + partition, "--notes", "Successful current Lean build and Inspector report; incremental seed only.")
+               "--title", "Lean cache " + partition, "--notes", "Lean compiler artifacts and module reports for incremental reuse.")
             gh(deadline, "release", "upload", tag, *(str(stage / part["name"]) for part in metadata["parts"]),
                str(stage / MANIFEST), "--repo", REPO)
             gh(deadline, "release", "edit", tag, "--repo", REPO, "--draft=false")
@@ -654,7 +673,7 @@ def publish(root, partition, verification=None, *, build_report=True):
     except ImportError as error:
         receipt("publish", "skipped", reason="POSIX cache locking unavailable: " + str(error))
         return 1 if verification is not None else 0
-    except report_reuse.INVALID_SEED + (EOFError, subprocess.SubprocessError, tarfile.TarError) as error:
+    except (OSError, EOFError, ValueError, TypeError, KeyError, subprocess.SubprocessError, tarfile.TarError) as error:
         receipt("publish", "failed", _error=error, reason=str(error))
         return 1 if verification is not None else (0 if content_validated and not preparing else 2)
     return 0
@@ -677,7 +696,7 @@ def snapshot_manifest(partition, tag, stage, deadline, expected=None, verificati
        "--pattern", manifest_name)
     if recorded.get(manifest_name) != "sha256:" + archive_sha(stage / manifest_name, deadline):
         raise ValueError("transferred asset digest mismatch")
-    manifest = report_reuse.publication.read_json((stage / manifest_name).read_bytes())
+    manifest = publication.read_json((stage / manifest_name).read_bytes())
     if not isinstance(manifest, dict):
         raise ValueError("snapshot manifest must be an object")
     commit, publication_id = manifest.get("producer_commit_sha", ""), manifest.get("publication_id", "")
@@ -743,7 +762,7 @@ def clone_local_parts(local_assets, stage, parts, deadline):
 
 
 def restore_snapshot(root, partition, tag, stage, deadline, verification=None, refresh_stale=False, *,
-                     cache_key, approved_producer=None, require_compatible_seed=False, on_installed=None,
+                     cache_key, approved_producer=None, on_installed=None,
                      local_assets=None):
     with observed_phase("manifest"):
         metadata, manifest, parts = snapshot_manifest(partition, tag, stage, deadline,
@@ -796,8 +815,8 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
     lake = root / ".lake"
     if lake.is_symlink():
         raise ValueError("shared cache target is forbidden")
-    installed, backup, base_recorded = [], None, False
-    target, base = lake / "build", root / report_reuse.BASE_RECORD
+    installed, backup = [], None
+    target = lake / "build"
     try:
         with contextlib.ExitStack() as opened:
             compressed = opened.enter_context((stage / ASSET).open("rb"))
@@ -816,6 +835,8 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
                         or path.parts[0] != "build"
                         or not (member.isfile() or member.isdir())):
                     raise ValueError("archive contains an invalid cache member")
+                if cache_tar_member(member) is None:
+                    raise ValueError("archive contains a file outside the project cache: " + member.name)
                 if path in paths:
                     raise ValueError("archive contains an invalid cache member: duplicate path")
                 paths[path] = member
@@ -828,18 +849,13 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
                 remaining(deadline)
             lake.mkdir(exist_ok=True)
             # Renames share the destination filesystem; rollback owns its backup
-            # until extraction staging and the seed/base installation complete.
+            # until extraction staging and the build installation complete.
             with tempfile.TemporaryDirectory(prefix=".release-", dir=lake) as temporary:
                 unpacked = pathlib.Path(temporary)
                 with observed_phase("extraction"):
                     extract_members(archive, unpacked, members, deadline)
                 source = unpacked / "build"
-                if not source.is_dir():
-                    raise ValueError("archive has no project build")
-                if approved_producer is not None or require_compatible_seed:
-                    checked = report_reuse.seed_format(source / "stratalint/raw-lean-report.json")
-                    if not checked["compatible"]:
-                        raise ValueError("staged report seed is incompatible: " + checked["report_format"])
+                validate_project_cache(source)
                 remaining(deadline)
                 with observed_phase("install"):
                     remaining(deadline)
@@ -848,19 +864,11 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
                         (source / ".release-refreshed-at").write_text(
                             datetime.datetime.now(datetime.timezone.utc).isoformat() + "\n", encoding="utf-8")
                         had_build = target.is_dir()
-                        had_base = base.exists() or base.is_symlink()
                         backup = pathlib.Path(tempfile.mkdtemp(prefix=".release-backup-", dir=lake))
                         if had_build:
                             target.rename(backup / "build")
-                        if had_base:
-                            base.rename(backup / "base.json")
                         source.rename(target)
                         installed.append("build")
-                        base_recorded = report_reuse.record_seed_base(root, commit)
-                        if not base_recorded:
-                            report_reuse.invalidate_seed_base(root)
-                            if approved_producer is not None:
-                                raise ValueError("approved snapshot base could not be recorded")
                         if on_installed is not None:
                             on_installed()
     except BaseException as install_error:
@@ -869,16 +877,12 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
             try:
                 # Signals can raise after a rename but before Python records its
                 # return. Recover from the saved entries and pre-mutation state.
-                saved_build, saved_base = backup / "build", backup / "base.json"
+                saved_build = backup / "build"
                 if saved_build.is_dir() or not had_build:
                     if target.exists():
                         target.rename(backup / "replacement")
                     if saved_build.is_dir():
                         saved_build.rename(target)
-                if saved_base.exists() or saved_base.is_symlink() or not had_base:
-                    report_reuse.invalidate_seed_base(root)
-                    if saved_base.exists() or saved_base.is_symlink():
-                        saved_base.rename(base)
             except OSError as rollback_error:
                 raise RollbackFailed(backup, install_error, rollback_error) from rollback_error
             # Removing discarded bytes is housekeeping after a successful rollback.
@@ -901,7 +905,7 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
             installed=installed,
             producer_commit_sha=commit, publication_id=manifest["publication_id"], partition=partition,
             **{key: manifest[key] for key in ("workflow_run_id", "workflow_run_attempt") if key in manifest},
-            release_target=metadata.get("target_commitish"), base_recorded=base_recorded, **cleanup,
+            release_target=metadata.get("target_commitish"), **cleanup,
             _phase="install", _expected_bytes=manifest.get("archive_bytes"),
             _transferred_bytes=sum(part["bytes"] for part in parts) if local_assets is None else None,
             _validated_bytes=sum(part["bytes"] for part in parts))
@@ -955,7 +959,7 @@ def fetch_candidate(root, partition, tag, producer):
             fetch_staging_cleanup(root, now=time.time())
             installed = restore_snapshot(root, source, tag, pathlib.Path(temporary), deadline,
                 {"producer_commit_sha": producer}, refresh_stale=True, cache_key=cache_key,
-                require_compatible_seed=True, on_installed=notify_installed)
+                on_installed=notify_installed)
             if not installed:
                 raise ValueError("candidate snapshot was not installed")
         return 0
@@ -1081,7 +1085,7 @@ def _main():
     parser.add_argument("--source-ref", default="")
     parser.add_argument("--source-commit", default="")
     parser.add_argument("--tag", default="", help="exact local candidate Release to restore")
-    parser.add_argument("--no-build", action="store_true", help="publish an existing checked full report/build")
+    parser.add_argument("--no-build", action="store_true", help="publish an existing project cache")
     # Internal handoff from LeanArchiveFetch after its typed guard assertion.
     parser.add_argument("--writer-owned", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--approved-tag", help=argparse.SUPPRESS)
@@ -1139,7 +1143,7 @@ def _main():
                 return fetch_verification(args.repository, partition, verification)
             return fetch(args.repository, partition, args.writer_owned, args.refresh_stale,
                          args.approved_tag, args.approved_producer, args.local_assets)
-        return publish(args.repository, partition, verification, build_report=not args.no_build)
+        return publish(args.repository, partition, verification, build_cache=not args.no_build)
     except RollbackFailed as error:
         receipt(args.command, "rollback-failed", _error=error, reason=str(error), backup=error.backup)
         return 2

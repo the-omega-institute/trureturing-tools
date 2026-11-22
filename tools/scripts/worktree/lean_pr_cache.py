@@ -393,6 +393,14 @@ def validate_preparation(root, value, context, artifact):
     return identity, runtime
 
 
+def retired_report_path(path):
+    if path.parts[:3] == (".lake", "build", "stratalint") and len(path.parts) > 3:
+        return path.parts[3].startswith("raw-lean-report.json")
+    if path.parts[:3] != (".lake", "build", "lean-inspector") or len(path.parts) < 4:
+        return False
+    return path.parts[3].startswith("report.zip") or path.parts[3] == "inputs.json"
+
+
 def unpack(root, archive_path, directory):
     with tarfile.open(archive_path, "r:gz") as archive:
         members = archive.getmembers()
@@ -403,7 +411,8 @@ def unpack(root, archive_path, directory):
             require(not path.is_absolute() and ".." not in path.parts and
                     (member.name in (".lake/build", ".lake/packages") or member.name.startswith(".lake/build/")
                      or member.name.startswith(".lake/packages/")), "native archive member outside cache roots")
-        archive.extractall(directory, filter="data")
+        members = [member for member in members if not retired_report_path(pathlib.PurePosixPath(member.name))]
+        archive.extractall(directory, members=members, filter="data")
     selected = set(native_paths(directory, root))
     require(selected, "empty native preparation")
     for member in members:

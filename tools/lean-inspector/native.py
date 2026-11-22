@@ -313,15 +313,6 @@ def prepare(root, scope="full"):
             'coordinates': None if scope_file else public.coordinates(root)}))
 
 
-def aggregate_inputs(root):
-    """Produce aggregate coordinates only for the package report consumer."""
-    root = Path(root)
-    config = public.read_json((state(root) / 'module-inputs.json').read_bytes())
-    with phase('native-input-coordinates'):
-        write_if_changed(state(root) / 'inputs.json', materials.canonical_json(dict(
-            modules=config['modules'], configs=config['configs'], coordinates=public.coordinates(root))))
-
-
 @lru_cache(maxsize=None)
 def source_inventory(root):
     # Expanded once per native invocation, never mixed into the aggregate
@@ -732,42 +723,17 @@ def validate_module(report, root, name, utility, *, verified_materials=None, tem
     return rows, origin
 
 
-def publish(root, destination, snapshot=None):
-    import reuse
-    repository, output = Path(root), Path(destination)
-    with reuse.publication_guard(repository, output):
-        identity = _publish(root, destination)
-        if snapshot is not None:
-            reuse._seal(repository, output, public.read_json(Path(snapshot).read_bytes()), identity)
-
-
-def _publish(root, destination):
-    inputs = public.coordinates(root)
-    with tempfile.TemporaryDirectory(prefix='.publish.', dir=state(root)) as directory:
-        report = public.unpack(state(root) / 'report.zip', directory)
-        activity_file = os.environ.get('STRATALINT_INSPECTOR_ACTIVITY')
-        mode = None
-        if activity_file:
-            records = [public.read_json(line) for line in Path(activity_file).read_text().splitlines()]
-            mode = 'produced' if records else 'cached'
-            print(f'LEAN_INSPECTOR_WORK extracted_modules={sum(row["count"] for row in records if row["kind"] == "extract")} aggregates={sum(row["count"] for row in records if row["kind"] == "aggregate")}')
-        # Lake traced this aggregate of production-validated rows.
-        identity = public.publish(report, Path(destination), inputs, root, mode=mode, validate=False)
-    print(f'RAW_LEAN_REPORT path={destination} sha256={public.digest(Path(destination))}')
-    return identity
-
-
 def main():
     if sys.argv[1:] == ['batch-size']:
         print(f'LEAN_INSPECTOR_BATCH_MODULES {batch_modules()}')
         return
-    actions = {'prepare': prepare, 'aggregate-inputs': aggregate_inputs,
+    actions = {'prepare': prepare,
                'module': module,
-               'aggregate': aggregate, 'publish': publish, 'batch': batch,
+               'aggregate': aggregate, 'batch': batch,
                'regenerate': regenerate, 'prebuilt-workspace': prebuilt_workspace,
                'check-workspace-producer': check_workspace_producer}
     if len(sys.argv) < 2 or sys.argv[1] not in actions:
-        raise ValueError('expected prepare, module, aggregate, publish, or batch')
+        raise ValueError('expected prepare, module, aggregate, or batch')
     with phase('native-' + sys.argv[1]):
         actions[sys.argv[1]](*sys.argv[2:])
 

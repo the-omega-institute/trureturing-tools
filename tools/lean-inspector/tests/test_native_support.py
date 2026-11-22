@@ -197,7 +197,7 @@ defaultFacets = ["static"]
                 '"LeanInformationAudit.ContractInputs", "LeanInformationAudit.Support"]\n'
                 'globs = ["LeanInformationAudit.TemplateEnrollment", "LeanInformationAudit.FixturePins", '
                 '"LeanInformationAudit.ContractInputs", "LeanInformationAudit.Support"]\n')
-        for name in ['Inspector.lean', 'lakefile.lean', 'lake-manifest.json', 'native.py', 'publication.py', 'materials.py', 'reuse.py', 'inspect.sh', 'build_work.py']:
+        for name in ['Inspector.lean', 'lakefile.lean', 'lake-manifest.json', 'native.py', 'publication.py', 'materials.py', 'build_inputs.py', 'build_work.py']:
             self.copy('tools/lean-inspector/' + name)
         for name in ['RawArtifacts', 'CompiledMetadata', 'CompiledAxioms', 'Sha256']:
             self.copy('tools/lean-inspector/LeanInformationAudit/' + name + '.lean')
@@ -238,7 +238,7 @@ defaultFacets = ["static"]
                      'lean-toolchain', 'Makefile',
                      'tools/scripts/worktree/lean-cache-ensure.sh', 'tools/scripts/worktree/lean-cache-run.sh',
                      'tools/scripts/worktree/lean-git/git',
-                     'tools/scripts/report/lean-report.sh', 'tools/scripts/report/report-supervisor.sh',
+                     'tools/scripts/report/report-supervisor.sh',
                      'tools/scripts/lib/resource-observation-lib.sh',
                      'tools/StrataLint.Lean/Lean/LeanUtilityInputCommand.cs']:
             self.copy(name)

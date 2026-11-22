@@ -558,24 +558,3 @@ package_facet moduleReports (owner : Package) : Array FilePath := withCurrPackag
   let pkg := (← getWorkspace).root
   let config ← (← fetch <| pkg.facet `reportInputData).await
   return (← collectNativeReports pkg config).map (·.map (·.path))
-
-package_facet report (owner : Package) : FilePath := withCurrPackage owner do
-  let pkg := (← getWorkspace).root
-  observePhase "lake-inputs" "start"
-  let config ← (← fetch <| pkg.facet `reportInputData).await
-  let root ← repositoryDir pkg
-  proc (← nativeCommand pkg #["aggregate-inputs", root.toString])
-  let inputs := root / ".lake/build/lean-inspector" / "inputs.json"
-  observePhase "lake-inputs" "finish"
-  let rows ← collectNativeReports pkg config
-  let membership ← inputBinFile inputs
-  (rows.add membership).mapM fun artifacts => do
-    let file := root / ".lake/build/lean-inspector/report.zip"
-    let mut trace := BuildTrace.nil "<collection>"
-    for row in artifacts do
-      trace := trace.mix row.outputTrace.withoutInputs
-    setTrace (mixTrace trace membership.getTrace)
-    let build := do
-      runBatch pkg #[("aggregate", #[root.toString, file.toString] ++ artifacts.map (·.path.toString))]
-      pure PUnit.unit
-    return (← buildArtifact file build).path

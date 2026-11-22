@@ -687,7 +687,8 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
             paths = owner.resume_spec(self.root)["paths"]
         self.assertIn(".lake/packages", paths)
         self.assertIn(".lake/build/lib", paths)
-        self.assertIn(".lake/build/lean-inspector", paths)
+        self.assertIn(".lake/build/lean-inspector/modules", paths)
+        self.assertIn(".lake/build/lean-inspector/producer-resume.json", paths)
 
     def test_resume_writer_rejects_unprotected_pushes_and_ordinary_prs(self):
         owner = self.resume_setup()

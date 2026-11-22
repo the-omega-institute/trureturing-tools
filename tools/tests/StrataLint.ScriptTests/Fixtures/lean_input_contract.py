@@ -106,7 +106,7 @@ class PartitionTests(PartitionFixture, unittest.TestCase):
                     mock.patch.dict(os.environ, GITHUB_RUN_ID="12", GITHUB_RUN_ATTEMPT="1"):
                 keys = module.actions_keys(self.root)
                 self.assertEqual(f"{REV}/{expected}", keys["partition"])
-                self.assertEqual(f"lean-cache-v2-{REV}-{expected}-", keys["release_prefix"])
+                self.assertEqual(f"lean-cache-v3-{REV}-{expected}-", keys["release_prefix"])
                 for layer in ["dependency", "project"]:
                     generation = "project-push" if layer == "project" else "dependency-v4"
                     prefix = f"lean-{generation}-{REV}-{expected}-"

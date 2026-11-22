@@ -330,19 +330,6 @@ internal sealed partial class ProductionCliEnvironment : ICliEnvironment
     public CommandResult AlignLedger(IReadOnlyList<string> arguments) =>
         DagLedgerAlignWriter.Align(repositoryRoot, repository, arguments);
 
-    public CommandResult ReanchorMathlibLedger(IReadOnlyList<string> arguments) =>
-        DagLedgerMathlibReanchorWriter.Reanchor(
-            repositoryRoot,
-            repository,
-            leanReportSource,
-            arguments);
-
-    public ExplicitCommandResult TruthRelease(IReadOnlyList<string> arguments) =>
-        TruthReleaseCommand.Run(repository, scribeEmissionVerifier, arguments);
-
-    public ExplicitCommandResult TruthExport(IReadOnlyList<string> arguments) =>
-        TruthExportCommand.Run(repository, arguments);
-
     public CommandResult CleanLanes(IReadOnlyList<string> arguments) =>
         CleanLanesCommand.Run(repositoryRoot, arguments, TimeProvider.System.GetUtcNow());
 
