@@ -792,6 +792,7 @@ class VolumeReleases(unittest.TestCase):
             # A residual larger than multiple volumes exercises extraction across boundaries.
             artifact = self.project / ".lake/build/generated.bin"
             artifact.write_bytes(random.Random(17).randbytes(256 * 1024))
+            self.write(".lake/build/compressible.txt", "a" * (4 * 1024 * 1024))
             author = run(self.project, "git", "rev-parse", "HEAD").strip()
             identity.return_value = {"producer_commit_sha":author,"publication_id":"ci-901-1",
                                      "workflow_run_id":"901","workflow_run_attempt":"1"}
@@ -804,11 +805,18 @@ class VolumeReleases(unittest.TestCase):
             dest = self.consumer("bounded-full")
             stage = self.area / "bounded-transfer"
             stage.mkdir()
-            with patch.object(remote.shutil, "disk_usage", return_value=SimpleNamespace(free=manifest["archive_bytes"])):
+            separate = Mock()
+            separate.stat.return_value.st_dev = stage.stat().st_dev + 1
+            required = manifest["archive_bytes"] + max(tree["volumes"].values())
+            for free, bounded in ((required - 1, True), (required, False)):
+                with patch.object(remote.shutil, "disk_usage", return_value=SimpleNamespace(free=free)):
+                    self.assertEqual(remote.single_volume_restore(stage, separate, manifest, tree), bounded)
+            expanded = sum(p.stat().st_size for p in (self.project / ".lake/build").rglob("*") if p.is_file())
+            budget = expanded + max(tree["volumes"].values())
+            self.assertGreater(budget, 2 * manifest["archive_bytes"])
+            self.assertLess(budget, expanded + manifest["archive_bytes"])
+            with patch.object(remote.shutil, "disk_usage", return_value=SimpleNamespace(free=budget)):
                 self.assertTrue(remote.single_volume_restore(stage, dest, manifest, tree))
-            with patch.object(remote.shutil, "disk_usage", return_value=SimpleNamespace(free=10 * manifest["archive_bytes"])):
-                self.assertFalse(remote.single_volume_restore(stage, dest, manifest, tree))
-            stack.enter_context(patch.object(remote, "single_volume_restore", return_value=True))
             send = release.gh
             peak = []
             def observe(deadline, *args):
