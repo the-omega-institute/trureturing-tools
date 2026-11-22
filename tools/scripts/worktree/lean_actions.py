@@ -310,7 +310,7 @@ def project_restore_key(keys):
     return fallback
 
 
-def dependency_inputs(root: pathlib.Path):
+def dependency_input_materials(root: pathlib.Path):
     inputs = {}
     for relative in ("lake-manifest.json", "lean-toolchain", "lakefile.toml"):
         path = root / relative
@@ -327,7 +327,11 @@ def dependency_inputs(root: pathlib.Path):
     if (not isinstance(names, list) or any(not isinstance(name, str) or not name for name in names)
             or len(set(names)) != len(names)):
         raise ValueError("dependency save environment registration is invalid")
-    value = {"files": inputs, "environment": {name: os.environ.get(name) for name in names}}
+    return {"files": inputs, "environment": {name: os.environ.get(name) for name in names}}
+
+
+def dependency_inputs(root: pathlib.Path):
+    value = dependency_input_materials(root)
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 

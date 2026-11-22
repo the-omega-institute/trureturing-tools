@@ -21,7 +21,7 @@ import tempfile
 import time
 
 from lean_actions import (
-    actions_keys, dependency_inputs, manual_source_is_valid, native_archive_paths, preparation_source_is_valid,
+    actions_keys, dependency_input_materials, manual_source_is_valid, native_archive_paths, preparation_source_is_valid,
     output, project_publication, project_work, receipt, resume_spec, write_small_record,
 )
 from lean_artifact_inventory import (
@@ -50,14 +50,18 @@ def digest(value):
 
 def binding(root, state):
     backend = actions_keys(root)
+    execution = dependency_input_materials(root)
     key = {
         "schema": SCHEMA,
         "mathlib": backend["mathlib_revision"],
         "os": backend["os"],
         "arch": backend["arch"],
         "config": lake_configuration(root),
-        "execution": dependency_inputs(root),
+        "execution": digest(execution),
     }
+    if state == "complete":
+        key["runtime"] = digest({"toolchain": execution["files"]["lean-toolchain"],
+                                 "environment": execution["environment"]})
     if state == "resume":
         key["producer_resume"] = resume_spec(root)["identity"]
         key["source_commit"] = source_commit(root)
@@ -79,7 +83,19 @@ def binding(root, state):
 
 
 def index_prefix(identity):
+    if "runtime" in identity:
+        domain = {key: identity[key] for key in ("schema", "mathlib", "os", "arch", "runtime")}
+        return "lean-shard-index-v2-" + digest(domain) + "-"
     return "lean-shard-index-v1-" + digest(identity) + "-"
+
+
+def index_addresses(identity):
+    prefix = index_prefix(identity)
+    if "runtime" not in identity:
+        return {"prefix": prefix, "snapshot_prefix": prefix + "snapshot-", "legacy_prefix": None}
+    legacy = {key: value for key, value in identity.items() if key != "runtime"}
+    return {"prefix": prefix, "snapshot_prefix": prefix + "snapshot-" + digest(legacy) + "-",
+            "legacy_prefix": index_prefix(legacy)}
 
 
 def source_commit(root):
@@ -106,7 +122,7 @@ def _tracked(relative, registrations):
     return False
 
 
-def read_index(path, identity, state):
+def read_index(path, identity, state, *, layout_candidate=False):
     if not path.is_file():
         return None
 
@@ -126,8 +142,15 @@ def read_index(path, identity, state):
     if (not isinstance(record, dict) or record.get("state") != state
             or set(record) != {"binding", "state", "owner", "layout", "entries", "sources", "fingerprints", "required"}):
         raise ValueError("incompatible Actions shard index")
-    if record["binding"] != identity:
-        raise IncompatibleShardBinding("incompatible Actions shard index binding")
+    prior = record["binding"]
+    if prior != identity:
+        if state != "complete" or "runtime" not in identity or not isinstance(prior, dict):
+            raise IncompatibleShardBinding("incompatible Actions shard index binding")
+        legacy = {key: value for key, value in identity.items() if key != "runtime"}
+        if prior != legacy and not (layout_candidate and prior.keys() == identity.keys()
+                and valid_digest(prior["config"]) and valid_digest(prior["execution"])
+                and index_prefix(prior) == index_prefix(identity)):
+            raise IncompatibleShardBinding("incompatible Actions shard index binding")
     owner = record["owner"]
     if (not isinstance(owner, dict) or set(owner) != {"commit", "ref", "run", "attempt"}
             or not isinstance(owner["commit"], str) or not re.fullmatch(r"[0-9a-f]{40}", owner["commit"])
@@ -534,7 +557,7 @@ def main():
     root = args.repository.resolve()
     identity = binding(root, args.state)
     if args.operation == "identity":
-        print(json.dumps({"prefix": index_prefix(identity), "owner": current_owner(root)}))
+        print(json.dumps({**index_addresses(identity), "owner": current_owner(root)}))
         return
     if args.operation.startswith("checkpoint-"):
         scenario = identity.get("verification", {}).get("scenario")
@@ -554,7 +577,7 @@ def main():
                 parser.error("checkpoint restore requires the earlier producing attempt")
             restore_checkpoint(root, identity, args.artifact_directory, args.previous_attempt, args.previous_run)
         return
-    record = read_index(args.index, identity, args.state) if args.index else None
+    record = read_index(args.index, identity, args.state, layout_candidate=args.operation == "prepare") if args.index else None
     if args.operation == "prepare":
         if args.target and args.state != "resume":
             raise ValueError("scoped save requires an incomplete producer index")
