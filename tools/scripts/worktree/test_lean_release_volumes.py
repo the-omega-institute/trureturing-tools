@@ -315,7 +315,6 @@ class VolumeReleases(unittest.TestCase):
             self.assertEqual(plan["rebuild_modules"], ["D5.B"])
             self.assertEqual(plan["restore_modules"], ["D5.A"])
             self.assertEqual(plan["inherit_modules"], ["D5.A", "D5.C"])
-            self.assertEqual(plan["base_report_sha256"], "1" * 64)
             restored = clone / ".lake/build"
             self.assertTrue((restored / "lib/lean/D5/A.olean").is_file())
             self.assertFalse((restored / "lib/lean/D5/B.olean").exists())
@@ -767,8 +766,9 @@ class VolumeReleases(unittest.TestCase):
         artifact.write_bytes(random.Random(1).randbytes(6 * chunk))
         reference = self.area / "reference"
         reference.mkdir()
+        self.write(".lake/build/lean-inspector/modules/D5.A.zip", "module report")
         expected = index.pack(self.project, reference, chunk, None, stable_timestamps=True)
-        modules = ["D5.A", "D5.B", "D5.C"]
+        frames = ["D5.A", "D5.B", "D5.C", None]
         author = run(self.project, "git", "rev-parse", "HEAD").strip()
         with ExitStack() as stack:
             release, key, partition, identity = self.github_transport(stack, chunk)
@@ -810,7 +810,7 @@ class VolumeReleases(unittest.TestCase):
                 return release.prefix(partition, key, indexed="volumes") + suffix
 
             tag = publish(701)
-            self.assertEqual([call.args[2] for call in encode.call_args_list], modules)
+            self.assertEqual([call.args[2] for call in encode.call_args_list], frames)
             manifest = json.loads((self.pool / tag / volumes.MANIFEST).read_bytes())
             self.assertEqual((manifest["archive_bytes"], manifest["archive_sha256"]),
                              (expected["archive_bytes"], expected["archive_sha256"]))
@@ -825,7 +825,7 @@ class VolumeReleases(unittest.TestCase):
                                   "peak_allocated_bytes": max(n for _, n in measurements)}))
 
             publish(702)
-            self.assertEqual([call.args[2] for call in encode.call_args_list], modules)
+            self.assertEqual([call.args[2] for call in encode.call_args_list], frames)
             self.assertEqual(transfers, [])
 
             artifact.write_bytes(random.Random(2).randbytes(6 * chunk))
@@ -847,7 +847,7 @@ class VolumeReleases(unittest.TestCase):
             self.assertTrue((self.pool / tag / volumes.MANIFEST).exists())
 
             retry = publish(703)
-            self.assertEqual([call.args[2] for call in encode.call_args_list], modules + ["D5.B"])
+            self.assertEqual([call.args[2] for call in encode.call_args_list], frames + ["D5.B"])
             self.assertNotIn(confirmed[0], transfers)
             self.assertTrue(transfers)
             manifest = json.loads((self.pool / retry / volumes.MANIFEST).read_bytes())

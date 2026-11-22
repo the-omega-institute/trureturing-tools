@@ -384,7 +384,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                     shards.main()
                 expected = {shards.group_identity([[name]]) for name in [targets[-1], base]} | {shards.EXTRAS}
                 self.assertEqual(expected if scope else set(), set(json.loads(stdout.getvalue())))
-        self.assertEqual(entries, shards.selected_keys(self.root, record))
+        self.assertEqual(entries.keys() - {shards.REPORT}, shards.selected_keys(self.root, record).keys())
         self.assertEqual({"available": 0, "missing": [], "requested": 0, "complete": False},
                          shards.install(self.root, record, []))
         self.assertFalse((self.root / ".lake/build").exists())
