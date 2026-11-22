@@ -58,38 +58,71 @@ def standalone():
     check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/lean-fork-contribute/tests")
 
 
-def contract(shard, shard_count):
-    projects = sorted(p for p in Path("tools/tests").glob("*/*.csproj")
-                      if p.stem not in STANDALONE and ET.parse(p).findtext(".//IsTestProject") == "true")
-    selected = projects[shard::shard_count]
-    if not selected:
-        raise ValueError(f"empty consumer fixture shard {shard}")
-    lean_projects = {"StrataLint.Cache.Native.Tests", "StrataLint.DeclaredTemplate.Tests",
-                     "StrataLint.Lean.Tests", "StrataLint.ScriptTests", "StrataLint.Tests"}
-    if shard == 0 or any(project.stem in lean_projects for project in selected):
-        check("bash", "tools/scripts/workflow/install-lean-toolchain.sh", "lean-toolchain")
-        os.environ["PATH"] = str(Path.home() / ".elan/bin") + os.pathsep + os.environ["PATH"]
-    fourier = any(project.stem == "StrataLint.DeclaredTemplate.Tests" for project in selected)
-    roots = [prefix + module for module in FOURIER_MODULES for prefix in ("", "Reg.")] if fourier else []
-    if roots or shard == 0:
-        prepare_mathlib(roots, shard == 0)
-    for project in selected:
-        if project.stem == "StrataLint.DeclaredTemplate.Tests":
-            check("make", "lean-report-prepare", "LEAN_TARGETS=" + " ".join(roots))
-            check("bash", "tools/scripts/worktree/lean-cache-run.sh", "lake", "-d",
-                  "tools/lean-inspector-reg", "build", *(f"+{module}:report" for module in roots))
-        check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly", str(project))
-    if shard == 0:
-        check("make", "-C", "tools", "selftest")
+LEAN_PROJECT = "StrataLint.Lean.Tests"
+ARCHITECTURE_PROJECT = "StrataLint.ArchitectureTests"
+TEMPLATE_PROJECT = "StrataLint.DeclaredTemplate.Tests"
+LEAN_CLASSES = {
+    "recovery": ("InspectorNativeRecoveryTests", "InspectorNativePackagingTests"),
+    "scoped": ("LeanReportScopedTests", "InspectorNativeInterfaceTests"),
+    "modules": ("InspectorNativeModuleCacheTests", "InspectorNativeInvalidationTests"),
+}
+
+
+def install_lean():
+    check("bash", "tools/scripts/workflow/install-lean-toolchain.sh", "lean-toolchain")
+    os.environ["PATH"] = str(Path.home() / ".elan/bin") + os.pathsep + os.environ["PATH"]
+
+
+def test_project(name, *args):
+    check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly",
+          f"tools/tests/{name}/{name}.csproj", *args)
+
+
+def contract(shard):
+    if shard == "judge":
+        install_lean()
+        prepare_mathlib([], True)
         check("make", "-C", "tools", "compiled-judge-test")
-        check("bash", "tools/scripts/workflow/ci-entry-test.sh")
-        check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/workflow", "-p", "test_ci_*.py")
+    elif shard == "templates":
+        install_lean()
+        roots = [prefix + module for module in FOURIER_MODULES for prefix in ("", "Reg.")]
+        prepare_mathlib(roots, False)
+        check("make", "lean-report-prepare", "LEAN_TARGETS=" + " ".join(roots))
+        check("bash", "tools/scripts/worktree/lean-cache-run.sh", "lake", "-d",
+              "tools/lean-inspector-reg", "build", *(f"+{module}:report" for module in roots))
+        test_project(TEMPLATE_PROJECT)
+    elif shard == "architecture":
+        test_project(ARCHITECTURE_PROJECT)
+    elif shard in LEAN_CLASSES or shard == "remaining":
+        install_lean()
+        if shard == "remaining":
+            # The complement also runs newly added tests in this assembly.
+            filters = (f"FullyQualifiedName!~.{name}." for group in LEAN_CLASSES.values() for name in group)
+            expression = "&".join(filters)
+        else:
+            expression = "|".join(f"FullyQualifiedName~.{name}." for name in LEAN_CLASSES[shard])
+        test_project(LEAN_PROJECT, "--filter", expression)
+    else:
+        if shard not in {"0", "1", "2", "3"}:
+            raise ValueError(f"unknown consumer fixture shard {shard}")
+        dedicated = {ARCHITECTURE_PROJECT, TEMPLATE_PROJECT, LEAN_PROJECT}
+        selected = sorted(p.stem for p in Path("tools/tests").glob("*/*.csproj")
+                          if p.stem not in STANDALONE and p.stem not in dedicated
+                          and ET.parse(p).findtext(".//IsTestProject") == "true")[int(shard)::4]
+        if shard == "0" or {"StrataLint.Cache.Native.Tests", "StrataLint.ScriptTests", "StrataLint.Tests"}.intersection(selected):
+            install_lean()
+        for name in selected:
+            test_project(name)
+        if shard == "0":
+            check("make", "-C", "tools", "selftest")
+            check("bash", "tools/scripts/workflow/ci-entry-test.sh")
+            check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/workflow", "-p", "test_ci_*.py")
 
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["standalone"]:
         standalone()
-    elif len(sys.argv) == 4 and sys.argv[1] == "contract":
-        contract(int(sys.argv[2]), int(sys.argv[3]))
+    elif len(sys.argv) == 3 and sys.argv[1] == "contract":
+        contract(sys.argv[2])
     else:
-        sys.exit("usage: test-suites.py standalone | contract SHARD SHARD_COUNT")
+        sys.exit("usage: test-suites.py standalone | contract SHARD")
