@@ -42,9 +42,22 @@ gh workflow run release.yml --ref dev -f source=pr/123
 
 To refresh an expired artifact, rerun the pull request CI or use `gh workflow run ci.yml --ref my-feature` for a branch.
 
-The preview tag contains the channel, run number and source commit. Set the repository variable `TOOLS_RELEASE_SERIES` to choose the version under development (default `0.1.0`). In a downstream trial checkout, run `make install-tools`, then `python3 tools/consumer/pin.py <preview-tag>`. The pin command checks the public archive's SHA-256 and updates `Meta/tools-release.json`. Commit that lock in the consumer PR. Use the same command with a stable tag after promotion.
+The preview tag contains the channel, run number and source commit. Set the repository variable `TOOLS_RELEASE_SERIES` to choose the version under development (default `0.1.0`).
 
-After downstream CI accepts the candidate, promote it to `main` and run the stable workflow on that branch. Set `preview` to the tested preview tag and `version` to the stable tag.
+1. Trial the published preview in a consumer checkout with `make install-tools` and `python3 tools/consumer/pin.py <preview-tag>`. The pin command verifies the archive SHA-256 and updates the local `Meta/tools-release.json`.
+2. Submit the tested source for tools `dev` review. From the tools checkout, use the explicit lock path for a proposed adoption. With no argument the command reads the lock already committed to `trureturing/dev`.
+
+   ```sh
+   python3 tools/consumer/source_pr.py --lock /path/to/trureturing/Meta/tools-release.json
+   python3 tools/consumer/source_pr.py
+   ```
+
+   The command uses the maintainer's GitHub CLI credentials. It verifies the release digest, resolves the tag to its commit and reports when that commit is already in tools `dev` history. Otherwise it lists an existing open or draft tools-to-`dev` PR at that commit, or a same-repository PR containing it. Review the additional commits in a stacked PR. If no PR qualifies, the command opens one from the exact source SHA. Review and merge through the normal tools checks.
+3. After the tools `dev` push passes CI, its release workflow verifies the archive bytes against the tested artifact and publishes the resulting dev package. Pin that package with `python3 tools/consumer/pin.py <dev-release-tag>` in the consumer checkout, then submit the lock to `trureturing/dev`.
+
+To inspect open tools PRs, run `python3 tools/consumer/source_pr.py --list` from a tools Git checkout with Git 2.43 or newer. The command compares each PR's own base-to-head change to the current tools `dev` in a temporary Git repository. It reports ancestry, identical trees, an already-applied change, distinct changes, and conflicts. Ancestry and historical patch matches can survive a later revert. Maintainers assess the present usefulness of each change before closing or merging its PR.
+
+For a stable version, promote the tested source to `main` and run the stable workflow on that branch. Set `preview` to the tested preview tag and `version` to the stable tag.
 
 ```sh
 gh workflow run stable.yml --ref main -f preview="$preview" -f version="$version"
