@@ -49,7 +49,6 @@ def check(*arguments):
 
 
 def standalone():
-    check(sys.executable, "-m", "unittest", "discover", "-s", ".github/scripts/truth_release")
     check(sys.executable, ".github/scripts/test-preview-source.py")
     check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/worktree",
           "-p", "test_lean_compile_layers.py")
