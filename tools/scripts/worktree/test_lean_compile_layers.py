@@ -1,7 +1,6 @@
 """Regression tests for transport of compiler outputs between independent runners."""
 
 from io import BytesIO
-import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -11,29 +10,10 @@ import unittest
 from unittest.mock import patch
 
 import lean_compile_layers as layers
-from lean_artifact_inventory import INSPECTOR, Module, lake_configuration, matches_lake_configuration, required_compiler_paths
+from lean_artifact_inventory import Module, required_compiler_paths
 
 
 class CompilePartitions(unittest.TestCase):
-    def test_cache_partition_accepts_only_the_compatible_inspector_revision(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            config_path = INSPECTOR / "lakefile.lean"
-            installed = root / config_path
-            installed.parent.mkdir(parents=True)
-            installed.write_bytes((Path(__file__).resolve().parents[3] / config_path).read_bytes())
-            original = {config_path.as_posix(): "8e400dfa19ad583ef7f4790b92fa7bb36db40e31f7cdc38a6b8a756ede48343e"}
-            old_key = hashlib.sha256(json.dumps(original, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            self.assertEqual(old_key, lake_configuration(root, cache_key=True))
-            self.assertNotEqual(old_key, lake_configuration(root))
-            self.assertTrue(matches_lake_configuration(root, old_key))
-            (root / "lean-toolchain").write_text("changed compiler")
-            self.assertFalse(matches_lake_configuration(root, old_key))
-            (root / "lean-toolchain").unlink()
-            installed.write_text("a different Lake package")
-            self.assertFalse(matches_lake_configuration(root, old_key))
-            self.assertEqual(lake_configuration(root), lake_configuration(root, cache_key=True))
-
     def test_terminal_closures_cover_scoped_diamond_once(self):
         graph = {"Base": set(), "Shared": {"Base"}, "Unused": set(),
                  **{name: {"Shared"} for name in ("A", "B", "C", "D")}}

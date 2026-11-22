@@ -4,7 +4,7 @@ import hashlib
 from itertools import groupby
 
 from lean_artifact_inventory import (PROJECT_BUILD, build_inventory, lake_configuration, lean_artifact_paths,
-                                     matches_lake_configuration, project_imports, required_compiler_paths, workspace_modules)
+                                     project_imports, required_compiler_paths, workspace_modules)
 import lean_release_index as index
 import lean_release_volumes as volumes
 
@@ -102,7 +102,7 @@ def pack_overlay(root, stage, previous, plan, chunk_bytes, save_part, read_prior
     """Read predecessor rows in the supplied order. Emit only confirmed physical payloads."""
     manifest, tree = previous
     config = lake_configuration(root)
-    if not matches_lake_configuration(root, manifest["lake_inputs_sha256"]):
+    if manifest["lake_inputs_sha256"] != config:
         raise ValueError("sparse predecessor Lake configuration differs from the target")
     index.validate_members(tree["members"], manifest["archive_bytes"])
     modules, old, frames = overlay_frames(root, tree, plan)
