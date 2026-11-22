@@ -316,7 +316,7 @@ class NativeRecoveryConsumerTests:
         for name in remaining:
             self.assertFalse((state / 'modules' / (name + '.zip.trace')).exists())
         self.write('activity.jsonl', '')
-        accepted = self.run_lake('--no-build', 'build', *(name + ':moduleReports' for name in first))
+        accepted = self.run_lake('--no-build', 'build', *(name + ':report' for name in first))
         self.assertEqual((self.root / 'activity.jsonl').read_text(), '')
         self.assertEqual(self.stamps(), before)
         self.assertEqual(traces, {name: [(state / 'modules' / (name + suffix)).read_bytes()
