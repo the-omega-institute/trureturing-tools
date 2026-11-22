@@ -813,51 +813,6 @@ raise SystemExit(37)
         self.assertTrue(all(row['request_capture'] is None for row in latest))
         self.assertFalse(latest[-1]['success'])
 
-    def test_report_entry_retains_failed_request_in_selected_log_directory(self):
-        repository = Path(native.__file__).resolve().parents[2]
-
-        def write(name, text):
-            path = self.root / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
-            path.chmod(0o755)
-            return path
-
-        for name in ['inspect.sh', 'native.py', 'reuse.py', 'materials.py', 'publication.py']:
-            path = 'tools/lean-inspector/' + name
-            write(path, (repository / path).read_text())
-        write('tools/scripts/lib/resource-observation-lib.sh', 'resource_observe() { :; }\n')
-        write('tools/scripts/worktree/lean-cache-ensure.sh', '#!/bin/sh\nexit 0\n')
-        write('tools/scripts/worktree/lean-cache-run.sh', '#!/bin/sh\n[ "$1" = --prebuilt ] || exit 67\nshift\nexec "$@"\n')
-        request = write('batch.json', json.dumps([['produce', row] for row in self.requests]))
-        # Lake is the boundary stub; the shell entry, Python batch producer and
-        # failing executable are real, including all their failure cleanup.
-        lake = write('bin/lake', f'#!{sys.executable}\nimport os, sys\n' +
-            'os.execv(sys.executable, [sys.executable, "-B", ' +
-            repr(str(self.root / 'tools/lean-inspector/native.py')) + ', "batch", ' +
-            repr(str(request)) + '])\n')
-        producer = write('candidate.dll', 'fixture candidate producer')
-        report = write('public/report.json', 'previous report')
-        self.phases.write_text('{"phase":"stale"}\n')
-        environment = dict(os.environ, FULL_BUILD="1", STRATALINT_INSPECTOR_SUPERVISED='1',
-            STRATALINT_LEAN_BUILD_TARGETS='[]', STRATALINT_LEAN_PRODUCER_DLL=str(producer),
-            LAKE_BIN=str(lake))
-        result = subprocess.run(['bash', str(self.root / 'tools/lean-inspector/inspect.sh'),
-            '--repository', str(self.root), '--output', str(report), '--log-dir', str(self.logs)],
-            cwd=self.logs, env=environment, capture_output=True, text=True, timeout=30)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('LEAN_INSPECTOR_FAILED phase=report exit=1', result.stderr)
-        self.assertIn('raw.reader_failed:exit=37', result.stderr)
-        self.assertEqual(report.read_text(), 'previous report')
-        phases = [json.loads(line) for line in self.phases.read_text().splitlines()]
-        self.assertNotIn('stale', [row['phase'] for row in phases])
-        start = next(row for row in phases if row['phase'] == 'native-inspect' and row['boundary'] == 'start')
-        capture = Path(start['request_capture'])
-        self.assertEqual(capture.parent, self.logs)
-        self.assertEqual(json.loads(capture.read_text()), json.loads(self.seen.read_text())['capture'])
-        self.assertEqual(list(native.state(self.root).glob('.inspection.*')), [])
-
-
 class EntryPointTests(unittest.TestCase):
     def test_prebuilt_utility_producer_is_required_and_its_failure_stops_preparation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -885,95 +840,21 @@ class EntryPointTests(unittest.TestCase):
                 native.prepare(root)
             self.assertEqual(json.loads((root / 'utility-command.json').read_text()),
                              [str(binary), 'lean-utility-input'])
-            prepared = root / '.lake/build/lean-inspector/inputs/Trureturing.json'
+            prepared = root / '.lake/build/lean-inspector/module-inputs.json'
             previous = prepared.read_bytes()
-            aggregate = root / '.lake/build/lean-inspector/inputs.json'
-            previous_aggregate = aggregate.read_bytes()
-            with patch.dict(os.environ, environment), patch.object(publication, 'coordinates') as coordinates:
-                native.prepare(root, 'module-records')
-            coordinates.assert_not_called()
-            deferred = json.loads((root / '.lake/build/lean-inspector/module-inputs.json').read_text())
-            self.assertEqual(deferred['records']['Trureturing'].encode('ascii'), previous)
-            self.assertEqual(prepared.read_bytes(), previous)
-            with patch.object(publication, 'coordinates', return_value={}):
-                native.aggregate_inputs(root)
-            self.assertEqual(aggregate.read_bytes(), previous_aggregate)
+            self.assertIn('Trureturing', json.loads(previous)['records'])
+            self.assertFalse((prepared.parent / 'inputs.json').exists())
             for invalid in ('relative.dll', str(root / 'absent.dll')):
                 with self.subTest(producer=invalid), patch.dict(os.environ,
                         dict(environment, STRATALINT_LEAN_PRODUCER_DLL=invalid)):
                     with self.assertRaisesRegex(ValueError, 'existing absolute path'):
                         native.prepare(root)
                 self.assertEqual(prepared.read_bytes(), previous)
-            for scope in ('full', 'module-records'):
-                with patch.dict(os.environ, dict(environment, UTILITY_EXIT='37')):
-                    with self.assertRaises(subprocess.CalledProcessError) as failure:
-                        native.prepare(root, scope)
-                self.assertEqual(failure.exception.returncode, 37)
+            with patch.dict(os.environ, dict(environment, UTILITY_EXIT='37')):
+                with self.assertRaises(subprocess.CalledProcessError) as failure:
+                    native.prepare(root)
+            self.assertEqual(failure.exception.returncode, 37)
             self.assertEqual(prepared.read_bytes(), previous)
-
-    def test_failed_phase_preserves_public_bundle_and_propagates_exit(self):
-        from test_reuse import ReuseTests
-        cases = [('inputs', 2, []), ('report', 39, ['report']), ('publish', 40, ['report', 'publish'])]
-        for phase, status, calls in cases:
-            fixture = ReuseTests()
-            fixture.setUp()
-            self.addCleanup(fixture.doCleanups)
-            with self.subTest(phase=phase):
-                root = fixture.root
-                def write(name, text):
-                    path = root / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(text)
-                    path.chmod(0o755)
-                repository = Path(publication.__file__).resolve().parents[2]
-                for name in ['tools/lean-inspector/inspect.sh', 'tools/lean-inspector/reuse.py',
-                             'tools/lean-inspector/materials.py',
-                             'tools/lean-inspector/build_work.py', 'tools/lean-inspector/publication.py',
-                             'tools/scripts/report/lean-report-selection.py']:
-                    write(name, (repository / name).read_text())
-                # Use the shared no-Application bundle fixture for both generations.
-                # No success receipt is installed for the previous bundle.
-                fixture.bundle()
-                report = fixture.report
-                before = {suffix: publication.member(report, suffix).read_bytes() for suffix in publication.SUFFIXES}
-                fixture.write('D5/A.lean', 'def a := 2\n')
-                fixture.report = root / 'produced' / publication.RAW
-                fixture.report.parent.mkdir()
-                fixture.bundle()
-                self.assertNotEqual(report.read_bytes(), fixture.report.read_bytes())
-                with zipfile.ZipFile(root / 'produced-report.zip', 'w') as archive:
-                    for suffix in publication.SUFFIXES:
-                        member = publication.member(fixture.report, suffix)
-                        archive.write(member, member.name)
-                write('candidate producer.dll', 'fixture candidate producer')
-                write('tools/scripts/worktree/lean-cache-ensure.sh', '#!/bin/sh\n'
-                    + 'printf "ensure %s\\n" "${STRATALINT_LEAN_PRODUCER_DLL##*/}" >> "$CALLS"\nexit '
-                    + str(38 if phase == 'ensure' else 0) + '\n')
-                write('bin/lake', '#!/bin/sh\n'
-                    + 'if [ "${1:-}" = --version ]; then printf "fixture lake 1\\n"; exit 0; fi\n'
-                    + 'printf "%s\\n" report >> "$CALLS"\n'
-                    + ('exit 39\n' if phase == 'report' else
-                       'mkdir -p .lake/build/lean-inspector\n'
-                       + 'cp produced-report.zip .lake/build/lean-inspector/report.zip\n'))
-                write('tools/scripts/worktree/lean-cache-run.sh', '#!/bin/sh\n[ "$1" = --prebuilt ] || exit 67\nshift\nexec "$@"\n')
-                write('tools/scripts/lib/resource-observation-lib.sh', 'resource_observe() { :; }\n')
-                write('tools/lean-inspector/native.py',
-                    'import os, sys\nfrom pathlib import Path\n'
-                    + 'if sys.argv[1] == "batch-size": raise SystemExit(0)\n'
-                    + 'with Path(os.environ["CALLS"]).open("a") as out: out.write("publish\\n")\nraise SystemExit(40)\n')
-                if phase == 'inputs':
-                    (root / 'lean-report-inputs.json').unlink()
-                record = root / 'calls'
-                env = dict(os.environ, FULL_BUILD="1", PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'],
-                    CALLS=str(record), LAKE_BIN=str(root / 'bin/lake'), STRATALINT_INSPECTOR_SUPERVISED='1',
-                    STRATALINT_LEAN_PRODUCER_DLL=str(root / 'candidate producer.dll'))
-                result = subprocess.run(['bash', str(root / 'tools/lean-inspector/inspect.sh'),
-                    '--repository', str(root), '--output', str(report)], env=env, capture_output=True, text=True, timeout=30)
-                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
-                self.assertIn(f'LEAN_INSPECTOR_FAILED phase={phase} exit={status}', result.stderr)
-                self.assertEqual(record.read_text().splitlines() if record.exists() else [], calls)
-                self.assertEqual(before, {suffix: publication.member(report, suffix).read_bytes() for suffix in publication.SUFFIXES})
-
 
 if __name__ == '__main__':
     unittest.main()

@@ -12,56 +12,6 @@ class NativeLocalReportConsumerTests:
         self.assertIn(str((self.root / 'tools/scripts/worktree/lean-git/git').resolve()), result.stdout)
         self.assertIn('git version ', result.stdout)
 
-    def test_local_restored_format_keeps_native_incremental_extraction(self):
-        policy = json.loads((self.root / 'lean-report-inputs.json').read_text())
-        policy['report_execution'] = EXECUTION
-        self.write('lean-report-inputs.json', json.dumps(policy))
-        for name in ('lean_cache_release.py', 'lean_cache_release_io.py', 'lean_cache_topology.py', 'cache_material.py'):
-            self.copy('tools/scripts/worktree/' + name)
-        # Make owns the real native report build; only Release transport is replaced.
-        compiler_seed = self.compiler_seed
-        self.ensure()
-        self.restore_compiler()
-        if compiler_seed is not None:
-            for material in Path(compiler_seed).iterdir():
-                if material.name == 'outputs.jsonl':
-                    continue
-                private = self.root / '.lake/artifact-cache/artifacts' / material.name
-                self.assertTrue(private.is_file(), '[FAIL] local_entry_must_restore_supplied_compiler')
-                self.assertEqual(publication.digest(private), publication.digest(material))
-                self.assertFalse(os.path.samestat(material.stat(), private.stat()))
-        self.check_cold_project(self)
-        self.prepare_report_modules(workspace='tools/lean-inspector-reg')
-        first = self.guarded_command(['make', 'lean-report', 'REBUILD_REPORT_CACHE=1'],
-            env=dict(self.env, STRATALINT_ACCEPT_COLD_BUILD='1'))
-        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
-        output = self.root / '.lake/build/stratalint/raw-lean-report.json'
-        saved = self.root / 'saved-seed'
-        saved.mkdir()
-        for suffix in (*publication.SUFFIXES, '.reuse.json'):
-            shutil.copy2(publication.member(output, suffix), publication.member(saved / output.name, suffix))
-        before = self.stamps()
-        receipt = publication.member(output, '.reuse.json')
-        value = json.loads(receipt.read_text())
-        value['inputs']['report_format'] = 'incompatible-report-format'
-        receipt.write_text(json.dumps(value))
-        self.write('tools/scripts/worktree/lean-cache-publish.sh', '#!/bin/bash\nset -euo pipefail\n'
-            'printf "%s\\n" "$*" > fetch-call\ncp saved-seed/* .lake/build/stratalint/\n')
-        self.write('D5/Alone.lean', 'def alone : Nat := 9\n')
-        self.prepare_report_modules('D5.Alone')
-        restored = self.guarded_command(['make', 'lean-report', 'LEAN_REPORT_CACHE_MISS_POLICY=fetch-or-fail'], env=self.env)
-        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
-        self.assertIn('--refresh-stale --writer-owned', (self.root / 'fetch-call').read_text())
-        changed = sorted(name for name, stamp in self.stamps().items() if stamp != before[name])
-        self.assertEqual(changed, ['D5.Alone'], '[FAIL] restored_format_extracts_only_changed_module')
-        self.assertIn('LEAN_INSPECTOR_WORK extracted_modules=1 aggregates=1', restored.stdout)
-        self.record_result('local-format-restored-incremental', dict(exit_code=restored.returncode,
-            modules=len(before), extracted_modules=1, changed=changed))
-        warm = self.guarded_command(['make', 'lean-report'], env=self.env)
-        self.assertEqual(warm.returncode, 0, warm.stdout + warm.stderr)
-        self.assertIn('LEAN_INSPECTOR_WORK extracted_modules=0 aggregates=0', warm.stdout)
-
-
 class NativeReportConsumerTests:
     def test_reg_dependency_closure_reassessment(self):
         # Typed Reg leaf and interface inputs select their compiler dependency closure.
@@ -83,7 +33,7 @@ class NativeReportConsumerTests:
         self.write('Reg/Unrelated.lean', 'def Reg.Unrelated.value : Nat := 1\n')
         work = self.root / 'module-work.jsonl'
         self.env['STRATALINT_INSPECTOR_MODULE_WORK'] = str(work)
-        output = self.root / '.lake/build/stratalint/raw-lean-report.json'
+        output = self.root / 'public.json'
 
         def entry(phase, *, env=None):
             work.write_text('')
@@ -91,7 +41,7 @@ class NativeReportConsumerTests:
             oleans = {path: (path.stat().st_mtime_ns, publication.digest(path))
                       for path in (self.root / '.lake/build/reg').rglob('*.olean')}
             self.prepare_report_modules(workspace='tools/lean-inspector-reg')
-            result = self.guarded_command(['make', 'lean-report', 'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build'],
+            result = self.guarded_command(['make', 'lean-cache-prepare'],
                 env=dict(self.env if env is None else env, TEST_REPORT_REGISTRATION_GATE='1'))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             records = [json.loads(line) for line in work.read_text().splitlines()]
@@ -102,7 +52,7 @@ class NativeReportConsumerTests:
                     if (path.stat().st_mtime_ns, publication.digest(path)) != oleans[path]),
                 report_changed=sorted(name for name, stamp in self.stamps().items()
                     if name not in before or stamp != before[name]),
-                whole_report_reused='LEAN_INSPECTOR_WORK extracted_modules=0 aggregates=0' in result.stdout)
+                warm=not records)
             self.record_result(phase, data, [work])
             return data
 
@@ -205,7 +155,7 @@ package_facet compilerRegistrationContender (pkg : Package) : Unit := do
         self.assertEqual(warm['extracted'], [])
         self.assertEqual(warm['assessed'], [])
         self.assertEqual(warm['reg_recompiled'], [])
-        self.assertTrue(warm['whole_report_reused'])
+        self.assertTrue(warm['warm'])
         leaf = self.root / 'Reg/Leaf.lean'
         leaf.write_text(leaf.read_text().replace('value := 1', 'value := 2'))
         changed = entry('leaf')
@@ -272,15 +222,13 @@ package_facet compilerRegistrationContender (pkg : Package) : Unit := do
                 pattern=f'tools/lean-inspector/LeanInformationAudit/{name}.lean', optional=False))
         self.write('lean-report-inputs.json', json.dumps(policy))
         self.env['STRATALINT_LEAN_BUILD_TARGETS'] = json.dumps(targets)
-        output = self.root / '.lake/build/stratalint/raw-lean-report.json'
+        output = self.root / 'public.json'
 
         def entry(phase, *, env=None):
-            result = self.guarded_command(['make', 'lean-report', 'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build'],
+            result = self.guarded_command(['make', 'lean-cache-prepare'],
                 env=self.env if env is None else env)
-            logs = Path(str(output) + '.logs')
-            paths = [path for path in logs.iterdir() if path.is_file()]
             self.record_result(phase, dict(exit_code=result.returncode,
-                stdout=result.stdout, stderr=result.stderr, targets=targets), paths)
+                stdout=result.stdout, stderr=result.stderr, targets=targets))
             return result
 
         self.assertFalse(output.exists(), '[FAIL] configured_report_must_start_cold')
@@ -288,7 +236,7 @@ package_facet compilerRegistrationContender (pkg : Package) : Unit := do
         self.prepare_report_modules(workspace='tools/lean-inspector-reg')
         initial = entry('production-initial', env=dict(self.env, STRATALINT_ACCEPT_COLD_BUILD='1'))
         self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
-        expected = output.read_bytes()
+        expected = self.report()[1:]
         report_stamps = self.stamps()
         untouched = [* (self.root / '.lake/build/lib/lean/D5').rglob('*.olean'),
                      * (self.root / '.lake/build/reg/lib/lean/Reg').rglob('*.olean'),
@@ -299,166 +247,21 @@ package_facet compilerRegistrationContender (pkg : Package) : Unit := do
         stamps = {path: (path.stat().st_mtime_ns, publication.digest(path)) for path in untouched}
         production = self.root / '.lake/build/reg/lib/lean/Reg/ProductionOnly.olean'
         self.assertIn(production, stamps)
-        import reuse
-        logs = Path(str(output) + '.logs')
         for name in implementations:
             with self.subTest(implementation=name):
                 self.write(f'tools/lean-inspector/LeanInformationAudit/{name}.lean',
                            implementation(name, 'input + 2'))
-                self.assertFalse(reuse.probe(self.root, output)['needs_lake'])
                 compiled = entry(f'production-warm-{name}')
                 self.assertNotIn('phase=programs ', compiled.stderr)
                 self.assertEqual(stamps, {path: (path.stat().st_mtime_ns, publication.digest(path))
                                           for path in untouched})
                 self.assertEqual(report_stamps, self.stamps())
-                self.assertEqual(expected, output.read_bytes())
-                self.assertIn('LEAN_INSPECTOR_WORK extracted_modules=0 aggregates=0', compiled.stdout)
-                self.assertTrue(publication.member(output, '.reuse.json').is_file())
+                self.assertEqual(expected, self.report()[1:])
 
         self.write('tools/lean-inspector/LeanInformationAudit/ArtifactAssessment.lean',
                    implementation('ArtifactAssessment', 'true'))
-        self.assertFalse(reuse.probe(self.root, output)['needs_lake'])
         reused = entry('production-consumer-reuse')
         self.assertEqual(reused.returncode, 0, reused.stderr)
         self.assertNotIn('phase=programs ', reused.stderr)
-        self.assertEqual(expected, output.read_bytes())
+        self.assertEqual(expected, self.report()[1:])
         self.assertEqual(report_stamps, self.stamps())
-
-    def inspect(self, *, success=True, phase='report-entry', env=None):
-        output = self.root / '.lake/build/stratalint/raw-lean-report.json'
-        started = time.monotonic()
-        result = self.guarded_command(['bash', str(self.root / 'tools/lean-inspector/inspect.sh'),
-            '--repository', str(self.root), '--output', str(output)], env=self.env if env is None else env)
-        phases = [dict(field.split('=', 1) for field in line.split()[1:])
-                  for line in result.stderr.splitlines() if line.startswith('LEAN_INSPECTOR_PHASE ')]
-        logs = []
-        for name in dict.fromkeys(row['phase'] for row in phases if row['status'] == 'completed'):
-            for stream in ('stdout', 'stderr'):
-                path = Path(str(output) + '.logs') / f'{name}.{stream}.log'
-                if path.is_file():
-                    logs.append(path.read_text())
-        lines = '\n'.join(logs).splitlines()
-        self.record_result(phase, dict(elapsed_seconds=time.monotonic() - started,
-            exit_code=result.returncode, phases=phases,
-            work=list(dict.fromkeys(line for line in [*result.stdout.splitlines(), *lines]
-                                    if line.startswith('LEAN_INSPECTOR_WORK '))),
-            build_work=[line for line in result.stdout.splitlines() if line.startswith('LEAN_BUILD_WORK ')],
-            lake_built_lines=sum('Built' in line.split() for line in lines)))
-        if success:
-            self.assertEqual(result.returncode, 0, '[FAIL] report_entry_success\n' + result.stdout + result.stderr)
-        else:
-            self.assertNotEqual(result.returncode, 0, '[FAIL] default_failure_blocks_reuse\n' + result.stdout + result.stderr)
-        return result
-
-    def test_report_can_restore_from_store_without_materializing_git_packages(self):
-        self.reg_package()
-        self.prepare_report_modules(workspace='tools/lean-inspector-reg')
-        output = self.root / 'reports' / publication.RAW
-        command = ['make', 'lean-report', 'FULL_BUILD=1', 'LEAN_REPORT=' + str(output),
-                   'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build']
-        lake_wrapper = self.root / 'bin' / 'observed-lake'
-        lake_wrapper.write_text('#!/bin/sh\ntest -d .lake/build && echo build >> lake-started || '
-                                'echo empty >> lake-started\nexec "$REAL_LAKE" "$@"\n')
-        lake_wrapper.chmod(0o755)
-        environment = dict(self.env, REAL_LAKE=self.lake, LAKE_BIN=str(lake_wrapper))
-        started = self.root / 'lake-started'
-        build = self.root / '.lake/build'
-        shutil.rmtree(build)
-        store = Path(environment['LAKE_CACHE_DIR'])
-
-        def cached_files():
-            return {p.relative_to(store): (p.stat().st_size, p.stat().st_mtime_ns)
-                    for p in store.rglob('*') if p.is_file()}
-
-        cached = cached_files()
-        self.assertTrue(cached)
-        restored = self.guarded_command(command, env=environment)
-        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
-        self.assertEqual(cached_files(), cached, 'analysis must treat the shared store as read-only')
-        self.assertEqual(started.read_text().splitlines(), ['empty'])
-        self.assertTrue((build / 'lib/lean/ClaimSupport.olean').is_file())
-        publication.validate_bundle(output, publication.coordinates(self.root), self.root)
-        expected = output.read_bytes()
-        started.unlink()
-
-        mathlib = self.root / '.lake/packages/mathlib'
-        mathlib.rename(self.root / 'saved-mathlib')
-        missing = self.guarded_command(command, env=environment)
-        self.assertNotEqual(missing.returncode, 0)
-        self.assertIn('Missing prebuilt Git dependency mathlib', missing.stderr)
-        self.assertFalse(started.exists())
-        self.assertFalse(mathlib.exists())
-        self.assertEqual(output.read_bytes(), expected)
-
-        explicit = self.guarded_command(['make', 'lean', 'LEAN_TARGETS=+D5.Alone'], env=self.env)
-        self.assertEqual(explicit.returncode, 0, explicit.stdout + explicit.stderr)
-        subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
-                        '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'different revision'],
-                       cwd=mathlib, check=True)
-        revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=mathlib)
-        stale = self.guarded_command(command, env=environment)
-        self.assertNotEqual(stale.returncode, 0)
-        self.assertIn('Prebuilt Git dependency mathlib is not checked out at', stale.stderr)
-        self.assertFalse(started.exists())
-        self.assertEqual(subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=mathlib), revision)
-        self.assertEqual(output.read_bytes(), expected)
-
-    def test_report_entry_reuses_complete_receipt_and_rechecks_current_inputs(self):
-        self.reg_package()
-        policy = json.loads((self.root / 'lean-report-inputs.json').read_text())
-        policy['report_execution'] = EXECUTION
-        policy['dependency_sources']['include'].append(dict(pattern='Audit.lean', optional=False))
-        for path in ['tools/lean-inspector/reuse.py', 'tools/lean-inspector/inspect.sh', 'utility.json']:
-            policy['producer_scopes']['lean-report']['include'].append(dict(pattern=path, optional=False))
-        self.write('lean-report-inputs.json', json.dumps(policy))
-        self.ensure()
-        self.restore_compiler()
-        self.prepare_report_modules(workspace='tools/lean-inspector-reg')
-        report = self.root / '.lake/build/stratalint/raw-lean-report.json'
-        first = self.inspect(phase='current-artifacts')
-        self.assertIn('phase=report status=completed', first.stderr)
-        expected = report.read_bytes()
-        receipt = publication.member(report, '.reuse.json')
-        self.assertTrue(receipt.is_file())
-        warm = self.inspect(phase='native-trace-reuse')
-        self.assertIn('phase=report status=completed', warm.stderr)
-        self.assertIn('LEAN_INSPECTOR_WORK extracted_modules=0 aggregates=0', warm.stdout)
-        self.assertEqual(expected, report.read_bytes())
-
-        # An older release can contain all compiled modules but no workspace configuration.
-        config = self.root / 'tools/lean-inspector-reg/.lake/config'
-        config.rename(config.with_name('prepared-config'))
-        missing_config = self.inspect(success=False, phase='missing-lake-configuration')
-        self.assertIn('make lean-report-prepare', missing_config.stderr)
-        self.assertFalse(config.exists())
-        self.assertEqual(expected, report.read_bytes())
-        config.with_name('prepared-config').rename(config)
-
-        dependency = self.root / '.lake/build/lib/lean/ClaimSupport.olean'
-        original = dependency.read_bytes()
-        dependency.unlink()
-        self.inspect(phase='restore-prebuilt-cache')
-        self.assertEqual(original, dependency.read_bytes())
-        self.assertEqual(expected, report.read_bytes())
-        dependency.unlink()
-        shutil.rmtree(self.root / '.lake/artifact-cache')
-        missing = self.inspect(success=False, phase='missing-prebuilt-dependency')
-        self.assertIn('ClaimSupport', missing.stderr)
-        self.assertFalse(dependency.exists(), 'analysis must leave a missing compiler output absent')
-        self.assertEqual(expected, report.read_bytes())
-        self.prepare_report_modules('ClaimSupport', workspace='tools/lean-inspector-reg')
-        self.assertEqual(original, dependency.read_bytes())
-        self.inspect(phase='restored-inputs')
-        self.assertEqual(expected, report.read_bytes())
-        self.assertTrue(receipt.is_file())
-        source = self.root / 'ClaimSupport.lean'
-        source.write_text(source.read_text() + 'def extraDependencyValue : Nat := 1\n')
-        stale = self.inspect(success=False, phase='stale-prebuilt-dependency')
-        self.assertIn('ClaimSupport', stale.stderr)
-        self.assertEqual(original, dependency.read_bytes())
-        self.assertEqual(expected, report.read_bytes())
-        policy['report_execution'] = dict(EXECUTION, tools=['arbitrary-command'])
-        self.write('lean-report-inputs.json', json.dumps(policy))
-        invalid = self.inspect(success=False, phase='invalid-execution-registration')
-        self.assertIn('LEAN_INSPECTOR_FAILED phase=inputs', invalid.stderr)
-        self.assertNotIn('phase=report status=started', invalid.stderr)

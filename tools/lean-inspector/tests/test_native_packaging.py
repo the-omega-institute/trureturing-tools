@@ -23,7 +23,6 @@ sys.path.insert(0, str(HERE))
 import publication
 import materials
 import native
-import reuse
 
 
 
@@ -388,7 +387,7 @@ class NativeCompilerConsumerTests:
     def test_native_facet_supplies_toolchain_environment(self):
         self.env.pop('LEAN_SYSROOT', None)
         self.prepare_report_modules()
-        result = self.run_lake('build', ':report', success=None)
+        result = self.run_lake('build', ':moduleReports', success=None)
         self.assertEqual(result.returncode, 0,
             '[FAIL] native_toolchain_search_path\n' + result.stdout + result.stderr)
         self.assertIn('D5.Alone', self.stamps())
@@ -499,7 +498,7 @@ class NativePackageConsumerTests(NativeReleaseSupport):
             self.write('activity.jsonl', '')
             # Exercise the restored production writer with the native package
             # facet against real cloned build outputs.
-            result = subprocess.run(['make', 'lean', 'LEAN_TARGETS=:report'], cwd=clone,
+            result = subprocess.run(['make', 'lean', 'LEAN_TARGETS=:moduleReports'], cwd=clone,
                 env=self.env, text=True, capture_output=True, timeout=120)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(before, self.stamps())
@@ -546,11 +545,10 @@ class NativePackageConsumerTests(NativeReleaseSupport):
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr
             + subprocess.check_output(['git', 'status', '--porcelain'], cwd=self.root, env=self.env, text=True))
         self.assertIn('"status":"published"', first.stdout)
-        self.assertIn('LEAN_INSPECTOR_WORK extracted_modules=4 aggregates=1', first.stdout)
-        self.assertFalse((self.root / 'unexpected.json').exists(), 'publisher fixes its canonical output')
-        output = self.root / '.lake/build/stratalint/raw-lean-report.json'
-        expected = {suffix: publication.member(output, suffix).read_bytes() for suffix in publication.SUFFIXES}
-        publication.validate_bundle(output, publication.coordinates(self.root), self.root)
+        state = native.state(self.root)
+        self.assertFalse((state / 'report.zip').exists())
+        expected = {path.name: path.read_bytes() for path in (state / 'modules').glob('*.zip')}
+        self.assertEqual(set(expected), {'D5.A.zip', 'D5.Alone.zip', 'D5.B.zip', 'Fixture.zip'})
         stamps, origins = self.stamps(), self.origins()
         tag = address['release_prefix'] + 'ci-4242-1'
         manifest = json.loads((self.root / 'releases' / tag / 'manifest.json').read_text())
@@ -565,63 +563,25 @@ class NativePackageConsumerTests(NativeReleaseSupport):
         shutil.rmtree(self.root / '.lake/build')
         restored = self.release_run('fetch')
         self.assertIn('"resolved":"' + tag + '"', restored.stdout)
-        self.assertEqual(expected, {suffix: publication.member(output, suffix).read_bytes()
-            for suffix in publication.SUFFIXES})
-        publication.validate_bundle(output, publication.coordinates(self.root), self.root)
-        self.assertTrue((self.root / '.lake/build/lean-inspector/report.zip').is_file())
+        self.assertEqual(expected, {path.name: path.read_bytes() for path in (state / 'modules').glob('*.zip')})
+        self.assertFalse((state / 'report.zip').exists())
         self.assertTrue((self.root / '.lake/build/lean-inspector/producer/bin/reportInspector').is_file())
         restored_stamps = self.stamps()
         self.env['GITHUB_RUN_ID'] = '4243'
         unchanged = self.release_run('publish')
         self.assertIn('"status":"published"', unchanged.stdout)
-        self.assertIn('LEAN_INSPECTOR_WORK extracted_modules=0 aggregates=0', unchanged.stdout)
         self.assertEqual(restored_stamps, self.stamps())
         self.assertEqual({k: v[1] for k, v in stamps.items()}, {k: v[1] for k, v in self.stamps().items()})
         self.assertEqual(origins, self.origins())
-        for suffix in publication.SUFFIXES:
-            actual = publication.member(output, suffix).read_bytes()
-            if suffix == '.provenance.json':
-                provenance = json.loads(expected[suffix])
-                provenance['mode'] = 'cached'
-                self.assertEqual(provenance, json.loads(actual))
-            else:
-                self.assertEqual(expected[suffix], actual)
-        releases = {p.name for p in (self.root / 'releases').iterdir()}
-        # Only the external claim imports this dependency. The five sealed report
-        # members still match while the changed compiler input is invalid.
-        before_dependency_failure = {suffix: publication.member(output, suffix).read_bytes()
-            for suffix in (*publication.SUFFIXES, reuse.SUFFIX)}
+        releases = {path.name for path in (self.root / 'releases').iterdir()}
         support = self.root / 'ClaimSupport.lean'
         saved_support = support.read_bytes()
         self.write('ClaimSupport.lean', 'def claimSupport : Prop := missingClaimSupport\n')
-        with patch.dict(os.environ, self.env):
-            self.assertFalse(reuse.probe(self.root, output)['needs_lake'])
-        checked = self.guarded_command(['make', 'check-lean-report', 'FULL_BUILD=1',
-            'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build', 'LEAN_REPORT=' + str(output)], env=self.env)
-        self.assertNotEqual(checked.returncode, 0, checked.stdout + checked.stderr)
-        self.assertIn('missingClaimSupport', checked.stdout + checked.stderr)
-        self.assertEqual(before_dependency_failure, {suffix: publication.member(output, suffix).read_bytes()
-            for suffix in before_dependency_failure})
+        failed = self.release_run('publish', success=False)
+        self.assertIn('missingClaimSupport', failed.stdout + failed.stderr)
+        self.assertEqual(releases, {path.name for path in (self.root / 'releases').iterdir()})
         support.write_bytes(saved_support)
-        # Even an already published run cannot bypass registered program builds.
-        receipt_before_failure = publication.member(output, '.reuse.json').read_bytes()
         self.write('Audit.lean', 'this is not valid Lean\n')
         failed = self.release_run('publish', success=False)
-        self.assertNotIn('phase=programs ', failed.stderr)
-        self.assertIn('error: Audit.lean:', failed.stderr)
-        self.assertEqual(receipt_before_failure, publication.member(output, '.reuse.json').read_bytes(),
-                         '[FAIL] program_failure_preserves_successful_report_receipt')
-        self.assertNotIn('LEAN_CACHE_PUBLISH ', failed.stdout)
-        self.assertEqual(releases, {p.name for p in (self.root / 'releases').iterdir()})
-        self.write('Audit.lean', 'def audit : Nat := 1\n')
-        validator = self.root / 'tools/lean-inspector/publication.py'
-        validator.write_text(validator.read_text() + '\ndef validate_bundle(*args, **kwargs):\n'
-            + '    raise ValueError("fixture required report validation failed")\n')
-        rejected = self.release_run('publish', success=False)
-        self.assertIn('fixture required report validation failed', rejected.stdout + rejected.stderr)
-        self.assertNotIn('LEAN_CACHE_PUBLISH ', rejected.stdout)
-        self.assertEqual(releases, {p.name for p in (self.root / 'releases').iterdir()})
-        self.record_result('publication', dict(restored_bundle_parity=True,
-            unchanged_extracted_modules=0, unchanged_aggregates=0,
-            required_default_failure_exit=failed.returncode, required_validation_failure_exit=rejected.returncode,
-            partition=address['partition']))
+        self.assertIn('Audit.lean:', failed.stdout + failed.stderr)
+        self.assertEqual(releases, {path.name for path in (self.root / 'releases').iterdir()})

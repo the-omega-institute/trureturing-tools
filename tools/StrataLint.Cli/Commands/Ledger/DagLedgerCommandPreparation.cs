@@ -5,11 +5,16 @@ namespace StrataLint.Cli;
 
 internal static class DagLedgerCommandPreparation
 {
+    private static bool IsLedgerInput(string path) => path.EndsWith(".lean", StringComparison.Ordinal)
+        || path == RepositoryPathPolicy.AssumptionRegistryPath
+        || FrozenStatePath.IsUnderRoot(path)
+        || path is "lean-toolchain" or "lakefile.toml" or "lake-manifest.json" or "lean-report-inputs.json";
+
     internal static TruthContext BuildTruth(
         IRepositoryGateway repository,
         ILeanReportSource leanReportSource)
     {
-        var snapshot = Decode(Ask(() => repository.ReadCurrentProjection(TruthExportCommand.IsTruthInput)));
+        var snapshot = Decode(Ask(() => repository.ReadCurrentProjection(IsLedgerInput)));
         var (report, lean) = LoadLean(snapshot, leanReportSource);
         return BuildTruth(snapshot, report, lean);
     }
@@ -21,7 +26,7 @@ internal static class DagLedgerCommandPreparation
         bool requireAllSources = false)
     {
         var inventory = Decode(Ask(() => repository.ReadCurrentProjection(path =>
-            TruthExportCommand.IsTruthInput(path)
+            IsLedgerInput(path)
                 && (requireAllSources || !path.EndsWith(".lean", StringComparison.Ordinal)))));
         var scope = LeanReportScope.Create(inventory, requestedTargets, path =>
         {
@@ -32,7 +37,7 @@ internal static class DagLedgerCommandPreparation
         });
         var report = leanReportSource is FileLeanReportSource fileSource
             ? fileSource.Load(scope, () => requireAllSources ? inventory : Decode(Ask(() =>
-                repository.ReadCurrentProjection(TruthExportCommand.IsTruthInput))))
+                repository.ReadCurrentProjection(IsLedgerInput))))
             : leanReportSource.Load(scope);
         var snapshot = scope.SourceSnapshot;
         return BuildTruth(snapshot, report, ValidateLean(snapshot, report));

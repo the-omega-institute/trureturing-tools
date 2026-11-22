@@ -34,7 +34,7 @@ class NativeRegSupport:
         if prepared.returncode:
             self.assertFalse(success, prepared.stdout + prepared.stderr)
             return prepared
-        return self.run_lake('-d', workspace, 'build', ':report', success=success)
+        return self.run_lake('-d', workspace, 'build', ':moduleReports', success=success)
 
 
 class NativeRegTests(NativeRegSupport):

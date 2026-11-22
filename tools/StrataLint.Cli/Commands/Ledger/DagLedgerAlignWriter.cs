@@ -13,13 +13,6 @@ internal static class DagLedgerAlignWriter
         {
             var options = ParseArguments(arguments);
             var source = new DagLedgerCommandPreparation.FileLeanReportSource(options.ReportPath);
-            if (options.ListClosed)
-            {
-                var all = DagLedgerCommandPreparation.BuildTruth(repository, source);
-                return new(true, JsonSerializer.Serialize(LeanTruthStates.Resolve(all.Snapshot, all.Lean)
-                    .Where(static pair => pair.Value is TruthState.Closed).Select(static pair => pair.Key.Value)
-                    .Order(StringComparer.Ordinal)) + "\n", string.Empty);
-            }
             var selected = options.Selectors.Concat(options.Adds).Distinct().OrderBy(static path => path.Value, StringComparer.Ordinal).ToArray();
             var truth = selected.Length > 0
                 ? DagLedgerCommandPreparation.BuildTruthScoped(repository, source, selected,
@@ -102,7 +95,6 @@ internal static class DagLedgerAlignWriter
         var selectors = ImmutableArray.CreateBuilder<RepoPath>();
         var adds = ImmutableArray.CreateBuilder<RepoPath>();
         var retirements = ImmutableArray.CreateBuilder<RepoPath>();
-        var list = false;
         for (var index = 0; index < arguments.Count; index++)
             switch (arguments[index])
             {
@@ -110,14 +102,13 @@ internal static class DagLedgerAlignWriter
                 case "--selector" when ++index < arguments.Count: selectors.Add(Module(arguments[index])); break;
                 case "--add" when ++index < arguments.Count: adds.Add(Module(arguments[index])); break;
                 case "--retire-registration" when ++index < arguments.Count: retirements.Add(Module(arguments[index])); break;
-                case "--list-closed" when !list: list = true; break;
                 default: throw Usage();
             }
         var selectionCount = selectors.Count + adds.Count + retirements.Count;
-        if (string.IsNullOrWhiteSpace(report) || (list ? selectionCount != 0 : selectionCount == 0)) throw Usage();
+        if (string.IsNullOrWhiteSpace(report) || selectionCount == 0) throw Usage();
         if (selectors.Concat(adds).Concat(retirements).GroupBy(static path => path).Any(static group => group.Count() != 1))
             throw new InvalidOperationException("duplicate or conflicting module selector");
-        return new(report, selectors.ToImmutable(), adds.ToImmutable(), retirements.ToImmutable(), list);
+        return new(report, selectors.ToImmutable(), adds.ToImmutable(), retirements.ToImmutable());
     }
 
     private static RepoPath Module(string value)
@@ -127,9 +118,9 @@ internal static class DagLedgerAlignWriter
         return path;
     }
     private static InvalidOperationException Usage() => new("USAGE: StrataLint ledger-align --candidate-lean-report FILE "
-        + "(--list-closed | (--selector MODULE | --add MODULE | --retire-registration MODULE)...)");
+        + "(--selector MODULE | --add MODULE | --retire-registration MODULE)...");
     private static string Summary(int considered, int changed, int added, int unchanged, int conflicts = 0) =>
         $"LEDGER_ALIGN selectors_considered={considered} changed={changed} added={added} unchanged={unchanged} conflicts={conflicts}\n";
     private sealed record AlignOptions(string ReportPath, ImmutableArray<RepoPath> Selectors,
-        ImmutableArray<RepoPath> Adds, ImmutableArray<RepoPath> Retirements, bool ListClosed);
+        ImmutableArray<RepoPath> Adds, ImmutableArray<RepoPath> Retirements);
 }

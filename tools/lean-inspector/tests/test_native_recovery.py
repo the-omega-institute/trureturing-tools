@@ -191,8 +191,7 @@ class NativeBatchCompatibilityConsumerTests:
         self.ensure()
         self.restore_compiler()
         self.prepare_report_modules(workspace='tools/lean-inspector-reg')
-        result = self.guarded_command(['make', 'lean-report',
-            'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build', 'REGENERATE_REPORT_ARTIFACTS=1'],
+        result = self.guarded_command(['make', 'lean-cache-prepare', 'REGENERATE_REPORT_ARTIFACTS=1'],
             env=dict(self.env, STRATALINT_NATIVE_BATCH_MODULES=str(size),
                      STRATALINT_ACCEPT_COLD_BUILD='1', LEAN_NUM_THREADS='1'))
         self.record_result(f'capacity-{size}-{getattr(self, "capacity_sequence", 0)}',
@@ -268,121 +267,6 @@ class NativeBatchCapacityConsumerTests:
         self.assertGreaterEqual(first['report'], len(expected))
         self.assertEqual(prepare()['report'], 0)
         self.assertGreaterEqual(prepare('--regenerate')['report'], len(expected))
-
-    def test_runtime_capacity_through_report_entry(self):
-        # Real pinned compiler/extractor, using the existing statement-only fixture.
-        # No mathematical registration-assessment or Linux memory claim is made.
-        policy = json.loads((self.root / 'lean-report-inputs.json').read_text())
-        policy['report_execution'] = json.loads((ROOT / 'lean-report-inputs.json').read_text())['report_execution']
-        self.write('lean-report-inputs.json', json.dumps(policy))
-        self.ensure()
-        self.restore_compiler()
-        self.copy('tools/scripts/report/runner-diagnostics.py')
-        output = self.root / '.lake/build/stratalint/raw-lean-report.json'
-        logs = Path(str(output) + '.logs')
-        work = self.root / 'module-work.jsonl'
-        self.env['STRATALINT_INSPECTOR_MODULE_WORK'] = str(work)
-        self.env['LEAN_NUM_THREADS'] = '1'
-        self.env['STRATALINT_ACCEPT_COLD_BUILD'] = '1'
-        runtime = ['python3', str(self.root / 'tools/scripts/report/runner-diagnostics.py'), '--',
-            'bash', str(self.root / 'tools/scripts/report/report-supervisor.sh'),
-            '--role', 'lean-cache-slice', '--', 'make', 'lean-report',
-            'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build']
-        # Same pre-Make validation as the action; values are environment data,
-        # never interpolated shell text or Make command-line expressions.
-        command = ['bash', '-euc', 'python3 tools/lean-inspector/native.py batch-size\nexec "$@"',
-                   'native-cache-producer', *runtime]
-
-        def entry(label, size, *, regenerate=False, success=True):
-            work.write_text('')
-            args = command + (['REGENERATE_REPORT_ARTIFACTS=1'] if regenerate else [])
-            env = dict(self.env, STRATALINT_NATIVE_BATCH_MODULES=size)
-            started = time.monotonic()
-            result = self.guarded_command(args, env=env)
-            self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
-            self.record_result(label, dict(command=args, batch_modules=size, exit=result.returncode,
-                elapsed_seconds=time.monotonic() - started,
-                work=[json.loads(line) for line in work.read_text().splitlines()]))
-            return result
-
-        def captures(label, size):
-            phases = [json.loads(line) for line in (logs / 'native-phases.jsonl').read_text().splitlines()]
-            calls = [phase for phase in phases if phase['phase'] == 'native-inspect'
-                     and phase['boundary'] == 'finish']
-            names, evidence, paths = [], [], [logs / 'native-phases.jsonl']
-            for call in calls:
-                self.assertTrue(call['success'])
-                path = Path(call['request_capture'])
-                request = json.loads(path.read_text())
-                # This is the captured argument vector used by the actual executable.
-                arguments = request['arguments']
-                modules = arguments[arguments.index('--utility-input') + 2::3]
-                self.assertTrue(0 < len(modules) <= size)
-                names.extend(modules)
-                evidence.append(dict(modules=modules, executable_sha256=request['inspector_executable_sha256']))
-                paths.append(path)
-            self.assertEqual(sorted(names), ['D5.A', 'D5.Alone', 'D5.B', 'Fixture'])
-            self.record_result(label, dict(selected_modules=sorted(names), native_calls=evidence), paths)
-            return [len(row['modules']) for row in evidence]
-
-        self.prepare_report_modules(workspace='tools/lean-inspector-reg')
-        entry('default', '100')
-        self.assertEqual(captures('default-captures', 100), [4])
-        baseline = self.report()
-        before = self.stamps()
-        receipt = json.loads(Path(str(output) + '.reuse.json').read_bytes())
-        warm = entry('warm-smaller', '2')
-        self.assertEqual(self.stamps(), before)
-        self.assertEqual(self.report(), baseline)
-        self.assertIn('LEAN_INSPECTOR_WORK extracted_modules=0 aggregates=0', warm.stdout)
-        self.assertEqual(json.loads(Path(str(output) + '.reuse.json').read_bytes())['inputs'], receipt['inputs'])
-        self.assertEqual(work.read_text(), '')
-        # Direct report entry also rejects invalid capacity before a warm hit.
-        invalid = self.guarded_command(runtime, env=dict(self.env, STRATALINT_NATIVE_BATCH_MODULES='0'))
-        self.assertNotEqual(invalid.returncode, 0)
-        self.assertIn('STRATALINT_NATIVE_BATCH_MODULES requires', invalid.stdout + invalid.stderr)
-        self.record_result('direct-warm-invalid', dict(command=runtime, batch_modules='0', exit=invalid.returncode))
-
-        # Remove the local material but retain Lake's valid, precompiled artifact.
-        compiler_input = self.root / '.lake/build/lib/lean/ClaimSupport.olean'
-        original_olean = compiler_input.read_bytes()
-        compiler_input.unlink()
-        entry('small', '2', regenerate=True)
-        self.assertEqual(captures('small-captures', 2), [2, 2])
-        self.assertEqual(compiler_input.read_bytes(), original_olean)
-        report_logs = ''.join((logs / ('report.' + stream + '.log')).read_text()
-                              for stream in ('stdout', 'stderr'))
-        self.assertNotRegex(report_logs, r'Built (?:trureturing/)?ClaimSupport(?:[ (:]|$)')
-        self.assertEqual(self.report(), baseline)
-        self.assertEqual(sorted(row['module'] for row in baseline[0]), ['D5.A', 'D5.Alone', 'D5.B', 'Fixture'])
-        self.record_result('equivalent', dict(report_sha256=hashlib.sha256(baseline[1]).hexdigest(),
-            materials_sha256=hashlib.sha256(baseline[2]).hexdigest(), module_count=len(baseline[0]),
-            report_bytes=len(baseline[1]), materials_bytes=len(baseline[2]),
-            whole_report_and_material_bytes_identical=True, warm_receipt_inputs_and_module_artifacts_unchanged=True),
-            [output, Path(str(output) + '.materials.zip'), Path(str(output) + '.reuse.json')])
-
-        before = self.stamps()
-        marker = self.root / 'injected'
-        for value in ('', '0', '101', '-1', '+2', '01', '2.0', ' 2', '2\n', '\u0662',
-                      f'2; touch {marker}', f'$(touch {marker})', f'$(shell touch {marker})', f'`touch {marker}`'):
-            result = entry('invalid-' + hashlib.sha256(value.encode()).hexdigest()[:8], value, success=False)
-            self.assertIn('STRATALINT_NATIVE_BATCH_MODULES requires an integer from 1 to 100',
-                          result.stdout + result.stderr)
-            self.assertEqual(self.stamps(), before)
-            self.assertEqual(self.report(), baseline)
-            self.assertFalse(marker.exists())
-
-        # The bounded runtime setting still propagates real kernel/audit failures.
-        self.write('Audit.lean', 'def audit : False := True.intro\n')
-        result = self.guarded_command(['make', 'lean', 'LEAN_TARGETS=:report Audit'],
-            env=dict(self.env, STRATALINT_NATIVE_BATCH_MODULES='2'))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('Audit.lean', result.stdout + result.stderr)
-        self.record_result('required-audit-failure', dict(exit=result.returncode))
-        self.write('D5/A.lean', 'def invalid : False := True.intro\n')
-        result = entry('kernel-failure', '2', regenerate=True, success=False)
-        self.assertIn('D5.A', result.stdout + result.stderr)
-
 
 class NativeRecoveryConsumerTests:
     def _exercise_chunk_durability(self, interruption):
@@ -540,7 +424,7 @@ class NativeRecoveryConsumerTests:
         errors = [ValueError('required producer failure')]
         if zipfile.lzma is not None:
             errors.append(zipfile.lzma.LZMAError('required producer decoder failure'))
-        for kind, owner in [('produce', 'produce_batch'), ('aggregate', 'aggregate')]:
+        for kind, owner in [('produce', 'produce_batch')]:
             request.write_text(json.dumps([[kind, [str(self.root), str(artifact)]]]))
             for error in errors:
                 with self.subTest(kind=kind, exception=type(error).__name__):

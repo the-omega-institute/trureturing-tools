@@ -13,8 +13,7 @@ public static class LeanCompiledArtifactReports
         {
             throw new InvalidOperationException(
                 $"Precomputed raw Lean report is unavailable at {artifactPath}; "
-                + "run `tools/lean-inspector/inspect.sh --repository . "
-                + "--output .lake/build/stratalint/raw-lean-report.json` first.");
+                + "provide an existing report artifact.");
         }
 
         return RawLeanReportArtifact.ReadFile(artifactPath, ReadSources(root));

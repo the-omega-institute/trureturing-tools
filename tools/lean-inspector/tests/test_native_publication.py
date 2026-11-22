@@ -47,7 +47,7 @@ class NativePublicationConsumerTests:
         self.write('D5/B.lean', (self.root / 'D5/B.lean').read_text() + '-- aggregate again\n')
         self.build()
         records = [json.loads(line) for line in (self.root / 'activity.jsonl').read_text().splitlines()]
-        self.assertEqual(records, [dict(kind='extract', count=1), dict(kind='aggregate', count=1)],
+        self.assertEqual(records, [dict(kind='extract', count=1)],
                          '[FAIL] only_changed_module_reanalyzed')
         self.assertEqual(artifact.read_bytes(), tampered, '[FAIL] traced_artifact_reused_as_is')
         self.assertEqual(self.origins()['D5.Alone']['report_sha256'], '0' * 64,
@@ -57,21 +57,20 @@ class NativePublicationConsumerTests:
     def test_aggregation_concatenates_without_revalidation(self):
         self.build()
         state = native.state(self.root)
-        config = publication.read_json((state / 'inputs.json').read_bytes())
+        config = publication.read_json((state / 'module-inputs.json').read_bytes())
         artifacts = [str(state / 'modules' / (name + '.zip')) for name in config['modules']]
-        output, request = self.root / 'aggregate.zip', self.root / 'requests.json'
-        request.write_text(json.dumps([['aggregate', [str(self.root), str(output), *artifacts]]]))
+        output = self.root / 'aggregate.zip'
         with patch.object(publication, 'validate_rows', wraps=publication.validate_rows) as validations, \
                 patch.object(zlib, 'compressobj', wraps=zlib.compressobj) as compressors:
-            native.batch(request)
+            self.collection(output, artifacts)
             self.assertEqual(validations.call_count, 0, '[FAIL] aggregate_rows_not_revalidated')
             self.assertEqual(compressors.call_count, 0, '[FAIL] aggregate_materials_not_recompressed')
-        self.assertEqual(output.read_bytes(), (state / 'report.zip').read_bytes())
+        self.assertTrue(output.is_file())
 
     def test_aggregation_rejects_a_malformed_module_artifact(self):
         self.build()
         state = native.state(self.root)
-        config = publication.read_json((state / 'inputs.json').read_bytes())
+        config = publication.read_json((state / 'module-inputs.json').read_bytes())
         artifacts = [state / 'modules' / (name + '.zip') for name in config['modules']]
         def entries(artifact):
             with zipfile.ZipFile(artifact) as archive:
@@ -93,7 +92,7 @@ class NativePublicationConsumerTests:
                         archive.writestr(name, data)
                 output = self.root / 'rejected' / damage / 'report.zip'
                 with self.assertRaisesRegex(ValueError, message, msg='[FAIL] aggregate_rejects_' + damage):
-                    native.aggregate(self.root, output, candidate, *artifacts[1:])
+                    self.collection(output, [candidate, *artifacts[1:]])
                 self.assertFalse(output.exists())
 
 
@@ -249,55 +248,6 @@ class NativePublicationConsumerTests:
             '--repository', str(self.root)], env=self.env, text=True, capture_output=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.root / 'cli-stage' / publication.RAW).read_bytes(), raw)
-    def test_produced_aggregate_is_not_validated_again_by_a_second_process(self):
-        self.build()
-        script = self.root / 'tools/lean-inspector/native.py'
-        commands = self.root / 'native-commands.jsonl'
-        entry = "if __name__ == '__main__':"
-        text = script.read_text()
-        self.assertEqual(text.count(entry), 1)
-        script.write_text(text.replace(entry, "if os.environ.get('STRATALINT_TEST_NATIVE_COMMANDS'):\n"
-            "    with open(os.environ['STRATALINT_TEST_NATIVE_COMMANDS'], 'a') as _commands:\n"
-            "        _commands.write(json.dumps(sys.argv[1:3]) + '\\n')\n" + entry))
-        self.env = dict(self.env, STRATALINT_TEST_NATIVE_COMMANDS=str(commands))
-        self.write('D5/Alone.lean', (self.root / 'D5/Alone.lean').read_text() + '-- changed after the first report\n')
-        self.build()
-        invoked = [json.loads(line) for line in commands.read_text().splitlines()]
-        self.assertIn('batch', [command[0] for command in invoked])
-        self.assertNotIn(['validate', 'report'], invoked, '[FAIL] produced_aggregate_not_revalidated')
-        rows, _, _ = self.report()
-        self.assertIn('D5.Alone', [row['module'] for row in rows])
-    def test_native_publication_rejects_incoming_damage_before_normalization(self):
-        self.build()
-        self.publish()
-        destination = self.root / 'public.json'
-        before = {suffix: publication.member(destination, suffix).read_bytes() for suffix in publication.SUFFIXES}
-        artifact = self.root / '.lake/build/lean-inspector/report.zip'
-        with zipfile.ZipFile(artifact) as archive:
-            original = [(info, archive.read(info)) for info in archive.infolist()]
-        for damage in ['sha256', 'mode', 'provenance']:
-            with self.subTest(damage=damage):
-                entries = []
-                for info, data in original:
-                    if damage == 'sha256' and info.filename.endswith('.sha256'):
-                        data = b'0' * 64 + b'  raw-lean-report.json\n'
-                    elif damage in ['mode', 'provenance'] and info.filename.endswith('.provenance.json'):
-                        value = json.loads(data)
-                        if damage == 'mode': value['mode'] = 'illegal'
-                        else: value.pop('module_origins')
-                        data = json.dumps(value).encode()
-                    entries.append((info, data))
-                artifact.unlink()
-                with zipfile.ZipFile(artifact, 'w') as archive:
-                    for info, data in entries: archive.writestr(info, data)
-                for activity in ['', '{"kind":"extract","count":1}\n']:
-                    self.write('activity.jsonl', activity)
-                    result = subprocess.run([sys.executable, str(self.root / 'tools/lean-inspector/native.py'),
-                        'publish', str(self.root), str(destination)], env=self.env,
-                        text=True, capture_output=True, timeout=120)
-                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertEqual(before, {suffix: publication.member(destination, suffix).read_bytes()
-                                             for suffix in publication.SUFFIXES})
     def test_publication_snapshot_integrity_and_replace_failure(self):
         self.build()
         self.publish()
@@ -307,7 +257,9 @@ class NativePublicationConsumerTests:
         self.build()
         coordinates = publication.coordinates(self.root)
         with tempfile.TemporaryDirectory(dir=self.root) as directory:
-            report = publication.unpack(self.root / '.lake/build/lean-inspector/report.zip', directory)
+            collection = Path(directory) / 'collection.zip'
+            self.collection(collection)
+            report = publication.unpack(collection, directory)
             validate = publication.validate_bundle
             def corrupt_validated_snapshot(*args, **kwargs):
                 result = validate(*args, **kwargs)
@@ -351,7 +303,7 @@ class NativePublicationConsumerTests:
         self.build()
         self.publish()
         self.write('activity.jsonl', '')
-        self.run_lake('--no-build', 'build', ':report')
+        self.run_lake('--no-build', 'build', ':moduleReports')
         self.assertEqual((self.root / 'activity.jsonl').read_text(), '')
         before = self.stamps()
         original = self.report()[1:]
@@ -364,7 +316,7 @@ class NativePublicationConsumerTests:
         self.assertNotEqual(inputs['config'], current['config'])
         with self.assertRaisesRegex(ValueError, 'stale input/provenance'):
             publication.validate_bundle(self.root / 'public.json', current, self.root)
-        self.run_lake('--no-build', 'build', ':report', success=False)
+        self.run_lake('--no-build', 'build', ':moduleReports')
         self.assertEqual((self.root / 'activity.jsonl').read_text(), '')
         self.assertEqual(before, self.stamps())
         built = self.build()
@@ -379,7 +331,7 @@ class NativePublicationConsumerTests:
                 for path in (self.root / '.lake/build/lib/lean').rglob('*.olean*')})
         self.record_result('config-metadata', result)
         self.assertEqual(result['extracted'], 0)
-        self.assertEqual(result['aggregated'], 1)
+        self.assertEqual(result['aggregated'], 0)
         self.assertEqual(result['compiled_modules'], [])
         self.assertTrue(result['unchanged_rows'])
         self.assertTrue(result['unchanged_origins'])
@@ -434,7 +386,7 @@ class NativeArtifactConsumerTests:
                          ['D5.Extra.json.sources.json'])
         self.assertEqual({name: stamp for name, stamp in self.stamps().items() if name in before}, before)
         self.assertEqual([json.loads(line) for line in (self.root / 'activity.jsonl').read_text().splitlines()],
-                         [dict(kind='extract', count=1), dict(kind='aggregate', count=1)])
+                         [dict(kind='extract', count=1)])
         self.assertIn('D5.Extra', {row['module'] for row in self.report()[0]})
 
 
@@ -508,8 +460,6 @@ class NativeArtifactConsumerTests:
         self.build()
         before = self.stamps()
         origins = self.origins()
-        aggregate = self.root / '.lake/build/lean-inspector/report.zip'
-        aggregate_before = (aggregate.stat().st_mtime_ns, publication.digest(aggregate))
         executable = self.root / '.lake/build/lean-inspector/producer/bin/reportInspector'
         executable_before = publication.digest(executable)
         inspector = self.root / 'tools/lean-inspector/Inspector.lean'
@@ -524,7 +474,6 @@ class NativeArtifactConsumerTests:
         self.publish()
         published = publication.read_json(publication.member(self.root / 'public.json', '.provenance.json').read_bytes())
         self.assertEqual(published['module_origins'], origins)
-        self.assertEqual(published['mode'], 'cached')
         for producer, comment in [('tools/lean-inspector/materials.py', '#'),
                                   ('tools/lean-inspector/native.py', '#'),
                                   ('tools/lean-inspector/lakefile.lean', '--'),
@@ -544,7 +493,6 @@ class NativeArtifactConsumerTests:
         self.write('lean-report-inputs.json', (self.root / 'lean-report-inputs.json').read_text() + '\n')
         self.build()
         self.assertEqual(before, self.stamps())
-        self.assertEqual(aggregate_before, (aggregate.stat().st_mtime_ns, publication.digest(aggregate)))
         self.write('tools/lean-inspector/CompatibleHelper.lean', 'def compatibleHelper : Nat := 1\n')
         policy = json.loads((self.root / 'lean-report-inputs.json').read_text())
         for scope in ['inspector_sources', 'dependency_sources']:
@@ -552,7 +500,6 @@ class NativeArtifactConsumerTests:
         self.write('lean-report-inputs.json', json.dumps(policy))
         self.build()
         self.assertEqual(before, self.stamps())
-        self.assertEqual(aggregate_before, (aggregate.stat().st_mtime_ns, publication.digest(aggregate)))
         self.assertEqual(origins, self.origins())
         # Subsequent content changes assemble mixed actual production origins.
         self.write('D5/Alone.lean', (self.root / 'D5/Alone.lean').read_text() + '-- content input\n')
@@ -574,10 +521,10 @@ class NativeArtifactConsumerTests:
         self.write('D5/B.lean', (self.root / 'D5/B.lean').read_text() + '-- content after producer changes\n')
         self.write('activity.jsonl', '')
         self.prepare_report_modules('D5.B')
-        self.run_lake('build', 'D5.B:report', ':report')
+        self.run_lake('build', 'D5.B:report', ':moduleReports')
         records = [json.loads(line) for line in (self.root / 'activity.jsonl').read_text().splitlines()]
         self.assertEqual(sum(row['count'] for row in records if row['kind'] == 'extract'), 1)
-        self.assertEqual(sum(row['count'] for row in records if row['kind'] == 'aggregate'), 1)
+        self.assertEqual(sum(row['count'] for row in records if row['kind'] == 'aggregate'), 0)
         self.assertEqual({name for name, stamp in self.stamps().items() if stamp != before[name]}, {'D5.B'})
         recovered = self.origins()
         self.assertNotEqual(mixed['D5.B']['producer_sources_sha256'], recovered['D5.B']['producer_sources_sha256'])
@@ -590,7 +537,7 @@ class NativeArtifactConsumerTests:
         self.build()
         self.write('activity.jsonl', '')
         self.write('D5/Alone.lean', (self.root / 'D5/Alone.lean').read_text() + '-- native miss\n')
-        rejected = self.run_lake('--no-build', 'build', ':report', success=False)
+        rejected = self.run_lake('--no-build', 'build', ':moduleReports', success=False)
         self.assertIn('needs to be rebuilt', rejected.stdout + rejected.stderr)
         self.assertEqual((self.root / 'activity.jsonl').read_text(), '')
 

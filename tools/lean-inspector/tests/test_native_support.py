@@ -94,6 +94,7 @@ ROOT = Path(os.environ.get('STRATALINT_NATIVE_SOURCE_ROOT', ROOT)).resolve()
 sys.path.insert(0, str(HERE))
 import publication
 import materials
+import native
 
 
 class NativeTestSupport:
@@ -432,7 +433,7 @@ defaultFacets = ["static"]
                     suite=self.id() if isinstance(self, unittest.TestCase) else type(self).__name__,
                     sequence=sequence, executable=Path(args[0]).name,
                     operations=[arg for arg in args[1:] if arg in
-                        ('lean-cache-ensure', 'lean-report', 'build', 'cache', 'stage', 'unstage', ':report')],
+                        ('lean-cache-ensure', 'lean-report', 'build', 'cache', 'stage', 'unstage', ':moduleReports')],
                     elapsed_seconds=observation_delta(started, observation_value(time.perf_counter)),
                     reaped_children_cpu_seconds=observation_delta(cpu, observation_value(reaped_children_cpu)),
                     cpu_scope='process-wide-reaped-children-including-observers',
@@ -596,18 +597,36 @@ defaultFacets = ["static"]
             if prepared.returncode:
                 self.assertFalse(success, prepared.stdout + prepared.stderr)
                 return prepared
-        return self.run_lake('build', ':report', success=success)
+        return self.run_lake('build', ':moduleReports', success=success)
     def stamps(self):
         return {p.stem: (p.stat().st_mtime_ns, publication.digest(p)) for p in (self.root / '.lake/build/lean-inspector/modules').glob('*.zip')}
+    def collection(self, output, artifacts=None):
+        state = native.state(self.root)
+        config = publication.read_json((state / 'module-inputs.json').read_bytes())
+        if artifacts is None:
+            artifacts = [state / 'modules' / (name + '.zip') for name in config['modules']]
+        with patch.dict(os.environ, dict(self.env, STRATALINT_INSPECTOR_ACTIVITY="")):
+            return native.aggregate(self.root, output, *artifacts,
+                config=dict(modules=config['modules'], coordinates=publication.coordinates(self.root)),
+                schema=materials.REPORT_SCHEMA, write_sidecars=publication.write_sidecars)
+
     def report(self):
         with tempfile.TemporaryDirectory(dir=self.root) as directory:
-            report = publication.unpack(self.root / '.lake/build/lean-inspector/report.zip', directory)
+            path = Path(directory) / 'collection.zip'
+            self.collection(path)
+            report = publication.unpack(path, directory)
             publication.validate_bundle(report)
             rows = list(publication.report_rows(report, materials.REPORT_SCHEMA))
             return rows, report.read_bytes(), publication.member(report, '.materials.zip').read_bytes()
+
     def origins(self):
-        with zipfile.ZipFile(self.root / '.lake/build/lean-inspector/report.zip') as archive:
-            return json.loads(archive.read(publication.RAW + '.provenance.json'))['module_origins']
+        modules = native.state(self.root) / 'modules'
+        return {path.stem: self.module_origin(path) for path in modules.glob('*.zip')}
+
+    def module_origin(self, path):
+        with zipfile.ZipFile(path) as archive:
+            return json.loads(archive.read(publication.RAW + '.provenance.json'))
+
     def record_result(self, phase, result, paths=()):
         """Optional external, reviewable fixture data; never a test oracle."""
         if output := os.environ.get('STRATALINT_NATIVE_RESULT_DIR'):
@@ -619,15 +638,14 @@ defaultFacets = ["static"]
                 shutil.copyfile(path, destination)
             (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     def publish(self):
-        result = subprocess.run([sys.executable, str(self.root / 'tools/lean-inspector/native.py'),
-            'publish', str(self.root), str(self.root / 'public.json')], env=self.env,
-            text=True, capture_output=True, timeout=120)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        publication.validate_bundle(self.root / 'public.json', publication.coordinates(self.root), self.root)
-        result = subprocess.run(['bash', str(self.root / 'tools/scripts/report/lean-report-input.sh'),
-            'verify', '--repository', str(self.root), '--report', str(self.root / 'public.json')],
-            env=self.env, text=True, capture_output=True, timeout=120)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with tempfile.TemporaryDirectory(dir=self.root) as directory:
+            path = Path(directory) / 'collection.zip'
+            self.collection(path)
+            report = publication.unpack(path, directory)
+            with patch.dict(os.environ, self.env):
+                publication.publish(report, self.root / 'public.json',
+                                    publication.coordinates(self.root), self.root)
+
 
 
 class NativeSharedTestSupport(NativeTestSupport):

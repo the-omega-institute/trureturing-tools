@@ -476,6 +476,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
 
     def test_verification_rejects_invalid_post_edit_confirmation(self):
         self.verification_fixture()
+        write(self.root / "D5/A.lean", "def a := 1\n")
         partition = json.loads(self.transport("address").stdout)["partition"]
         tag = json.loads(self.transport("address").stdout)["release_prefix"].replace("lean-cache-v3-", "lean-cache-verify-v2-", 1) + "ci-123-1"
         for metadata, status in self.invalid_post_edit_responses(tag, self.verification_commit):
@@ -489,7 +490,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
                 self.assertIn('"status":"failed"', result.stdout)
                 self.assertNotIn('"status":"published"', result.stdout)
                 calls = self.verification_calls()
-                self.assertEqual(2, sum(call[0] == "api" and "/releases/tags/" in call[1] for call in calls))
+                self.assertEqual(2, sum(call[0] == "api" and "/releases/tags/" in call[1] for call in calls), result.stdout + result.stderr)
                 self.assertFalse(any(call[:2] in (["release", "list"], ["release", "delete"]) for call in calls))
 
     def test_verification_upload_failure_and_real_build_failure_are_nonzero(self):
@@ -706,7 +707,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         with tempfile.TemporaryDirectory() as temporary:
             stage = pathlib.Path(temporary)
             with tarfile.open(archive) as source:
-                source.extractall(stage)
+                source.extractall(stage, filter="data")
             shutil.rmtree(stage / "build/lean-inspector/modules")
             with tarfile.open(archive, "w:gz") as output:
                 output.add(stage / "build", arcname="build")

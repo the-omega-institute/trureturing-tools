@@ -51,7 +51,7 @@ public sealed partial class FileMapPolicyTests
 
     [Theory]
     [InlineData("lean-build", "tools/scripts/worktree/lean-cache-run.sh")]
-    [InlineData("lean-inspector", "tools/lean-inspector/inspect.sh")]
+    [InlineData("lean-inspector", "tools/scripts/report/lean-report-scoped.sh")]
     public void RegLeanVerifiersRequireTheirRegisteredImplementation(string verifier, string implementation)
     {
         var manifest = FileMapLoader.LoadRepository(TestRepositoryLayout.FindRoot());

@@ -11,9 +11,7 @@ public sealed class InspectorNativeTests(InspectorCompilerFixture compiler) : IC
     // Publication, coordinates and verification use this class's private compiler stage.
     [Theory]
     [InlineData("test_streaming")]
-    [InlineData("test_entry_regressions.EntryRegressionTests")]
     [InlineData("test_reuse")]
-    [InlineData("test_local_entry")]
     [InlineData("test_guarded_command.GuardedCommandTests")]
     [InlineData("test_native.NativeTests.test_coordinates_use_private_temporary_memo_and_clean_up_failures")]
     public void InspectorArtifactBehavior(string suite) => InspectorNativeTestRunner.Run(compiler, suite);
@@ -23,15 +21,13 @@ public sealed class InspectorNativeTests(InspectorCompilerFixture compiler) : IC
         "test_native.NativePublicationTests");
 
     [Fact]
-    public void LocalRestoredSeedKeepsNativeIncrementalExtraction() => InspectorNativeTestRunner.Run(compiler,
-        "test_native.NativeLocalReportTests");
+    public void CachePreparationProducesOnlyModuleReports() => InspectorNativeTestRunner.Run(compiler,
+        "test_native.NativeBatchCapacityTests.test_cache_preparation_uses_module_reports_and_records_warm_work");
 
     // Each cold report scenario retains its own ordinary supervisor guard.
     [Theory]
     [InlineData("test_native.NativeReportTests.test_impl_resource_preserves_production_reg_on_warm_report")]
     [InlineData("test_native.NativeReportTests.test_reg_dependency_closure_reassessment")]
-    [InlineData("test_native.NativeReportTests.test_report_entry_reuses_complete_receipt_and_rechecks_current_inputs")]
-    [InlineData("test_native.NativeReportTests.test_report_can_restore_from_store_without_materializing_git_packages")]
     public void ReportConsumersStartWithPrivateColdProjects(string suite) =>
         InspectorNativeTestRunner.Run(compiler, suite);
 }

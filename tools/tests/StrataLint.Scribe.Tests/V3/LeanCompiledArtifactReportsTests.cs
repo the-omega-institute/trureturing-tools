@@ -18,7 +18,7 @@ public sealed class LeanCompiledArtifactReportsTests
                 () => LeanCompiledArtifactReports.ReadRepositoryFiles(root));
 
             Assert.Contains("raw Lean report", exception.Message, StringComparison.Ordinal);
-            Assert.Contains("inspect.sh", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("provide an existing report artifact", exception.Message, StringComparison.Ordinal);
         }
         finally
         {

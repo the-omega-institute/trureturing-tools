@@ -101,7 +101,7 @@ private def reportSourcePath (root : FilePath)
 This job deliberately has no content trace: each module traces its own record. -/
 package_facet reportInputs (pkg : Package) : FilePath := do
   Job.async do
-    proc (← nativeCommand pkg #["prepare", (← repositoryDir pkg).toString, "module-records"])
+    proc (← nativeCommand pkg #["prepare", (← repositoryDir pkg).toString])
     return (← repositoryDir pkg) / ".lake/build/lean-inspector" / "module-inputs.json"
 
 private def readJson (path : FilePath) : IO Json := do
@@ -552,8 +552,7 @@ private def collectNativeReports (pkg : Package) (config : Json) :
   let rows ← modules.mapM nativeModuleReport
   return collectModuleJobs rows
 
--- The scoped caller supplies complete membership through reportInputData and
--- owns its own aggregation/publication. Never write the whole-report bundle.
+-- Build native reports for the registered or explicitly selected modules.
 package_facet moduleReports (owner : Package) : Array FilePath := withCurrPackage owner do
   let pkg := (← getWorkspace).root
   let config ← (← fetch <| pkg.facet `reportInputData).await

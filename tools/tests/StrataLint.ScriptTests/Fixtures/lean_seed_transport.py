@@ -567,7 +567,8 @@ shutil.copytree, lean_cache_release_io.extract_members, pathlib.Path.rename = co
         extracted = next(event for event in events if event["operation"] == "extract")
         self.assertEqual((self.root / ".lake").resolve(), pathlib.Path(extracted["path"]).parent.resolve())
         materials = [event for event in events if event["operation"] == "material"]
-        self.assertEqual(8, len(materials))
+        self.assertEqual({"build/lib/lean/D5/A.olean", "build/lean-inspector/modules/D5.A.zip",
+                          "build/lean-inspector/modules/Trureturing.zip"}, {row["name"] for row in materials})
         for material in materials:
             status = (self.root / ".lake" / material["name"]).stat()
             self.assertEqual((material["device"], material["inode"]), (status.st_dev, status.st_ino))
@@ -1105,7 +1106,9 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         self.assertEqual([{"name": "lean-build.tgz", "sha256": digest(packed), "bytes": len(packed)}], metadata["parts"])
         with tarfile.open(snapshot / "lean-build.tgz") as archive:
             self.assertEqual(b"locally-produced-olean", archive.extractfile("build/lib/lean/D5/A.olean").read())
-            self.assertEqual(b'{"material":"report-seed"}\n', archive.extractfile(report_path).read())
+            self.assertNotIn(report_path, archive.getnames())
+            self.assertNotIn("build/stratalint/raw-lean-report.json", archive.getnames())
+            self.assertTrue(archive.extractfile("build/lean-inspector/modules/D5.A.zip").read().startswith(b"PK"))
             for path in setup_paths:
                 self.assertNotIn(path, archive.getnames())
                 self.assertEqual("compiler setup", (self.root / ".lake" / path).read_text())
@@ -1116,7 +1119,8 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         restored = self.transport("fetch", GITHUB_SHA="e"*40)
         self.assertEqual(0, restored.returncode, restored.stdout + restored.stderr)
         self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
-        self.assertEqual('{"material":"report-seed"}\n', (self.root / ".lake" / report_path).read_text())
+        self.assertFalse((self.root / ".lake" / report_path).exists())
+        self.assertTrue((self.root / ".lake/build/lean-inspector/modules/D5.A.zip").is_file())
         for path in setup_paths:
             self.assertFalse((self.root / ".lake" / path).exists())
         for path in retained_paths:

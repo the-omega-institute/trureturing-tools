@@ -158,7 +158,9 @@ internal static class DagRenderCommand
     }
 
     private static bool IsDagInput(string path) =>
-        TruthReleaseCommand.IsReleaseInput(path) && !path.StartsWith("Blueprint/", StringComparison.Ordinal);
+        !path.StartsWith("Meta/Digestion/", StringComparison.Ordinal)
+        && !path.StartsWith("docs/", StringComparison.Ordinal)
+        && !path.StartsWith("Blueprint/", StringComparison.Ordinal);
 
     private static CommandResult Failure(string summary, Exception exception) =>
         new(false, string.Empty, $"dag-render: {summary}: {Innermost(exception).Message}\n");

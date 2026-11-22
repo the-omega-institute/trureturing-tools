@@ -120,7 +120,7 @@ selection = public.selection'''))
         started = time.monotonic()
         samples, peak, lake_threads, lake_footprint = [], 0, 0, 0
         with (output / (mode + '.log')).open('w') as log:
-            process = subprocess.Popen(['make', 'lean', 'LEAN_TARGETS=:report'], cwd=fixture,
+            process = subprocess.Popen(['make', 'lean', 'LEAN_TARGETS=:moduleReports'], cwd=fixture,
                                        env=case.env, stdout=log, stderr=subprocess.STDOUT)
             try:
                 while process.poll() is None:

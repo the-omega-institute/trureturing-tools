@@ -536,7 +536,6 @@ class NativeSemanticConsumerTests:
         def snapshot(phase):
             rows, report, material = self.report()
             artifacts = list((self.root / '.lake/build/lean-inspector/modules').glob('*.zip'))
-            artifacts += [self.root / '.lake/build/lean-inspector/report.zip']
             artifacts += [self.root / f'.lake/build/lib/lean/D5/{name}.olean{suffix}'
                           for name in ['A', 'B'] for suffix in ['', '.server', '.private']]
             artifacts += [self.root / path for path in ['D5/A.lean', 'D5/B.lean', 'activity.jsonl']]
@@ -560,7 +559,7 @@ class NativeSemanticConsumerTests:
         # Force clean report extraction through the same native owner, retaining
         # compiled Lean inputs and disabling restoration from the fixture cache.
         state = self.root / '.lake/build/lean-inspector'
-        for path in [*(state / 'modules').glob('*.zip*'), *state.glob('report.zip*')]:
+        for path in (state / 'modules').glob('*.zip*'):
             path.unlink()
         self.env['LAKE_ARTIFACT_CACHE'] = 'false'
         self.build()
@@ -614,7 +613,6 @@ class NativeSemanticConsumerTests:
         def snapshot(phase):
             rows, report, material = self.report()
             artifacts = list((self.root / '.lake/build/lean-inspector/modules').glob('*.zip'))
-            artifacts += [self.root / '.lake/build/lean-inspector/report.zip']
             artifacts += [self.root / f'.lake/build/lib/lean/D5/B.olean{suffix}'
                           for suffix in ['', '.server', '.private']]
             artifacts += [self.root / path for path in
@@ -642,11 +640,11 @@ class NativeSemanticConsumerTests:
         self.assertEqual(stamps, self.stamps())
         self.assertEqual((before_report, before_material), (unchanged_report, unchanged_material))
         self.assertEqual(before['origins'], unchanged['origins'])
-        self.run_lake('--no-build', 'build', ':report')
+        self.run_lake('--no-build', 'build', ':moduleReports')
         self.assertEqual((self.root / 'activity.jsonl').read_text(), '')
 
         self.write('D5/B.lean', support.replace(':= False', ':= True'))
-        self.run_lake('--no-build', 'build', ':report', success=False)
+        self.run_lake('--no-build', 'build', ':moduleReports', success=False)
         self.assertEqual(stamps, self.stamps())
         self.assertEqual((self.root / 'activity.jsonl').read_text(), '')
         self.build()
@@ -664,7 +662,7 @@ class NativeSemanticConsumerTests:
         # Clean report extraction uses the same native owner and compiled
         # inputs, with optional artifact restoration disabled in this fixture.
         state = self.root / '.lake/build/lean-inspector'
-        for path in [*(state / 'modules').glob('*.zip*'), *state.glob('report.zip*')]:
+        for path in (state / 'modules').glob('*.zip*'):
             path.unlink()
         self.env['LAKE_ARTIFACT_CACHE'] = 'false'
         self.build()
