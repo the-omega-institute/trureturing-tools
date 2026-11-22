@@ -98,7 +98,7 @@ def overlay_frames(root, tree, plan):
     return modules, old, frames + residual
 
 
-def pack_overlay(root, stage, previous, plan, chunk_bytes, save_part, read_prior, deadline=None):
+def pack_overlay(root, stage, previous, plan, chunk_bytes, save_part, read_prior, deadline=None, *, progress=None):
     """Read predecessor rows in the supplied order. Emit only confirmed physical payloads."""
     manifest, tree = previous
     config = lake_configuration(root)
@@ -124,6 +124,6 @@ def pack_overlay(root, stage, previous, plan, chunk_bytes, save_part, read_prior
                     yield index.write_frame(root, modules, name, artifacts, output, deadline, stable_timestamps=True)
 
     logical = volumes.HashOutput()
-    rows = list(emit(range(len(frames)), logical))
+    rows = list(volumes.stream_frames(emit, range(len(frames)), logical, "volume_measure", progress))
     contents = {"lake_inputs_sha256": config, "archive_bytes": logical.size, "archive_sha256": logical.digest.hexdigest()}
-    return volumes.pack_measured(stage, tree, rows, contents, chunk_bytes, save_part, emit, deadline)
+    return volumes.pack_measured(stage, tree, rows, contents, chunk_bytes, save_part, emit, deadline, progress=progress)
