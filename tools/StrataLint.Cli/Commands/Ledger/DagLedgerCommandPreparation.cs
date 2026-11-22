@@ -75,7 +75,7 @@ internal static class DagLedgerCommandPreparation
                 throw new RepositoryUnavailableException(new InvalidOperationException(failure.Message)),
         };
 
-    private static AcceptedLeanClosure ValidateLean(
+    internal static AcceptedLeanClosure ValidateLean(
         RepositorySnapshot snapshot,
         LeanAxiomReport report) =>
         LeanClosureValidator.Validate(snapshot, report) switch
