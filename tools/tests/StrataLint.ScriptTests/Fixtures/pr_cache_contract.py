@@ -569,15 +569,37 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
         self.assertFalse((self.root / ".lake").exists())
         self.assertFalse((self.root / "build/lean-cache/pr-adopted.json").exists())
 
-    def test_old_preparation_adopts_native_members_and_discards_retired_reports(self):
-        report = self.root / ".lake/build/lean-inspector/report.zip"
-        report.parent.mkdir(parents=True, exist_ok=True)
-        report.write_bytes(b"retired bundle")
+    def test_native_preparation_excludes_cached_aggregate_files_and_keeps_module_reports(self):
+        inspector = self.root / ".lake/build/lean-inspector"
+        (inspector / "modules").mkdir(parents=True)
+        (inspector / "modules/D5.Sample.zip").write_bytes(b"module")
+        (inspector / "report.zip.trace").write_bytes(b"retired trace")
+        (inspector / "inputs.json").write_bytes(b"retired inputs")
         self.preparation()
+        with tarfile.open(self.bundle / "native.tar.gz") as archive:
+            names = archive.getnames()
+            self.assertNotIn(".lake/build/stratalint/raw-lean-report.json", names)
+            self.assertNotIn(".lake/build/lean-inspector/report.zip.trace", names)
+            self.assertNotIn(".lake/build/lean-inspector/inputs.json", names)
+            self.assertIn(".lake/build/lean-inspector/modules/D5.Sample.zip", names)
+            self.assertIn(".lake/build/lib/Module.olean", names)
+
+    def test_old_preparation_adopts_native_members_and_discards_retired_reports(self):
+        self.preparation()
+        archive_path = self.bundle / "native.tar.gz"
+        original = archive_path.read_bytes()
+        with tarfile.open(fileobj=io.BytesIO(original)) as source, tarfile.open(archive_path, "w:gz") as output:
+            for member in source:
+                output.addfile(member, source.extractfile(member) if member.isfile() else None)
+            for name in ("lean-inspector/report.zip", "stratalint/raw-lean-report.json"):
+                member = tarfile.TarInfo(".lake/build/" + name)
+                member.size = 3
+                output.addfile(member, io.BytesIO(b"old"))
+        self.zip_preparation()
         result, _ = self.adopt()
         self.assertEqual("adopted", result["status"])
         self.assertEqual(b"native", (self.root / ".lake/build/lib/Module.olean").read_bytes())
-        self.assertFalse(report.exists())
+        self.assertFalse((self.root / ".lake/build/lean-inspector/report.zip").exists())
         self.assertFalse((self.root / ".lake/build/stratalint/raw-lean-report.json").exists())
 
     def test_adoption_reclaims_download_zip_before_native_unpack(self):

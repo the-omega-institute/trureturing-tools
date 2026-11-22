@@ -268,9 +268,12 @@ def pack(root, identity, directory, *, anchor=None, previous_index=None):
         material = dict(referenced=0, bundled=len(needed),
                         bundled_bytes=sum(path.stat().st_size for path in payloads.iterdir()))
         layers = ("dependency",)
+    def cache_member(member):
+        return None if retired_report_path(pathlib.PurePosixPath(member.name)) else member
+
     with tarfile.open(directory / "native.tar.gz", "w:gz", compresslevel=1) as archive:
         for path in native_paths(root, layers=layers):
-            archive.add(root / path, arcname=str(path))
+            archive.add(root / path, arcname=str(path), filter=cache_member)
     actions.write_small_record(directory / "preparation.json", dict(source=identity, runtime=runtime,
         partition=actions.partition_path(root), elan_key=actions.elan_key(root)))
     actions.output(dict(artifact_name=artifact_name(identity, sharded=anchor is not None),

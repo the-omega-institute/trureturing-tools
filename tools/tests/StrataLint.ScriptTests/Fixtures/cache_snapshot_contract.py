@@ -867,6 +867,25 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                     if layer == "project":
                         self.assertIn("STRATALINT_ACTIONS_CACHE_SEEDED=" + str(int(accepted)), result.getvalue())
 
+    def test_native_project_restore_removes_aggregate_files_and_keeps_module_reports(self):
+        owner, keys, build = self.native_seed("project")
+        files = ("stratalint/raw-lean-report.json.materials.zip", "lean-inspector/report.zip.trace",
+                 "lean-inspector/inputs.json", "lean-inspector/modules/D5.Sample.zip")
+        for name in files:
+            path = build / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name)
+        self.assertTrue(owner.restore_native(self.root, keys, "project", keys["project"]["key"], "success"))
+        self.assertEqual([False, False, False, True], [(build / name).exists() for name in files])
+        self.assertEqual(b"native build material", (build / "module.olean").read_bytes())
+
+        outside = self.root / "outside"
+        (build / "lean-inspector").rename(outside)
+        (outside / "report.zip").write_text("outside")
+        (build / "lean-inspector").symlink_to(outside, target_is_directory=True)
+        self.assertTrue(owner.restore_native(self.root, keys, "project", keys["project"]["key"], "success"))
+        self.assertEqual("outside", (outside / "report.zip").read_text())
+
     def test_unexecuted_action_preserves_current_evidence_and_cannot_claim_a_seed(self):
         owner, keys, target = self.native_seed("project")
         for outcome, key in (("skipped", keys["project"]["key"]), ("", keys["project"]["key"])):
