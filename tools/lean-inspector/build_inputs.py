@@ -79,6 +79,7 @@ def prepare(roots, directory, need_inputs=True):
 def prepare_cache(logs, regenerate):
     work_file = Path(os.environ.get('STRATALINT_LEAN_BUILD_WORK_FILE', ROOT / 'build/lean-cache/build-work.json'))
     work_file.unlink(missing_ok=True)
+    publication.selection.Selection(ROOT).validate('lean-report')
     prepare('', logs)
     activity = logs / 'native-work.jsonl'
     phases = logs / 'native-phases.jsonl'

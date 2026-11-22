@@ -356,7 +356,7 @@ class NativeCompilerOptionsTests:
         records = [json.loads(line) for line in (self.root / 'activity.jsonl').read_text().splitlines()]
         self.assertIn('D5.Alone', changed)
         self.assertEqual(sum(r['count'] for r in records if r['kind'] == 'extract'), len(changed))
-        self.assertEqual(sum(r['count'] for r in records if r['kind'] == 'aggregate'), 1)
+        self.assertEqual(sum(r['count'] for r in records if r['kind'] == 'aggregate'), 0)
         def option_type(rows):
             row = next(row for row in rows if row['module'] == 'D5.Alone')
             return next(decl['type_sha256'] for decl in row['declarations'] if decl['name'] == 'optionValue')
@@ -690,7 +690,7 @@ class NativeSemanticConsumerTests:
         self.assertTrue(result['warm_matches_clean'], json.dumps(result))
         self.assertEqual(changed, {'D5.A', 'D5.B', 'Fixture'})
         self.assertEqual(result['extracted'], {'before': 4, 'unchanged': 0, 'warm': 3, 'clean': 4})
-        self.assertEqual(result['aggregated'], {'before': 1, 'unchanged': 0, 'warm': 1, 'clean': 1})
+        self.assertEqual(result['aggregated'], {'before': 0, 'unchanged': 0, 'warm': 0, 'clean': 0})
         self.assertTrue(result['unaffected_origin_preserved'])
 
     def test_exported_transitive_dependency_binding(self):

@@ -316,12 +316,12 @@ class NativeRecoveryConsumerTests:
         for name in remaining:
             self.assertFalse((state / 'modules' / (name + '.zip.trace')).exists())
         self.write('activity.jsonl', '')
-        accepted = self.run_lake('--no-build', 'build', *(name + ':report' for name in first))
+        accepted = self.run_lake('--no-build', 'build', *(name + ':moduleReports' for name in first))
         self.assertEqual((self.root / 'activity.jsonl').read_text(), '')
         self.assertEqual(self.stamps(), before)
         self.assertEqual(traces, {name: [(state / 'modules' / (name + suffix)).read_bytes()
                         for suffix in ('.zip.trace', '.zip.hash')] for name in first})
-        refused = self.run_lake('--no-build', 'build', ':report', success=False)
+        refused = self.run_lake('--no-build', 'build', ':moduleReports', success=False)
         self.assertFalse((state / 'report.zip').exists())
         self.record_result('fresh-native-reuse', dict(mode=interruption, accepted_exit=accepted.returncode,
             aggregate_refusal_exit=refused.returncode, reused_modules=first,
@@ -478,7 +478,7 @@ class NativeModuleFacetTests:
                          [dict(kind='extract', count=1)])
         result = self.run_lake('build', 'D5.Alone:inspectorModuleReport', success=False)
         self.assertIn('unknown module facet', result.stdout + result.stderr)
-        for index, targets in enumerate([(':report', 'D5.Alone:report'), ('D5.Alone:report', ':report')]):
+        for index, targets in enumerate([(':moduleReports', 'D5.Alone:report'), ('D5.Alone:report', ':moduleReports')]):
             with self.subTest(targets=targets):
                 source.write_text(source.read_text() + f'-- shared miss {index}\n')
                 self.write('activity.jsonl', '')

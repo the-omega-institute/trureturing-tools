@@ -450,7 +450,7 @@ class NativePackageConsumerTests(NativeReleaseSupport):
             manifest = (clone / 'lean-report-inputs.json').read_text()
             self.write('lean-report-inputs.json', manifest.replace('"schema_version": 1',
                                                                  '"schema_version": 0'))
-            rejected = subprocess.run(['make', 'lean-report', 'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build'], cwd=clone, env=self.env,
+            rejected = subprocess.run(['make', 'lean-cache-prepare'], cwd=clone, env=self.env,
                 text=True, capture_output=True, timeout=120)
             self.assertNotEqual(rejected.returncode, 0, rejected.stdout + rejected.stderr)
             self.assertIn('schema_version', rejected.stderr)
@@ -476,22 +476,16 @@ class NativePackageConsumerTests(NativeReleaseSupport):
                     for p in (donor / '.lake').rglob('*') if p.is_file()})
                 return
             self.assertEqual(result.returncode, 0, output)
-            result = subprocess.run(['make', 'lean-report', 'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build'],
+            result = subprocess.run(['make', 'lean-cache-prepare'],
                 cwd=clone, env=self.env, text=True, capture_output=True, timeout=120)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            output = clone / '.lake/build/stratalint/raw-lean-report.json'
-            logs = Path(str(output) + '.logs')
             self.assertEqual(receipt['status'], 'seeded')
             self.assertEqual(receipt['method'], 'clonefile')
             self.assertEqual(Path(receipt['donor']).resolve(), donor.resolve())
             self.assertEqual(receipt['project_olean_state'], 'warm')
             self.assertFalse((clone / '.lake').is_symlink())
-            self.assertEqual((logs / 'native-work.jsonl').read_text(), '')
-            publication.validate_bundle(output, publication.coordinates(clone), clone)
-            self.assertEqual(output.read_bytes(), expected[0])
-            self.assertEqual(publication.member(output, '.materials.zip').read_bytes(), expected[1])
-            for phase in ['inputs', 'report', 'publish']:
-                self.assertEqual((logs / (phase + '.exit.log')).read_text(), '0\n')
+            self.assertEqual(self.report()[1:], expected)
+            self.assertEqual(json.loads((clone / 'build/lean-cache/build-work.json').read_text())['report'], 0)
             row = Path('.lake/build/lean-inspector/modules/D5.Alone.zip')
             self.assertNotEqual((donor / row).stat().st_ino, (clone / row).stat().st_ino)
             before = self.stamps()
