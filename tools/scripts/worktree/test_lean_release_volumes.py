@@ -282,6 +282,7 @@ class VolumeReleases(unittest.TestCase):
         report = self.project / ".lake/build/stratalint/raw-lean-report.json"
         report.parent.mkdir(parents=True)
         report.write_text("{}")
+        self.write(".lake/build/lean-inspector/modules/D5.A.zip", "module fixture")
         for i in range(3):
             (report.parent / f"payload-{i}").write_bytes(random.Random(i).randbytes(96 * 1024))
         volumes.publish(self.pool, "base", self.project, chunk_bytes=128 * 1024)
@@ -319,7 +320,8 @@ class VolumeReleases(unittest.TestCase):
             self.assertTrue((restored / "lib/lean/D5/A.olean").is_file())
             self.assertFalse((restored / "lib/lean/D5/B.olean").exists())
             self.assertFalse((restored / "lib/lean/D5/C.olean").exists())
-            self.assertTrue((restored / "stratalint/raw-lean-report.json").is_file())
+            self.assertFalse((restored / "stratalint/raw-lean-report.json").exists())
+            self.assertEqual((restored / "lean-inspector/modules/D5.A.zip").read_text(), "module fixture")
             # Rerunning the same protected install also recovers a partially rebuilt workspace.
             with patch.dict(os.environ, GITHUB_ACTIONS="true", GITHUB_WORKSPACE=str(clone)):
                 leftover = restored / "interrupted"

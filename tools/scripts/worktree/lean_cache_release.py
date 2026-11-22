@@ -575,8 +575,7 @@ def retired_report_member(member):
 def cache_tar_member(member):
     if retired_report_member(member):
         return None
-    if member.isfile() and (member.name.endswith(".setup.json")
-                            or member.name == "build/lean-inspector/producer-resume.json"):
+    if member.isfile() and member.name.endswith(".setup.json"):
         return None
     return member
 
