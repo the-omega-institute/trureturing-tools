@@ -138,7 +138,7 @@ def actions_keys(root: pathlib.Path) -> dict:
         "save_allowed": writer_allowed and os.environ.get("STRATALINT_CHECK_SUCCEEDED") == "true",
         "producer_save_allowed": writer_allowed and os.environ.get("GITHUB_REF_PROTECTED") == "true",
         "project_save_allowed": writer_allowed and os.environ.get("STRATALINT_REPORT_SUCCEEDED") == "true",
-        "release_prefix": f"lean-cache-v3-{revision}-{system}-{machine}-",
+        "release_prefix": f"lean-cache-v2-{revision}-{system}-{machine}-",
     }
     for layer in LAYERS:
         generation = "project-push" if layer == "project" else "dependency-v4"
@@ -463,11 +463,9 @@ def resume_spec(root):
     identity = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     prefix = f"lean-producer-resume-v1-{keys['mathlib_revision']}-{keys['os']}-{keys['arch']}-{identity}-"
     paths = native_archive_paths(root, LAYERS)
-    archive = {path for group in paths.values() for path in group}
-    archive.add(resume_marker(root).relative_to(root).as_posix())
     return {"identity": identity, "restore_prefix": prefix,
             "key": prefix + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"],
-            "paths": sorted(archive)}
+            "paths": sorted(set(path for group in paths.values() for path in group))}
 
 
 def resume_key_matches(spec, key):

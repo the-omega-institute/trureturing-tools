@@ -240,7 +240,7 @@ def existing_release(tag, deadline):
 
 
 def partition_prefix(partition, verification=False):
-    namespace = "lean-cache-verify-v2-" if verification else "lean-cache-v3-"
+    namespace = "lean-cache-verify-v1-" if verification else "lean-cache-v2-"
     return namespace + partition.replace("/", "-") + "-"
 
 
@@ -554,15 +554,19 @@ def validate_project_cache(build):
             raise ValueError("project cache is missing " + name)
 
 
-def cache_tar_member(member):
+def retired_report_member(member):
     path = pathlib.PurePosixPath(member.name)
     if path.parts[:2] == ("build", "stratalint") and len(path.parts) > 2:
-        if path.parts[2].startswith("raw-lean-report.json"):
-            return None
-    if len(path.parts) == 3 and path.parts[:2] == ("build", "lean-inspector"):
-        if path.name.startswith("report.zip") or path.name in {"inputs.json", "producer-resume.json"}:
-            return None
-    if member.isfile() and path.name.endswith(".setup.json"):
+        return path.parts[2].startswith("raw-lean-report.json")
+    return (len(path.parts) == 3 and path.parts[:2] == ("build", "lean-inspector")
+            and (path.name.startswith("report.zip") or path.name == "inputs.json"))
+
+
+def cache_tar_member(member):
+    if retired_report_member(member):
+        return None
+    if member.isfile() and (member.name.endswith(".setup.json")
+                            or member.name == "build/lean-inspector/producer-resume.json"):
         return None
     return member
 
@@ -835,8 +839,6 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
                         or path.parts[0] != "build"
                         or not (member.isfile() or member.isdir())):
                     raise ValueError("archive contains an invalid cache member")
-                if cache_tar_member(member) is None:
-                    raise ValueError("archive contains a file outside the project cache: " + member.name)
                 if path in paths:
                     raise ValueError("archive contains an invalid cache member: duplicate path")
                 paths[path] = member
@@ -853,7 +855,8 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
             with tempfile.TemporaryDirectory(prefix=".release-", dir=lake) as temporary:
                 unpacked = pathlib.Path(temporary)
                 with observed_phase("extraction"):
-                    extract_members(archive, unpacked, members, deadline)
+                    kept = [member for member in members if cache_tar_member(member) is not None]
+                    extract_members(archive, unpacked, kept, deadline)
                 source = unpacked / "build"
                 validate_project_cache(source)
                 remaining(deadline)
@@ -945,8 +948,13 @@ def fetch_candidate(root, partition, tag, producer):
     source = next((part for part in seed_partitions(root)
         if tag.startswith(prefix(part, cache_key, True))), None)
     suffix = "" if source is None else tag.removeprefix(prefix(source, cache_key, True))
-    if (not valid_publication_id(suffix) or not suffix.startswith("local-" + producer[:12] + "-")):
-        raise ValueError("candidate tag is outside the compatible partition or producer")
+    if suffix.startswith("local-" + producer[:12] + "-") and valid_publication_id(suffix):
+        verification = {"producer_commit_sha": producer}
+    else:
+        source = snapshot_partition(root, partition, tag, cache_key)
+        if source is None:
+            raise ValueError("candidate tag is outside the compatible partition or producer")
+        verification = None
     def notify_installed():
         if os.environ.get("GITHUB_ACTIONS") == "true":
             for variable, content in (("GITHUB_ENV", "STRATALINT_RELEASE_CACHE_SEEDED=1\n"),
@@ -958,8 +966,8 @@ def fetch_candidate(root, partition, tag, producer):
         with cache_guard(root), tempfile.TemporaryDirectory(prefix="lean-fetch-candidate-") as temporary:
             fetch_staging_cleanup(root, now=time.time())
             installed = restore_snapshot(root, source, tag, pathlib.Path(temporary), deadline,
-                {"producer_commit_sha": producer}, refresh_stale=True, cache_key=cache_key,
-                on_installed=notify_installed)
+                verification, refresh_stale=True, cache_key=cache_key,
+                approved_producer=producer, on_installed=notify_installed)
             if not installed:
                 raise ValueError("candidate snapshot was not installed")
         return 0

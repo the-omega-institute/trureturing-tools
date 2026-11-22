@@ -141,7 +141,7 @@ os.execv({real_git}, [{real_git}, *sys.argv[1:]])
         receipt = json.loads(next(line.partition(" ")[2] for line in published.stdout.splitlines()
                                   if line.startswith("LEAN_CACHE_PUBLISH ")))
         tag = receipt["tag"]
-        self.assertTrue(tag.startswith("lean-cache-verify-v2-"))
+        self.assertTrue(tag.startswith("lean-cache-verify-v1-"))
         self.assertTrue(tag.endswith("-123-1"))
         self.assertEqual("published", receipt["status"])
         release = json.loads((self.remote / tag / "release.json").read_text())
@@ -436,7 +436,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.verification_fixture()
         self.assertEqual(0, self.transport("publish", "999").returncode)
         self.assertEqual(0, self.verification("publish").returncode)
-        tag = next(path for path in self.remote.iterdir() if path.name.startswith("lean-cache-verify-v2-"))
+        tag = next(path for path in self.remote.iterdir() if path.name.startswith("lean-cache-verify-v1-"))
         before = (tag / "manifest.json").read_bytes()
         collision = self.verification("publish")
         self.assertNotEqual(0, collision.returncode)
@@ -456,7 +456,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
     def test_verification_exact_lookup_errors_and_incomplete_metadata_are_nonzero(self):
         self.verification_fixture()
         partition = json.loads(self.transport("address").stdout)["partition"]
-        tag = json.loads(self.transport("address").stdout)["release_prefix"].replace("lean-cache-v3-", "lean-cache-verify-v2-", 1) + "ci-123-1"
+        tag = json.loads(self.transport("address").stdout)["release_prefix"].replace("lean-cache-v2-", "lean-cache-verify-v1-", 1) + "ci-123-1"
         valid = dict(tag_name=tag, target_commitish=self.verification_commit, draft=False)
         cases = [(json.dumps(dict(valid, draft=True)), "0"),
                  (json.dumps(valid), "0"), ('{"draft":false}', "0"),
@@ -478,7 +478,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.verification_fixture()
         write(self.root / "D5/A.lean", "def a := 1\n")
         partition = json.loads(self.transport("address").stdout)["partition"]
-        tag = json.loads(self.transport("address").stdout)["release_prefix"].replace("lean-cache-v3-", "lean-cache-verify-v2-", 1) + "ci-123-1"
+        tag = json.loads(self.transport("address").stdout)["release_prefix"].replace("lean-cache-v2-", "lean-cache-verify-v1-", 1) + "ci-123-1"
         for metadata, status in self.invalid_post_edit_responses(tag, self.verification_commit):
             with self.subTest(metadata=metadata, status=status):
                 shutil.rmtree(self.remote)
@@ -603,7 +603,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
             env=self.transport_environment(**self.verification_environment))
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn('"status":"published"', result.stdout)
-        self.assertIn("lean-cache-verify-v2-", result.stdout)
+        self.assertIn("lean-cache-verify-v1-", result.stdout)
 
     def candidate_transport(self, verb, tag="", **changes):
         return self.transport(verb, arguments=("--mode", "candidate", "--source-commit",
@@ -633,7 +633,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
     def test_candidate_publish_only_accepts_clean_remote_source_without_dev_ancestry(self):
         self.candidate_fixture()
         tag = self.candidate_tag()
-        self.assertTrue(tag.startswith("lean-cache-verify-v2-"))
+        self.assertTrue(tag.startswith("lean-cache-verify-v1-"))
         self.assertIn("-local-" + self.verification_commit[:12] + "-", tag)
         manifest = json.loads((self.remote / tag / "manifest.json").read_text())
         self.assertEqual(self.verification_commit, manifest["producer_commit_sha"])
@@ -682,6 +682,40 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertIn('"status":"unpacked"', result.stdout)
         self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
         self.assertFalse((self.root / "build-runs").exists())
+
+    def test_candidate_restores_existing_production_cache_without_aggregate_members(self):
+        self.verification_fixture()
+        publication = self.transport("publish")
+        self.assertEqual(0, publication.returncode, publication.stdout + publication.stderr)
+        snapshot = next(self.remote.iterdir())
+        manifest_path = snapshot / "manifest.json"
+        archive = snapshot / "lean-build.tgz"
+        retired = ("build/stratalint/raw-lean-report.json", "build/lean-inspector/report.zip")
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = pathlib.Path(temporary)
+            with tarfile.open(archive) as source:
+                source.extractall(stage, filter="data")
+            for member in retired:
+                write(stage / member, "legacy aggregate")
+            with tarfile.open(archive, "w:gz") as output:
+                output.add(stage / "build", arcname="build")
+        packed = archive.read_bytes()
+        manifest = json.loads(manifest_path.read_text())
+        manifest.update(archive_bytes=len(packed), archive_sha256=digest(packed),
+                        parts=[{"name": archive.name, "bytes": len(packed), "sha256": digest(packed)}])
+        write(manifest_path, json.dumps(manifest))
+        write(self.root / ".lake/build/keep.txt", "keep current material")
+        consumer = self.candidate_consumer()
+        wrong = self.transport("fetch", arguments=("--mode", "candidate", "--tag", snapshot.name,
+            "--source-commit", "f" * 40), **consumer)
+        self.assertEqual(1, wrong.returncode, wrong.stdout + wrong.stderr)
+        self.assertEqual("keep current material", (self.root / ".lake/build/keep.txt").read_text())
+        result = self.transport("fetch", arguments=("--mode", "candidate", "--tag", snapshot.name,
+            "--source-commit", manifest["producer_commit_sha"]), **consumer)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
+        for member in retired:
+            self.assertFalse((self.root / ".lake" / member).exists())
 
     def test_candidate_restore_rejects_ordinary_ci_and_wrong_source_without_replacing_build(self):
         self.candidate_fixture()

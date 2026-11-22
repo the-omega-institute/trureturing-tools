@@ -605,7 +605,7 @@ ctypes.CDLL = cdll
             environment={name: "" for name in ("LEAN_PATH", "LEAN_SRC_PATH", "LEAN_SYSROOT", "ELAN_TOOLCHAIN", "LEAN_OPTS")})
         expected = hashlib.sha256(json.dumps(execution, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         self.assertEqual(dict(report_format="stratalint-raw-lean-report-v3", execution_sha256=expected), address["cache_key"])
-        self.assertEqual(f"lean-cache-v3-{REV}-{host}-report-stratalint-raw-lean-report-v3-env-{expected[:12]}-",
+        self.assertEqual(f"lean-cache-v2-{REV}-{host}-report-stratalint-raw-lean-report-v3-env-{expected[:12]}-",
                          address["release_prefix"])
         write(self.root / "D5/A.lean", "def a := 333\n")
         self.assertEqual(address, json.loads(self.transport("address").stdout))
@@ -633,7 +633,7 @@ ctypes.CDLL = cdll
         address = json.loads(self.transport("address").stdout)
         wrong = [original.replace(address["cache_key"]["report_format"], "wrong-format"),
                  original.replace(address["cache_key"]["execution_sha256"][:12], "0" * 12),
-                 f"lean-cache-v3-{REV}-linux-arm64-123-1"]
+                 f"lean-cache-v2-{REV}-linux-arm64-123-1"]
         releases = [dict(tagName=tag, createdAt=f"9{index}", isDraft=False) for index, tag in enumerate(wrong)]
         log = self.root / "key-gh-calls"
         missed = self.transport("fetch", FAKE_LIST_JSON=json.dumps(releases), FAKE_GH_LOG=str(log))
