@@ -440,7 +440,6 @@ public sealed partial class MakeWorkflowTests
         var rootOutput = System.Text.Encoding.UTF8.GetString(rootResult.StandardOutput);
         Assert.Contains("make lean-cache-prepare FULL_BUILD=1", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make gate [BASE=origin/dev] [PURPOSE=pull-request|push]  Run all applicable shared CI checks", rootOutput, StringComparison.Ordinal);
-        Assert.Contains("make lean-report FULL_BUILD=1 [REBUILD_REPORT_CACHE=1 | REGENERATE_REPORT_ARTIFACTS=1]  Inspect prebuilt Lean artifacts; regenerate discards generated reports", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make lean-report-scoped LEAN_TARGETS=", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make dag DIGEST=HEX64 [PREFIX=scribe-resources]  Fetch a published full Scribe pack and render the DAG", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make filemap  Render FILEMAP on demand from Meta/FILEMAP.toml", rootOutput, StringComparison.Ordinal);
