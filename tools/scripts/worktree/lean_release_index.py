@@ -14,8 +14,8 @@ import re
 import tarfile
 
 from lean_artifact_inventory import (
-    PROJECT_BUILD, build_inventory, release_report_path, retired_report_path, import_closure, lake_configuration, lean_artifact_paths,
-    project_imports, required_compiler_paths, workspace_modules,
+    PROJECT_BUILD, build_inventory, import_closure, inspector_build_path, lake_configuration, lean_artifact_paths,
+    project_imports, release_scope, required_compiler_paths, retired_report_path, workspace_modules,
 )
 from lean_cache_release_io import (
     INDEXED_ASSET, INDEXED_SCHEMA, ArchiveInput, MultipartArchiveOutput, archive_sha, copy_chunks, remaining,
@@ -64,13 +64,14 @@ def ordered_modules(modules, graph):
                                if modules[dep].package == modules[current].package)
 
 
-def member_groups(inventory, graph):
+def member_groups(inventory, graph, scope):
     by_module = defaultdict(list)
     residual = []
     for artifact in inventory.artifacts:
         if artifact.kind == "lean":
-            by_module[artifact.module].append(artifact)
-        elif not release_report_path(artifact.path):
+            if artifact.module in scope:
+                by_module[artifact.module].append(artifact)
+        elif not inspector_build_path(artifact.path):
             residual.append(artifact)
     for name in ordered_modules(inventory.modules, graph):
         if by_module[name]:
@@ -90,7 +91,7 @@ def member_groups(inventory, graph):
 def frame_inventory(root):
     modules = workspace_modules(root)
     graph = project_imports(root, modules)
-    return modules, list(member_groups(build_inventory(root, modules), graph))
+    return modules, list(member_groups(build_inventory(root, modules), graph, release_scope(root, modules, graph)))
 
 
 def write_frame(root, modules, module, artifacts, output, deadline, *, stable_timestamps):

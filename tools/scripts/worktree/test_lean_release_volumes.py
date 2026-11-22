@@ -316,7 +316,7 @@ class VolumeReleases(unittest.TestCase):
         for i in range(3):
             (report.parent / f"payload-{i}").write_bytes(random.Random(i).randbytes(96 * 1024))
         # Read a predecessor produced by the older writer, including its module report.
-        with patch.object(volumes.index, "release_report_path", return_value=False):
+        with patch.object(volumes.index, "inspector_build_path", return_value=False):
             volumes.publish(self.pool, "base", self.project, chunk_bytes=128 * 1024)
         manifest, tree = volumes.read_snapshot(self.pool, "base")
         self.assertGreater(max(row["bytes"] for row in tree["members"] if row["module"] is None), 144 * 1024)
@@ -353,7 +353,7 @@ class VolumeReleases(unittest.TestCase):
             self.assertFalse((restored / "lib/lean/D5/B.olean").exists())
             self.assertFalse((restored / "lib/lean/D5/C.olean").exists())
             self.assertFalse((restored / "stratalint/raw-lean-report.json").exists())
-            self.assertEqual((restored / "lean-inspector/modules/D5.A.zip").read_text(), "module fixture")
+            self.assertFalse((restored / "lean-inspector/modules/D5.A.zip").exists())
             # Rerunning the same protected install also recovers a partially rebuilt workspace.
             with patch.dict(os.environ, GITHUB_ACTIONS="true", GITHUB_WORKSPACE=str(clone)):
                 leftover = restored / "interrupted"
@@ -686,7 +686,7 @@ class VolumeReleases(unittest.TestCase):
                 self.assertEqual(previous.read_bytes(), b"existing")
                 self.assertEqual(list((dest / ".lake").glob(".release-*")), [])
 
-    def test_two_compiler_only_generations_with_sparse_and_empty_consumers(self):
+    def test_old_report_seed_rolls_to_compiler_only_full_and_scoped_consumers(self):
         import lean_release_index as index
         import lean_release_sparse as sparse
         import lean_cache_release as release
@@ -696,11 +696,44 @@ class VolumeReleases(unittest.TestCase):
             from lean_seed_support import prepare_release_report
             self.write("Trureturing.lean", "def rootValue : Nat := 0\n")
             prepare_release_report(self.project)
-            self.commit("report selection for the fixture")
-            with (self.project / "lakefile.toml").open("a") as lakefile:
-                lakefile.write('\n[[lean_lib]]\nname="Trureturing"\n')
-            run(self.project, "lake", "build", "@fixture/+Trureturing:olean")
-            self.commit("compile the fixture root")
+            self.write("lakefile.toml", 'name="fixture"\ndefaultTargets=["D5","Trureturing"]\n'
+                       '[[lean_lib]]\nname="D5"\nglobs=["D5.+"]\n[[lean_lib]]\nname="Trureturing"\n')
+            for directory in ("Reg", "tools/lean-inspector-interface", "tools/lean-inspector-reg"):
+                config = self.project / directory / "lakefile.toml"
+                with config.open("a") as lakefile:
+                    lakefile.write('defaultTargets=[]\nlean_lib=[]\n')
+                    if directory.endswith("-reg"):
+                        lakefile.write('[[require]]\nname="leanInspector"\npath="../lean-inspector"\n')
+            package = "tools/lean-inspector"
+            self.write(package + "/lakefile.toml", 'name="leanInspector"\ndefaultTargets=["LeanInformationAudit"]\n'
+                       'buildDir="../../.lake/build/lean-inspector/producer"\n'
+                       '[[lean_lib]]\nname="LeanInformationAudit"\nglobs=["LeanInformationAudit.+"]\n'
+                       '[[lean_exe]]\nname="reportInspector"\nroot="Inspector"\n')
+            self.write(package + "/LeanInformationAudit/Default.lean", 'def defaultValue : Nat := 1\n')
+            self.write(package + "/Inspector.lean", 'def main : IO Unit := IO.println "old inspector"\n')
+            run(self.project, "lake", "build")
+            run(self.project, "lake", "-d", package, "build", "LeanInformationAudit", "reportInspector")
+            run(self.project, "lake", "-d", "tools/lean-inspector-reg", "update")
+            self.write(package + "/Inspector.lean", 'def main : IO Unit := IO.println "new inspector"\n')
+            # The ordinary default build leaves the old executable and its module intact.
+            run(self.project, "lake", "-d", package, "build")
+            inspector = Path("lean-inspector/producer")
+            program = inspector / "bin/reportInspector"
+            optional = inspector / "lib/lean/Inspector.olean"
+            default = inspector / "lib/lean/LeanInformationAudit/Default.olean"
+            build = self.project / ".lake/build"
+            self.assertEqual(run(self.project, str(build / program)).strip(), "old inspector")
+            self.assertTrue((build / optional).is_file())
+            self.assertTrue((build / default).is_file())
+            stale = [optional, program, Path(str(program) + ".trace"),
+                     inspector / "ir/Inspector.c.o.export", Path("lean-inspector/modules/D5.A.zip"),
+                     Path("lean-inspector/inputs/D5.A.json"), Path("lean-inspector/judge-inputs/D5.A.json"),
+                     Path("lean-inspector/module-inputs.json")]
+            for item in stale[4:]:
+                self.write(".lake/build/" + str(item), "old report data")
+            for path in stale:
+                self.assertTrue((build / path).is_file(), path)
+            self.commit("fixture with updated inspector source and an old compiled seed")
             base = run(self.project, "git", "rev-parse", "HEAD").strip()
             def publish(project, commit, number):
                 suffix = f"ci-{number}-1"
@@ -712,7 +745,22 @@ class VolumeReleases(unittest.TestCase):
                 self.assertIn('"status":"published"', output.getvalue())
                 return release.prefix(partition, key, indexed="volumes") + suffix
 
-            first = publish(self.project, base, 801)
+            # Legacy tar and the indexed writer encounter the same stale Actions build.
+            with tarfile.open(self.area / "legacy.tgz", "w:gz") as archive:
+                archive.add(build, arcname="build", filter=release.published_tar_filter(self.project))
+            with tarfile.open(self.area / "legacy.tgz") as archive:
+                paths = set(archive.getnames())
+                self.assertIn("build/" + str(default), paths)
+                self.assertTrue(all("build/" + str(item) not in paths for item in stale))
+            _, groups = index.frame_inventory(self.project)
+            paths = {item.path for _, artifacts in groups for item in artifacts}
+            self.assertIn(default, paths)
+            self.assertTrue(paths.isdisjoint(stale))
+            # Emulate the old v6 writer on these real Lake outputs, including its
+            # erroneous current-source stamp on the stale optional Inspector module.
+            with patch.object(index, "inspector_build_path", return_value=False), \
+                    patch.object(index, "release_scope", side_effect=lambda _, modules, graph: set(modules)):
+                first = publish(self.project, base, 801)
             self.write("D5/B.lean", "import D5.A\ndef valB : Nat := valA + 5\n")
             self.write("Library/Arithmetic/Reference.md", "A reference for B\n")
             self.write("Problems/Arithmetic.md", "A related problem\n")
@@ -724,7 +772,6 @@ class VolumeReleases(unittest.TestCase):
             stack.enter_context(patch.object(release, "rolling_source", return_value=("workflow", {"push"})))
             stack.enter_context(patch.object(release, "rolling_producer", return_value=True))
             stack.enter_context(patch.object(release, "seed_partitions", return_value=[partition]))
-            stack.enter_context(patch.object(sparse.compiler, "production_targets", return_value={"D5.A", "D5.B", "D5.C"}))
             args = SimpleNamespace(command="select-base", mode="production", repository=rolling, source_commit=target,
                 source_ref="refs/heads/dev", previous_commit_only=True, writer_owned=False, approved_tag=None,
                 approved_producer=None, local_assets=None, refresh_stale=False, no_build=False, indexed=False,
@@ -742,16 +789,20 @@ class VolumeReleases(unittest.TestCase):
             self.assertFalse((rolling / ".lake/build/lib/lean/D5/C.olean").exists())
             run(rolling, "lake", "build", "@fixture/+D5.B:olean")
 
-            self.assertFalse((rolling / ".lake/build/lean-inspector/modules").exists())
+            self.assertEqual(plan["removed_modules"], ["Inspector"])
+            self.assertTrue(all(not (rolling / ".lake/build" / path).exists() for path in stale))
             second = publish(rolling, target, 802)
             manifest = json.loads((self.pool / second / volumes.MANIFEST).read_bytes())
             previous = json.loads((self.pool / first / volumes.MANIFEST).read_bytes())
             tree = volumes.read_tree(self.pool / second / volumes.INDEX, manifest)
             old = volumes.read_tree(self.pool / first / volumes.INDEX, previous)
-            def location(snapshot, name):
-                return next(spans for row, spans in zip(snapshot["members"], snapshot["locations"], strict=True)
-                            if row["module"] == name)
-            self.assertEqual(location(tree, "D5.C"), location(old, "D5.C"))
+            def frame_digest(snapshot, name):
+                return next(row["sha256"] for row in snapshot["members"] if row["module"] == name)
+            self.assertEqual(frame_digest(tree, "D5.C"), frame_digest(old, "D5.C"))
+            self.assertIn("Inspector", {row["module"] for row in old["members"]})
+            self.assertNotIn("Inspector", {row["module"] for row in tree["members"]})
+            self.assertEqual(frame_digest(tree, "LeanInformationAudit.Default"),
+                             frame_digest(old, "LeanInformationAudit.Default"))
             for mode in ("full", "scoped"):
                 dest = self.consumer("checked-" + mode)
                 stage = self.area / ("download-" + mode)
@@ -759,13 +810,20 @@ class VolumeReleases(unittest.TestCase):
                 if mode == "full":
                     self.assertTrue(release.restore_snapshot(dest, partition, second, stage, release.operation_deadline(),
                                                              cache_key=key))
-                    self.assertFalse((dest / ".lake/build/lean-inspector/modules").exists())
+                    self.assertTrue(all(not (dest / ".lake/build" / path).exists() for path in stale))
+                    run(dest, "lake", "-d", package, "--no-build", "build")
                     self.assertFalse((dest / ".lake/build/stratalint/raw-lean-report.json").exists())
                     targets = ["D5.A", "D5.B", "D5.C"]
                 else:
                     count, _ = release.restore_scoped(dest, partition, second, stage, release.operation_deadline(),
                         cache_key=key, producer=target, targets=["D5.B"], verification=False)
                     self.assertEqual(count, 2)
+                    inspector_stage = self.area / "download-optional-inspector"
+                    inspector_stage.mkdir()
+                    self.assertEqual(release.restore_scoped(dest, partition, second, inspector_stage,
+                        release.operation_deadline(), cache_key=key, producer=target, targets=["Inspector"],
+                        verification=False), (0, 0))
+                    self.assertFalse((dest / ".lake/build" / optional).exists())
                     self.assertFalse((dest / ".lake/build/lib/lean/D5/C.olean").exists())
                     targets = ["D5.B"]
                 run(dest, "lake", "--no-build", "build", *[f"@fixture/+{n}:olean" for n in targets])

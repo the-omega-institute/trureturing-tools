@@ -593,11 +593,31 @@ def cache_tar_member(member):
     return member
 
 
-def published_tar_member(member):
-    from lean_artifact_inventory import release_report_path
+def published_tar_filter(root):
+    from functools import cache
+    from lean_artifact_inventory import (inspector_build_path, lean_artifact_paths, project_imports,
+                                         release_scope, workspace_modules)
 
-    path = pathlib.PurePosixPath(member.name).relative_to("build")
-    return None if release_report_path(path) else cache_tar_member(member)
+    @cache
+    def inspector_outputs():
+        modules = workspace_modules(root)
+        scope = release_scope(root, modules, project_imports(root, modules))
+        return {path for name in scope if inspector_build_path(modules[name].build)
+                for path in lean_artifact_paths(name, modules[name])}
+
+    def accept(member):
+        path = pathlib.PurePosixPath(member.name).relative_to("build")
+        if cache_tar_member(member) is None:
+            return None
+        if not inspector_build_path(path):
+            return member
+        # Old Actions seeds may carry optional programs and inputs in the same build.
+        if len(path.parts) >= 2 and path.parts[1] not in ("producer", "interface", "reg"):
+            return None
+        if member.isdir():
+            return member
+        return member if path.parts[2:3] in (("lib",), ("ir",)) and path in inspector_outputs() else None
+    return accept
 
 
 def publish(root, partition, verification=None, *, build_cache=True, indexed=False, prepare_only=False):
@@ -682,7 +702,7 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
                         with tarfile.open(stage / ASSET, "w:gz", compresslevel=1,
                                           fileobj=output) as archive:
                             archive.add(root / ".lake/build", arcname="build",
-                                        filter=published_tar_member)
+                                        filter=published_tar_filter(root))
                     contents = output.metadata()
             metadata = {"schema": ("lean-release-seed-v6" if physical else INDEXED_SCHEMA) if indexed else "lean-release-seed-v4",
                         "partition": partition, "cache_key": cache_key, **identity, **contents}
@@ -695,7 +715,7 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
             if physical:
                 publish_progress("snapshot_draft", tag=tag)
             gh(deadline, "release", "create", tag, "--repo", REPO, "--draft",
-               "--title", "Lean cache " + partition, "--notes", "Lean compiler artifacts and module reports for incremental reuse.")
+               "--title", "Lean cache " + partition, "--notes", "Lean compiler artifacts for incremental reuse.")
             entries = metadata.get("parts", []) + ([metadata["index"]] if indexed else [])
             gh(deadline, "release", "upload", tag, *(str(stage / part["name"]) for part in entries),
                str(stage / MANIFEST), "--repo", REPO)

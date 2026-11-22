@@ -104,14 +104,15 @@ def partition(graph, targets):
 
 
 def production_targets(root, modules):
-    # Use the default libraries of the compiler workspaces.
+    # lean-cache-run --build enters the root, Reg, inspector and reg-inspector
+    # workspaces. Imported interface modules are discovered through their edges.
     output = subprocess.check_output(
         ["lake", "-d", str(REG_INSPECTOR), "--json", "query", "@leanInspector/LeanInformationAudit:modules"],
         cwd=root, text=True,
     )
     targets = set(report_selection.Selection(root).modules())
     targets.update(json.loads(output))
-    for directory in (Path("."), Path("Reg"), REG_INSPECTOR, Path("tools/lean-inspector-interface")):
+    for directory in (Path("."), Path("Reg"), REG_INSPECTOR):
         config = tomllib.loads((root / directory / "lakefile.toml").read_text())
         names = set(config["defaultTargets"])
         globs = [pattern for lib in config["lean_lib"] if lib["name"] in names
