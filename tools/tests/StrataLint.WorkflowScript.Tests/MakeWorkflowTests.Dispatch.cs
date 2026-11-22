@@ -441,7 +441,6 @@ public sealed partial class MakeWorkflowTests
         Assert.Contains("make lean-cache-prepare FULL_BUILD=1", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make gate [BASE=origin/dev] [PURPOSE=pull-request|push]  Run all applicable shared CI checks", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make lean-report-scoped LEAN_TARGETS=", rootOutput, StringComparison.Ordinal);
-        Assert.Contains("make dag DIGEST=HEX64 [PREFIX=scribe-resources]  Fetch a published full Scribe pack and render the DAG", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make filemap  Render FILEMAP on demand from Meta/FILEMAP.toml", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make scribe-release  Rebuild and verify local Scribe release assets", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make scribe-release-publish TARGET=COMMIT [PREFIX=scribe-resources]", rootOutput, StringComparison.Ordinal);
@@ -451,8 +450,6 @@ public sealed partial class MakeWorkflowTests
         Assert.DoesNotContain("pr-update", rootOutput, StringComparison.Ordinal);
 
         var makefile = File.ReadAllText(Path.Combine(root, "Makefile"));
-        Assert.Contains("make scribe-release-fetch DIGEST=\"$(DIGEST)\" PREFIX=\"$(PREFIX)\"", Recipe(makefile, "dag"), StringComparison.Ordinal);
-        Assert.Contains("--scribe-pack \"$(SCRIBE_PACK)\" --scribe-pack-digest \"$(DIGEST)\"", Recipe(makefile, "dag"), StringComparison.Ordinal);
         Assert.DoesNotContain("DIGEST", Recipe(makefile, "filemap"), StringComparison.Ordinal);
         Assert.DoesNotContain("scribe-release-fetch", Recipe(makefile, "filemap"), StringComparison.Ordinal);
         Assert.Contains("-- filemap", Recipe(makefile, "filemap"), StringComparison.Ordinal);

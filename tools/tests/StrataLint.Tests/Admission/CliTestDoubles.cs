@@ -62,9 +62,6 @@ internal sealed class StubCliEnvironment(
     public CommandResult SelfTest(IReadOnlyList<string> arguments) =>
         new(false, string.Empty, "selftest is not configured in this fixture");
 
-    public CommandResult RenderDag(IReadOnlyList<string> arguments) =>
-        new(false, string.Empty, "dag rendering is not configured in this fixture");
-
     public CommandResult AlignLedger(IReadOnlyList<string> arguments) =>
         alignLedger?.Invoke(arguments)
             ?? new(false, string.Empty, "ledger align is not configured in this fixture");

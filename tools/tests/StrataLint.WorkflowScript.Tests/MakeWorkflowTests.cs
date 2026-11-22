@@ -46,7 +46,6 @@ public sealed partial class MakeWorkflowTests
         "lean-cache-prepare",
         "build",
         "emit",
-        "dag",
         "filemap",
         "filemap-conform",
         "scribe-release",

@@ -13,10 +13,6 @@ internal static class GeneratedArtifactInventory
     internal const string DocumentProducer = "ScribeEmitter";
     internal static GeneratedArtifactIdentity Values { get; } =
         new(RepositoryPathPolicy.ValuesProjectionPath, "ValuesEmitter", "A-VALUES");
-    internal static GeneratedArtifactIdentity Dag { get; } =
-        new("Generated/DAG.md", "DagEmitter", "A-DAG");
-    internal static GeneratedArtifactIdentity TruthGraph { get; } =
-        new("Generated/truth-graph.v1.json", "DagEmitter", "A-TRUTH");
     internal static GeneratedArtifactIdentity FileMap { get; } =
         new("Generated/FILEMAP.md", "FileMapEmitter", "A-FILEMAP");
     internal static GeneratedArtifactIdentity ScribeAttestation { get; } =
@@ -28,7 +24,7 @@ internal static class GeneratedArtifactInventory
         ArgumentNullException.ThrowIfNull(documentPaths);
         var artifacts = documentPaths
             .Select(static path => new GeneratedArtifactIdentity(path, DocumentProducer))
-            .Concat([Values, Dag, TruthGraph, FileMap, ScribeAttestation])
+            .Concat([Values, FileMap, ScribeAttestation])
             .OrderBy(static artifact => artifact.Path, StringComparer.Ordinal)
             .ToImmutableArray();
         if (artifacts.Select(static artifact => artifact.Path)
