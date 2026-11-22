@@ -573,7 +573,7 @@ public sealed partial class OpenProblemResolutionClaimTests
             var describeReport = DescribeReport.Build(root, [document, otherDocument], report);
             var node = Assert.Single(describeReport.Nodes, item => item.OpenProblemResolutionClaim is not null);
             Assert.Equal(TheoremGid, node.DeclarationGid);
-            Assert.Equal([TheoremGid, OtherTheoremGid], node.OpenProblemResolutionClaim!.Members(TheoremGid));
+            Assert.Equal([TheoremGid, OtherTheoremGid], node.OpenProblemResolutionClaim!.Members(TheoremGid).ToArray());
         });
     }
 

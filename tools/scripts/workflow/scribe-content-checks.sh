@@ -24,5 +24,5 @@ if [[ ! -f "$TARGETS_FILE" || ! -r "$TARGETS_FILE" ]]; then
   echo "scribe-content-checks: TARGETS_FILE must be a readable regular file: $TARGETS_FILE" >&2
   exit 2
 fi
-exec dotnet "$SCRIBE_DLL" content-check --scoped ${report_args[@]+"${report_args[@]}"} \
+STRATALINT_LEAN_REPORT="$REPORT" exec dotnet "$SCRIBE_DLL" content-check --scoped ${report_args[@]+"${report_args[@]}"} \
   --targets-from "$TARGETS_FILE" --paths-from "$PATHS_FILE"

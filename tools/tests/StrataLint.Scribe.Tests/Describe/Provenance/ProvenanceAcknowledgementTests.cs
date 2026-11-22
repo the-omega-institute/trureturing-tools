@@ -102,12 +102,12 @@ public sealed class ProvenanceAcknowledgementTests
             var candidate = Assert.Single(nodes, node => node.Title == "Candidate");
             Assert.Equal("repo-derived", repository.Provenance);
             Assert.Null(repository.LiteratureGid);
-            Assert.Equal([NoteGid], repository.AcknowledgementGids);
+            Assert.Equal(NoteGid, Assert.Single(repository.AcknowledgementGids));
             Assert.Equal("literature-attested", literature.Provenance);
             Assert.Equal(NoteGid, literature.LiteratureGid);
             Assert.Empty(literature.AcknowledgementGids);
             Assert.Equal("suspected-novel", candidate.Provenance);
-            Assert.Equal([NoteGid], candidate.AcknowledgementGids);
+            Assert.Equal(NoteGid, Assert.Single(candidate.AcknowledgementGids));
         });
     }
 
