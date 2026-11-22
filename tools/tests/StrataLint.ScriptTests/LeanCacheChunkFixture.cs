@@ -29,7 +29,7 @@ internal sealed class LeanCacheChunkFixture : IDisposable
         releases = Path.Combine(temporary.Path, "releases");
         script = Path.Combine(repository, "tools/scripts/worktree/lean-cache-publish.sh");
         owner = Path.Combine(Path.GetDirectoryName(script)!, "lean_cache_release.py");
-        foreach (var directory in new[] { repository, bin, releases, Path.GetDirectoryName(script)!, Path.Combine(repository, ".lake/build") })
+        foreach (var directory in new[] { repository, bin, releases, Path.GetDirectoryName(script)!, Path.Combine(repository, ".lake/build/lib/lean") })
             ScriptHarnessScratch.EnsureDirectory(directory);
         foreach (var name in new[] { "lean-cache-publish.sh", "lean_cache_release.py", "lean_cache_release_io.py", "lean_cache_topology.py", "lean_cache.py", "cache_material.py" })
             ScriptHarnessScratch.CopyScriptInto(
