@@ -19,6 +19,8 @@ public sealed partial class MakeWorkflowTests
         var ambientReport = Path.Combine(fixture.Path, "ambient-report.json");
         var scribe = Path.Combine(fixture.Path, "StrataLint.Scribe.dll");
         var paths = Path.Combine(fixture.Path, "scribe paths");
+        var targets = Path.Combine(fixture.Path, "scribe targets");
+        File.WriteAllText(targets, "D5/Probe.lean\0");
         var log = Path.Combine(fixture.Path, "scribe.log");
         Directory.CreateDirectory(binDirectory);
         File.WriteAllText(explicitReport, "explicit\n");
@@ -53,7 +55,7 @@ public sealed partial class MakeWorkflowTests
             [
                 "-c",
                 "PATH=\"$1:/usr/bin:/bin\" STRATALINT_LEAN_REPORT=\"$2\" SCRIBE_LOG=\"$3\" "
-                    + "exec /bin/bash \"$4\" \"$5\" \"$6\" \"$7\"",
+                    + "exec /bin/bash \"$4\" \"$5\" \"$6\" \"$7\" \"$8\"",
                 "scribe-content-checks",
                 binDirectory,
                 ambientReport,
@@ -62,6 +64,7 @@ public sealed partial class MakeWorkflowTests
                 explicitReport,
                 scribe,
                 paths,
+                targets,
             ],
             root,
             BoundedProcessRunner.HangDetectionBudget,
@@ -77,7 +80,7 @@ public sealed partial class MakeWorkflowTests
         Assert.Contains(
             invocations,
             line => line.Contains(
-                $" content-check --report {explicitReport} --paths-from ",
+                $" content-check --scoped --report {explicitReport} --targets-from {targets} --paths-from ",
                 StringComparison.Ordinal));
     }
 
@@ -93,6 +96,8 @@ public sealed partial class MakeWorkflowTests
         var missingReport = Path.Combine(fixture.Path, "missing-report.json");
         var scribe = Path.Combine(fixture.Path, "StrataLint.Scribe.dll");
         var paths = Path.Combine(fixture.Path, "scribe paths");
+        var targets = Path.Combine(fixture.Path, "scribe targets");
+        File.WriteAllText(targets, "D5/Probe.lean\0");
         Directory.CreateDirectory(binDirectory);
         File.WriteAllText(emptyReport, string.Empty);
         File.WriteAllText(scribe, "fixture\n");
@@ -105,13 +110,14 @@ public sealed partial class MakeWorkflowTests
                 "/bin/bash",
                 [
                     "-c",
-                    "PATH=\"$1:/usr/bin:/bin\" exec /bin/bash \"$2\" \"$3\" \"$4\" \"$5\"",
+                    "PATH=\"$1:/usr/bin:/bin\" exec /bin/bash \"$2\" \"$3\" \"$4\" \"$5\" \"$6\"",
                     "scribe-content-checks-invalid-report",
                     binDirectory,
                     Path.Combine(root, ScribeContentChecksScriptPath),
                     report,
                     scribe,
                     paths,
+                    targets,
                 ],
                 root,
                 BoundedProcessRunner.HangDetectionBudget,

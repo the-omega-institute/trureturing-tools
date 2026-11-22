@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """Inspector-owned canonical bundle validation and private publication.
 
-Optional artifacts are validated before use. This module has no reuse index,
-source planner, remote transport, or persistent store.
+Validates native module artifacts and publishes scoped bundles.
 """
 from __future__ import annotations
 
-import argparse
-from contextlib import nullcontext
 from functools import lru_cache
 import hashlib
 import importlib.util
@@ -17,7 +14,6 @@ from pathlib import Path
 import re
 import shutil
 import stat
-import subprocess
 import tempfile
 import zipfile
 
@@ -154,15 +150,6 @@ def digest(path):
     return result.hexdigest()
 
 
-def coordinates(repository):
-    lake = Path(repository) / '.lake'
-    # Keep pre-ensure queries out of the cold project tree. Hashing and memo
-    # eligibility are shared with the shell entry, in this process.
-    with (nullcontext(str(lake / 'lean-input-memo')) if lake.exists() else
-            tempfile.TemporaryDirectory(prefix='lean-report-input-memo.', dir=os.environ.get('TMPDIR'))) as memo:
-        return selection.input_coordinates(repository, memo_root=memo)
-
-
 def production_origin(repository, executable, *, inputs=None):
     """Actual generation evidence, never a Lake report dependency or currentness test."""
     inputs = inputs if inputs is not None else selection.Selection(repository)
@@ -216,19 +203,6 @@ def validate_origin(report, rows):
     origin = read_json(member(report, '.provenance.json').read_bytes())
     check_origin(origin, rows[0])
     return origin
-
-
-def write_sidecars(report, inputs, origins, mode='produced'):
-    sha = digest(report)
-    member(report, '.sha256').write_text(f'{sha}  {report.name}\n', encoding='ascii')
-    member(report, '.input.attestation').write_text(
-        'schema=stratalint-lean-report-input-attestation-v1\n'
-        f'repository_input_sha256={inputs["repository"]}\nproducer_sha256={inputs["producer"]}\nreport_sha256={sha}\n', encoding='ascii')
-    provenance = dict(schema='stratalint-lean-report-provenance-v4', side='candidate', mode=mode,
-        source_side='candidate', input_address='sha256:' + inputs['input'], producer_sha256=inputs['producer'],
-        repository_inspector_sha256=inputs['producer'], lean_sources_sha256=inputs['sources'],
-        lean_config_sha256=inputs['config'], report_sha256=sha, module_origins=origins)
-    member(report, '.provenance.json').write_text(json.dumps(provenance, separators=(',', ':')) + '\n', encoding='utf-8')
 
 
 def require_module_keys(row):
@@ -330,27 +304,6 @@ def validate_rows(report, archive_path, verified_materials=None, *, identities=T
     return list(validated_rows(report, archive_path, verified_materials, identities=identities))
 
 
-class _SourceStructure:
-    """Registered membership and artifact structure; Lake owns freshness."""
-
-    def __init__(self, repository):
-        self.inputs = selection.Selection(repository)
-
-    def validate_sources(self, rows):
-        modules = self.inputs.modules()
-        if [row['module'] for row in rows] != sorted(modules):
-            raise ValueError('report source membership mismatch')
-        for row in rows:
-            path = modules[row['module']]
-            if row['source_path'] != path:
-                raise ValueError('report source binding mismatch')
-        validate_template_sources(rows, self.inputs.root, inputs=self.inputs)
-
-
-def validate_sources(rows, repository):
-    _SourceStructure(repository).validate_sources(rows)
-
-
 def validate_template_sources(rows, repository, *, inputs=None):
     """Check evidence structure against the declared report input scope.
 
@@ -366,85 +319,12 @@ def validate_template_sources(rows, repository, *, inputs=None):
             continue
         materials.validate_template_evidence(evidence)
 
-def verify_inputs(report, repository):
-    """Check input membership and origin integrity without source-byte replay."""
-    provenance = read_json(member(report, '.provenance.json').read_bytes())
-    check_aggregate_rows(report_rows(report, materials.REPORT_SCHEMA),
-        provenance['module_origins'], repository)
-
-
-def check_aggregate_rows(rows, origins, repository=None, *, check_report=True):
-    inputs = selection.Selection(repository) if repository is not None else None
-    modules = inputs.modules() if inputs is not None else None
-    seen = set()
-    previous = None
-    for row in rows:
-        require_module_keys(row)
-        name = row['module']
-        if name in seen or name not in origins or previous is not None and name <= previous:
-            raise ValueError('aggregate production origins has unexpected fields')
-        previous = name
-        seen.add(name)
-        check_origin(origins[name], row, check_report=check_report)
-        if modules is not None:
-            if name not in modules:
-                raise ValueError('report source membership mismatch')
-            if row['source_path'] != modules[name]:
-                raise ValueError('report source binding mismatch')
-            validate_template_sources([row], repository, inputs=inputs)
-        del row
-    materials.require_keys(origins, seen, 'aggregate production origins')
-    if modules is not None and seen != set(modules):
-        raise ValueError('report source membership mismatch')
-
 
 def _require_bundle_files(report):
     for suffix in SUFFIXES:
         path = member(report, suffix)
         if path.is_symlink() or not path.is_file() or not path.stat().st_size:
             raise ValueError(f'missing bundle member: {path.name}')
-
-
-def validate_bundle(report, expected=None, repository=None, verified_materials=None, *, identities=True,
-                    check_rows=True):
-    """Check the bundle and its supported fields, with optional material validation."""
-    report = Path(report)
-    _require_bundle_files(report)
-    sha = digest(report)
-    if member(report, '.sha256').read_text(encoding='ascii') != f'{sha}  {report.name}\n':
-        raise ValueError('report SHA mismatch')
-    provenance = read_json(member(report, '.provenance.json').read_bytes())
-    materials.require_keys(provenance, {'schema', 'side', 'mode', 'source_side', 'input_address', 'producer_sha256',
-        'repository_inspector_sha256', 'lean_sources_sha256', 'lean_config_sha256', 'report_sha256', 'module_origins'}, 'provenance')
-    if (provenance['schema'] != 'stratalint-lean-report-provenance-v4' or provenance['side'] != 'candidate'
-            or provenance['source_side'] != 'candidate' or provenance['mode'] not in ('produced', 'cached')
-            or provenance['report_sha256'] != sha or not SHA.fullmatch(provenance['input_address'])
-            or any(not HEX.fullmatch(provenance[k]) for k in ('producer_sha256', 'repository_inspector_sha256',
-                'lean_sources_sha256', 'lean_config_sha256', 'report_sha256'))):
-        raise ValueError('invalid provenance')
-    lines = member(report, '.input.attestation').read_text(encoding='ascii').splitlines()
-    if (len(lines) != 4 or lines[0] != 'schema=stratalint-lean-report-input-attestation-v1'
-            or not re.fullmatch('repository_input_sha256=[0-9a-f]{64}', lines[1])
-            or lines[2] != 'producer_sha256=' + provenance['producer_sha256'] or lines[3] != 'report_sha256=' + sha):
-        raise ValueError('invalid input attestation')
-    helper = Path(__file__).resolve().parent.parent / 'scripts/report/lean-report-input.sh'
-    coordinates = subprocess.check_output([str(helper), 'coordinates',
-        *(provenance[k] for k in ('producer_sha256', 'repository_inspector_sha256',
-                                  'lean_sources_sha256', 'lean_config_sha256'))], text=True).strip().split(' ')
-    if coordinates != [provenance['input_address'][7:], lines[1].split('=', 1)[1]]:
-        raise ValueError('bundle input coordinate mismatch')
-    if expected is not None:
-        wanted = {'input_address': 'sha256:' + expected['input'], 'producer_sha256': expected['producer'],
-            'repository_inspector_sha256': expected['producer'], 'lean_sources_sha256': expected['sources'],
-            'lean_config_sha256': expected['config']}
-        if any(provenance[k] != v for k, v in wanted.items()) or lines[1] != 'repository_input_sha256=' + expected['repository']:
-            raise ValueError('stale input/provenance')
-    if not check_rows:
-        check_aggregate_rows(report_rows(report, materials.REPORT_SCHEMA),
-            provenance['module_origins'], check_report=False)
-        return None
-    check_aggregate_rows(validated_rows(report, member(report, '.materials.zip'),
-        verified_materials, identities=identities), provenance['module_origins'], repository)
 
 
 def zip_files(destination, paths):
@@ -481,18 +361,10 @@ def unpack(artifact, directory, suffixes=SUFFIXES):
     return Path(directory) / RAW
 
 
-def publish(report, destination, expected, repository=None, *, mode=None, expected_hashes=None,
-            validate=True, validator=None):
-    """Stage, validate and atomically publish a bundle.
-
-    validate=False uses prior content-addressed acceptance for material and
-    declaration validation. The envelope, input currency and module shape
-    still have to be current.
-    """
+def publish(report, destination, *, validator):
+    """Stage, validate and atomically publish a scoped bundle."""
     report, destination = Path(report), Path(destination)
     _require_bundle_files(report)
-    # Optional report reuse precedes ensure. A rejected seed must not create a
-    # cold .lake and thereby change the ordinary provisioning path.
     staging_parent = destination.parent
     while not staging_parent.exists():
         staging_parent = staging_parent.parent
@@ -504,24 +376,13 @@ def publish(report, destination, expected, repository=None, *, mode=None, expect
         for suffix in SUFFIXES:
             shutil.copyfile(member(report, suffix), member(staged, suffix))
         accepted = {suffix: digest(member(staged, suffix)) for suffix in SUFFIXES}
-        if expected_hashes is not None and accepted != expected_hashes:
-            raise ValueError('publication snapshot differs from sealed bundle')
-        (validator or validate_bundle)(staged, expected, repository, check_rows=validate)
+        validator(staged)
         if any(digest(member(staged, suffix)) != sha for suffix, sha in accepted.items()):
             raise ValueError('publication snapshot changed during validation')
 
-        updates = {'.sha256': f'{accepted[""]}  {destination.name}\n'.encode('ascii')}
-        if mode is not None:
-            if mode not in ('produced', 'cached'):
-                raise ValueError('invalid publication mode')
-            # Only the publication mode changes; actual module origins survive
-            # reuse, including aggregates with mixed production fingerprints.
-            provenance = read_json(member(staged, '.provenance.json').read_bytes())
-            provenance['mode'] = mode
-            updates['.provenance.json'] = (json.dumps(provenance, separators=(',', ':')) + '\n').encode('utf-8')
-        for suffix, data in updates.items():
-            member(staged, suffix).write_bytes(data)
-            accepted[suffix] = hashlib.sha256(data).hexdigest()
+        checksum = f'{accepted[""]}  {destination.name}\n'.encode('ascii')
+        member(staged, '.sha256').write_bytes(checksum)
+        accepted['.sha256'] = hashlib.sha256(checksum).hexdigest()
         _require_bundle_files(staged)
         if any(digest(member(staged, suffix)) != sha for suffix, sha in accepted.items()):
             raise ValueError('publication snapshot changed after validation')
@@ -551,49 +412,6 @@ def publish(report, destination, expected, repository=None, *, mode=None, expect
                 else:
                     member(destination, suffix).unlink()
             raise
-    return hashlib.sha256(materials.canonical_json(accepted)).hexdigest()
-
-
-def bundle_identity(report, suffixes=SUFFIXES):
-    """Identify every byte of a complete generation, including selected sidecars."""
-    hashes = {}
-    for suffix in suffixes:
-        path = member(report, suffix)
-        if path.is_symlink() or not path.is_file():
-            raise ValueError('bundle member is absent or nonregular: ' + suffix)
-        hashes[suffix] = digest(path)
-    return hashlib.sha256(materials.canonical_json(hashes)).hexdigest()
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest='command', required=True)
-    validate = sub.add_parser('validate')
-    validate.add_argument('report', type=Path)
-    validate.add_argument('--repository', type=Path)
-    verify = sub.add_parser('verify-inputs')
-    verify.add_argument('report', type=Path)
-    verify.add_argument('--repository', required=True, type=Path)
-    stage = sub.add_parser('stage')
-    stage.add_argument('--bundle', required=True, type=Path)
-    stage.add_argument('--staging-directory', required=True, type=Path)
-    stage.add_argument('--repository', required=True, type=Path)
-    args = parser.parse_args()
-    if args.command == 'verify-inputs':
-        verify_inputs(args.report, args.repository)
-        return
-    expected = coordinates(args.repository) if args.repository else None
-    if args.command == 'validate':
-        validate_bundle(args.report, expected, args.repository)
-    else:
-        output = args.staging_directory / RAW
-        publish(args.bundle, output, expected, args.repository)
-        print(output)
-
 
 if __name__ == '__main__':
-    try:
-        main()
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError, zipfile.BadZipFile, subprocess.CalledProcessError) as error:
-        print(f'lean-inspector-publication: {error}', file=__import__('sys').stderr)
-        raise SystemExit(1)
+    raise SystemExit('For scoped verification, use lean-report-input.sh verify-scoped.')

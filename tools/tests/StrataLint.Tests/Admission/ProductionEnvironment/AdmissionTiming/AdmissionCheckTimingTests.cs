@@ -104,10 +104,11 @@ public sealed partial class ProductionEnvironmentTests
         var fixture = TrustedFrozenFixture();
         fixture.Files["Meta/ci-checks.json"] =
             CommonCheckRegistrationFixture.Manifest("tools/StrataLint.Scribe/StrataLint.Scribe.csproj");
+        InstallScopedScribeRegistration(fixture.Files, temporary.Path);
         var currentRaw = Snapshot(fixture.Files);
         var gateway = new FakeRepositoryGateway(RawChangeSet.Create([]), currentRaw, Snapshot(fixture.Baseline));
-        var candidateReport = Path.Combine(temporary.Path, "candidate.json");
-        RawLeanReportArtifact.WriteFile(candidateReport, Decode(currentRaw), LeanAxiomReport.Create(fixture.Reports));
+        var changedPaths = Path.Combine(temporary.Path, "paths");
+        File.WriteAllText(changedPaths, string.Empty);
         using var timingOutput = new StringWriter(CultureInfo.InvariantCulture);
         var originalError = Console.Error;
         ExplicitCommandResult result;
@@ -115,12 +116,12 @@ public sealed partial class ProductionEnvironmentTests
         {
             Console.SetError(timingOutput);
             var environment = new ProductionCliEnvironment(
-                "/repo",
+                temporary.Path,
                 gateway,
                 new FakeLeanReportSource(null),
                 scribeEmissionVerifier: null,
                 new DeterministicTimeProvider());
-            result = environment.CheckCurrent(["--candidate-lean-report", candidateReport]);
+            result = environment.CheckCurrent(["--changed-paths-from", changedPaths]);
         }
         finally
         {
@@ -144,6 +145,7 @@ public sealed partial class ProductionEnvironmentTests
                 [
                     "repository-read",
                     "snapshot-load",
+                    "lean-scope",
                     "lean-report-load",
                     "policy-load",
                     "lean-closure",

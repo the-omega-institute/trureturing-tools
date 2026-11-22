@@ -491,6 +491,14 @@ def validate_preparation(root, value, context, artifact, *, sharded=False, requi
     return identity, runtime
 
 
+def retired_report_path(path):
+    if path.parts[:3] == (".lake", "build", "stratalint") and len(path.parts) > 3:
+        return path.parts[3].startswith("raw-lean-report.json")
+    if path.parts[:3] != (".lake", "build", "lean-inspector") or len(path.parts) < 4:
+        return False
+    return path.parts[3].startswith("report.zip") or path.parts[3] == "inputs.json"
+
+
 def unpack(root, archive_path, directory, *, dependency_only=False):
     names = set()
     files = []
@@ -506,6 +514,8 @@ def unpack(root, archive_path, directory, *, dependency_only=False):
                 member.name == prefix or member.name.startswith(prefix + "/") for prefix in allowed_roots),
                 "native archive member outside cache roots")
             names.add(member.name)
+            if retired_report_path(path):
+                continue
             if not member.isdir():
                 files.append(pathlib.Path(member.name))
             yield member

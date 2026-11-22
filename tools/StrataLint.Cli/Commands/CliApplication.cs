@@ -7,8 +7,6 @@ internal interface ICliEnvironment
 {
     ExplicitCommandResult CapacityAudit(IReadOnlyList<string> arguments);
 
-    AdmissionOutcome Check(IReadOnlyList<string> arguments);
-
     ExplicitCommandResult CheckCurrent(IReadOnlyList<string> arguments);
 
     ExplicitCommandResult CheckDelta(IReadOnlyList<string> arguments);
@@ -17,7 +15,6 @@ internal interface ICliEnvironment
 
     AdmissionTopologyOutcome Topology(IReadOnlyList<string> arguments);
 
-    CommandResult Coverage(IReadOnlyList<string> arguments);
 
 
 
@@ -42,17 +39,9 @@ internal interface ICliEnvironment
 
     CommandResult SelfTest(IReadOnlyList<string> arguments);
 
-    CommandResult RenderDag(IReadOnlyList<string> arguments);
-
     CommandResult AlignLedger(IReadOnlyList<string> arguments);
 
 
-
-    CommandResult ReanchorMathlibLedger(IReadOnlyList<string> arguments);
-
-    ExplicitCommandResult TruthExport(IReadOnlyList<string> arguments);
-
-    ExplicitCommandResult TruthRelease(IReadOnlyList<string> arguments);
 
     CommandResult CleanLanes(IReadOnlyList<string> arguments);
 
@@ -94,8 +83,6 @@ internal static class CliApplication
         {
             ["capacity-audit"] = static (environment, tail, console) =>
                 RenderExplicit(environment.CapacityAudit(tail), console),
-            ["check"] = static (environment, tail, console) =>
-                RenderAdmission(environment.Check(tail), console),
             ["check-current"] = static (environment, tail, console) =>
                 RenderExplicit(environment.CheckCurrent(tail), console),
             ["check-delta"] = static (environment, tail, console) =>
@@ -106,10 +93,6 @@ internal static class CliApplication
                 RenderTestEvidence("compile-proof", tail, console),
             ["clean-lanes"] = static (environment, tail, console) =>
                 RenderCommand(environment.CleanLanes(tail), console),
-            ["coverage"] = static (environment, tail, console) =>
-                RenderCommand(environment.Coverage(tail), console),
-            ["dag-render"] = static (environment, tail, console) =>
-                RenderCommand(environment.RenderDag(tail), console),
             ["deposit-header-check"] = static (environment, tail, console) =>
                 RenderExplicit(environment.DepositHeaderCheck(tail), console),
             ["lean-utility-input"] = static (environment, tail, console) =>
@@ -124,18 +107,12 @@ internal static class CliApplication
                 RenderCommand(environment.AlignLedger(tail), console),
             ["ledger-frozen"] = static (environment, tail, console) =>
                 RenderExplicit(environment.LedgerFrozen(tail), console),
-            ["ledger-reanchor-mathlib"] = static (environment, tail, console) =>
-                RenderCommand(environment.ReanchorMathlibLedger(tail), console),
             ["route"] = static (environment, tail, console) =>
                 RenderCommand(environment.Route(tail), console),
             ["selftest"] = static (environment, tail, console) =>
                 RenderCommand(environment.SelfTest(tail), console),
             ["topology"] = static (environment, tail, console) =>
                 RenderTopology(environment.Topology(tail), console),
-            ["truth-export"] = static (environment, tail, console) =>
-                RenderExplicit(environment.TruthExport(tail), console),
-            ["truth-release"] = static (environment, tail, console) =>
-                RenderExplicit(environment.TruthRelease(tail), console),
             ["worktree"] = static (environment, tail, console) =>
                 RenderCommand(environment.Worktree(tail), console),
         }.ToImmutableDictionary(StringComparer.Ordinal);
@@ -210,7 +187,7 @@ internal static class CliApplication
         }
     }
 
-    private static int RenderAdmission(AdmissionOutcome outcome, ICliConsole console) => outcome switch
+    internal static int RenderAdmission(AdmissionOutcome outcome, ICliConsole console) => outcome switch
     {
         AdmissionOutcome.Admitted admitted => RenderAdmitted(admitted, console),
         AdmissionOutcome.RuleRejected rejected => RenderRejected(rejected, console),

@@ -25,10 +25,10 @@ from lean_actions import (
     output, project_publication, project_work, receipt, resume_spec, write_small_record,
 )
 from lean_artifact_inventory import (
-    PROJECT_BUILD, build_inventory, import_closure, lake_configuration, project_imports,
+    PROJECT_BUILD, build_inventory, retired_report_path, import_closure, lake_configuration, project_imports,
     required_compiler_paths, workspace_modules,
 )
-from lean_cache_release import cache_guard, has_unsafe_parent, install_scoped, report_reuse
+from lean_cache_release import cache_guard, has_unsafe_parent, install_scoped, publication
 from lean_cache_release_io import archive_sha, check_native_products, copy_chunks
 from lean_cache_shards import group_identity, make_layout
 from lean_release_index import safe_path, valid_digest
@@ -37,9 +37,6 @@ STAGE = Path("build/lean-cache/shards")
 SCHEMA = "lean-actions-shards-v1"
 EXTRAS = "extras"
 REPORT = "report"
-REPORT_PATH = "stratalint/raw-lean-report.json"
-REPORT_RECEIPT = PurePosixPath(REPORT_PATH + ".reuse.json")
-INSPECTOR_AGGREGATE_PATHS = frozenset("lean-inspector/report.zip" + suffix for suffix in ("", ".trace", ".hash"))
 RESUME_RECORD = STAGE / "resumed.json"
 
 
@@ -166,7 +163,7 @@ def read_index(path, identity, state):
         raise ValueError("invalid required Actions shard inventory")
     if state == "resume" and required:
         raise ValueError("incomplete Actions shard index claims required output coverage")
-    if state == "complete" and (REPORT not in required or required.keys() <= {REPORT, EXTRAS}):
+    if state == "complete" and required.keys() <= {REPORT, EXTRAS}:
         raise ValueError("complete Actions shard index lacks required outputs")
     if set(sources) != used or any(not valid_digest(value) for value in sources.values()):
         raise ValueError("invalid Actions source membership")
@@ -221,13 +218,13 @@ def write_payload(root, build, paths):
 
 
 def required_outputs(root, modules, graph, owners):
-    selection = report_reuse.publication.selection.Selection(root)
+    selection = publication.selection.Selection(root)
     reported = selection.modules()
     if not reported or not reported.keys() <= modules.keys():
         raise ValueError("report modules do not match Actions workspace ownership")
     result = defaultdict(set)
-    result[REPORT].update(REPORT_PATH + suffix for suffix in report_reuse.publication.SUFFIXES)
-    result[REPORT].add(str(REPORT_RECEIPT))
+    for name in reported:
+        result[owners[name]].add("lean-inspector/modules/" + name + ".zip")
     for name in import_closure(graph, reported):
         result[owners[name]].update(str(path) for path in required_compiler_paths(name, modules[name]))
     return {key: sorted(paths) for key, paths in result.items()}
@@ -259,8 +256,6 @@ def prepare(root, identity, state, previous, anchor, targets=(), available=froze
         resume_spec(root)
     with cache_guard(root, shared=True):
         if state == "complete":
-            report = root / PROJECT_BUILD / REPORT_PATH
-            report_reuse.read_receipt(report, report_reuse.capture(root))
             check_native_products(root / PROJECT_BUILD)
         modules = workspace_modules(root)
         graph = project_imports(root, modules)
@@ -274,14 +269,7 @@ def prepare(root, identity, state, previous, anchor, targets=(), available=froze
         for artifact in inventory.artifacts:
             if _tracked(artifact.path, registrations):
                 path = artifact.path.as_posix()
-                # Scoped readers aggregate their own ZIP from module reports.
-                if (path in INSPECTOR_AGGREGATE_PATHS
-                        or (artifact.path.parent == REPORT_RECEIPT.parent and path.startswith(REPORT_PATH))):
-                    if state == "resume" and artifact.path == REPORT_RECEIPT:
-                        continue
-                    group = REPORT
-                else:
-                    group = owners.get(artifact.module, EXTRAS)
+                group = owners.get(artifact.module, EXTRAS)
                 if scoped_keys is None or group in scoped_keys:
                     groups[group].append(path)
 
@@ -313,8 +301,6 @@ def prepare(root, identity, state, previous, anchor, targets=(), available=froze
                     deliver(payload, size)
     record = {"binding": identity, "owner": current_owner(root), "state": state, "layout": layout,
               "sources": sources, "entries": entries, "fingerprints": fingerprints, "required": required}
-    if state == "complete" and REPORT not in entries:
-        raise ValueError("cannot publish a complete Actions index without the report bundle")
     receipt("shards", "snapshot", complete=state == "complete", entries=len(entries),
             packed=len(written), bytes=written_bytes)
     return record
@@ -352,7 +338,7 @@ def prepare_stream(root, identity, state, previous, anchor, targets, available):
 
 def selected_keys(root, record, targets=None):
     if targets is None:
-        return record["entries"]
+        return {key: value for key, value in record["entries"].items() if key != REPORT}
     if not targets:
         return {}
     modules = workspace_modules(root)
@@ -371,6 +357,8 @@ def extract_payload(path, destination, registrations, restored):
             if (not entry.isfile() or relative in restored or
                     not _tracked(relative, registrations)):
                 raise ValueError("invalid archived Actions shard path: " + entry.name)
+            if retired_report_path(relative):
+                continue
             target = destination / relative
             restored.add(relative)
             target.parent.mkdir(parents=True, exist_ok=True)

@@ -60,7 +60,7 @@ public sealed partial class ProductionEnvironmentTests
         if (scenario == "infrastructure") Assert.IsType<AdmissionOutcome.InfrastructureFailure>(outcome);
 
         var console = new BufferedConsole();
-        Assert.Equal(expectedExit, CliApplication.Run(["check", .. arguments], environment, console));
+        Assert.Equal(expectedExit, CliApplication.RenderAdmission(outcome, console));
         Assert.Equal(scenario == "single-plane" ? 0 : 1,
             console.Output.Split("ADMISSION-PLANE-MIXED", StringSplitOptions.None).Length - 1);
         if (scenario == "blocked") Assert.Contains("SL-001", console.Output, StringComparison.Ordinal);

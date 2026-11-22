@@ -19,10 +19,6 @@ public sealed partial class MakeWorkflowTests
             "ledger-align --add \"$MODULE_PATH\" --candidate-lean-report \"$REPORT\"",
             script,
             StringComparison.Ordinal);
-        Assert.Contains(
-            "run_cli \"${align_args[@]}\" --candidate-lean-report .lake/build/stratalint/scoped-lean-report.json",
-            script,
-            StringComparison.Ordinal);
         Assert.DoesNotContain("run_cli ledger-align --candidate-lean-report \"$REPORT\"", script, StringComparison.Ordinal);
     }
 }

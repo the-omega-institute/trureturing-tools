@@ -11,11 +11,9 @@ internal sealed record FrozenRevisionIdentity(string Revision, string CommitOid,
 
 internal sealed record CheckArguments(
     string? ProtectedBase,
-    string? CandidateLeanReport,
-    string? ScribePaths = null,
-    string? ChangedPaths = null,
-    string? ScopedReports = null,
-    string? ScopeBase = null);
+    string? ChangedPaths,
+    string? ScopedReports,
+    string? ScopeBase);
 
 internal interface IRepositoryGateway
 {
@@ -90,7 +88,6 @@ internal interface IRepositoryGateway
 
 internal interface ILeanReportSource
 {
-    LeanAxiomReport Load(RepositorySnapshot snapshot);
     LeanAxiomReport Load(LeanReportScope scope);
 }
 
@@ -173,7 +170,7 @@ internal sealed partial class ProductionCliEnvironment : ICliEnvironment
     public ExplicitCommandResult CapacityAudit(IReadOnlyList<string> arguments) =>
         CapacityAuditCommand.Run(arguments, repositoryRoot);
 
-    public AdmissionOutcome Check(IReadOnlyList<string> arguments)
+    internal AdmissionOutcome EvaluateAdmission(string? protectedBase, Func<RepositorySnapshot, LeanAxiomReport>? readReport)
     {
         var timing = new AdmissionCheckTiming(timeProvider);
         ImmutableArray<Diagnostic> planeObservations = [];
@@ -183,27 +180,23 @@ internal sealed partial class ProductionCliEnvironment : ICliEnvironment
                 "repository-prepare",
                 () =>
                 {
-                    var options = ParseCheckArguments(arguments);
-                    var prepared = repository.Prepare(options.ProtectedBase);
+                    var prepared = repository.Prepare(protectedBase);
                     var bootstrap = BootstrapGate.Evaluate(prepared.Changes);
                     return (
-                        Options: options,
                         Prepared: prepared,
                         Bootstrap: bootstrap);
                 },
-                static result => result.Bootstrap is BootstrapOutcome.InfrastructureFailure
-                    || result.Options.CandidateLeanReport is null);
-            var options = repositoryPhase.Options;
+                result => result.Bootstrap is BootstrapOutcome.InfrastructureFailure || readReport is null);
             var prepared = repositoryPhase.Prepared;
             var bootstrap = repositoryPhase.Bootstrap;
             if (bootstrap is BootstrapOutcome.InfrastructureFailure bootstrapFailure)
             {
                 return new AdmissionOutcome.InfrastructureFailure(bootstrapFailure.Message);
             }
-            if (options.CandidateLeanReport is null)
+            if (readReport is null)
             {
                 return new AdmissionOutcome.InfrastructureFailure(
-                    "check requires --candidate-lean-report FILE");
+                    "admission requires a Lean report");
             }
             var rawSnapshots = timing.Measure(
                 "repository-read",
@@ -233,9 +226,7 @@ internal sealed partial class ProductionCliEnvironment : ICliEnvironment
             var baseline = snapshots.Baseline;
             var candidateLeanReport = timing.Measure(
                 "lean-report-load",
-                () => RawLeanReportArtifact.ReadFile(
-                    options.CandidateLeanReport,
-                    current));
+                () => readReport(current));
             var verifiedScribeEmissions = timing.Measure(
                 "scribe-verify",
                 () => VerifyScribeForAdmission(
@@ -324,24 +315,8 @@ internal sealed partial class ProductionCliEnvironment : ICliEnvironment
         return verifier.Verify(snapshot, report, changes);
     }
 
-    public CommandResult RenderDag(IReadOnlyList<string> arguments) =>
-        DagRenderCommand.Run(repositoryRoot, repository, leanReportSource, arguments);
-
     public CommandResult AlignLedger(IReadOnlyList<string> arguments) =>
         DagLedgerAlignWriter.Align(repositoryRoot, repository, arguments);
-
-    public CommandResult ReanchorMathlibLedger(IReadOnlyList<string> arguments) =>
-        DagLedgerMathlibReanchorWriter.Reanchor(
-            repositoryRoot,
-            repository,
-            leanReportSource,
-            arguments);
-
-    public ExplicitCommandResult TruthRelease(IReadOnlyList<string> arguments) =>
-        TruthReleaseCommand.Run(repository, scribeEmissionVerifier, arguments);
-
-    public ExplicitCommandResult TruthExport(IReadOnlyList<string> arguments) =>
-        TruthExportCommand.Run(repository, arguments);
 
     public CommandResult CleanLanes(IReadOnlyList<string> arguments) =>
         CleanLanesCommand.Run(repositoryRoot, arguments, TimeProvider.System.GetUtcNow());
@@ -374,30 +349,27 @@ internal sealed partial class ProductionCliEnvironment : ICliEnvironment
         return memory.ToArray();
     }
 
-    private static CheckArguments ParseCheckArguments(IReadOnlyList<string> arguments, bool stage = false)
+    private static CheckArguments ParseCheckArguments(IReadOnlyList<string> arguments)
     {
         var options = new Dictionary<string, string>(StringComparer.Ordinal);
         for (var index = 0; index < arguments.Count; index += 2)
         {
             var name = arguments[index];
             if (index + 1 >= arguments.Count
-                || name is not ("--protected-base" or "--candidate-lean-report" or "--scribe-paths-from")
-                    && !(stage && name is "--changed-paths-from" or "--scoped-reports-from" or "--scope-base")
+                || name is not ("--protected-base" or "--changed-paths-from" or "--scoped-reports-from" or "--scope-base")
                 || string.IsNullOrWhiteSpace(arguments[index + 1])
                 || !options.TryAdd(name, arguments[index + 1]))
-                throw CheckUsage(stage);
+                throw CheckUsage();
         }
 
         return new(options.GetValueOrDefault("--protected-base"),
-            options.GetValueOrDefault("--candidate-lean-report"), options.GetValueOrDefault("--scribe-paths-from"),
             options.GetValueOrDefault("--changed-paths-from"), options.GetValueOrDefault("--scoped-reports-from"),
             options.GetValueOrDefault("--scope-base"));
     }
 
-    private static InvalidOperationException CheckUsage(bool stage) => new(
-        stage ? "USAGE: check-current | check-delta --protected-base SHA; supply --candidate-lean-report FILE "
-            + "[--scribe-paths-from FILE] or --changed-paths-from FILE [--scoped-reports-from FILE] [--scope-base SHA for check-current]"
-        : "USAGE: StrataLint check [--protected-base REV] --candidate-lean-report FILE [--scribe-paths-from FILE]");
+    private static InvalidOperationException CheckUsage() => new(
+        "USAGE: check-current [--scope-base SHA] | check-delta --protected-base SHA. "
+        + "Supply --changed-paths-from FILE [--scoped-reports-from FILE]");
 
     private static RepositorySnapshot Decode(RawRepositorySnapshot raw) =>
         SnapshotDecoder.Decode(raw) switch

@@ -101,7 +101,7 @@ private def reportSourcePath (root : FilePath)
 This job deliberately has no content trace: each module traces its own record. -/
 package_facet reportInputs (pkg : Package) : FilePath := do
   Job.async do
-    proc (← nativeCommand pkg #["prepare", (← repositoryDir pkg).toString, "module-records"])
+    proc (← nativeCommand pkg #["prepare", (← repositoryDir pkg).toString])
     return (← repositoryDir pkg) / ".lake/build/lean-inspector" / "module-inputs.json"
 
 private def readJson (path : FilePath) : IO Json := do
@@ -552,30 +552,8 @@ private def collectNativeReports (pkg : Package) (config : Json) :
   let rows ← modules.mapM nativeModuleReport
   return collectModuleJobs rows
 
--- The scoped caller supplies complete membership through reportInputData and
--- owns its own aggregation/publication. Never write the whole-report bundle.
+-- Build native reports for the registered or explicitly selected modules.
 package_facet moduleReports (owner : Package) : Array FilePath := withCurrPackage owner do
   let pkg := (← getWorkspace).root
   let config ← (← fetch <| pkg.facet `reportInputData).await
   return (← collectNativeReports pkg config).map (·.map (·.path))
-
-package_facet report (owner : Package) : FilePath := withCurrPackage owner do
-  let pkg := (← getWorkspace).root
-  observePhase "lake-inputs" "start"
-  let config ← (← fetch <| pkg.facet `reportInputData).await
-  let root ← repositoryDir pkg
-  proc (← nativeCommand pkg #["aggregate-inputs", root.toString])
-  let inputs := root / ".lake/build/lean-inspector" / "inputs.json"
-  observePhase "lake-inputs" "finish"
-  let rows ← collectNativeReports pkg config
-  let membership ← inputBinFile inputs
-  (rows.add membership).mapM fun artifacts => do
-    let file := root / ".lake/build/lean-inspector/report.zip"
-    let mut trace := BuildTrace.nil "<collection>"
-    for row in artifacts do
-      trace := trace.mix row.outputTrace.withoutInputs
-    setTrace (mixTrace trace membership.getTrace)
-    let build := do
-      runBatch pkg #[("aggregate", #[root.toString, file.toString] ++ artifacts.map (·.path.toString))]
-      pure PUnit.unit
-    return (← buildArtifact file build).path

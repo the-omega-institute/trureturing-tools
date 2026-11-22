@@ -308,7 +308,7 @@ public sealed class LeanCacheChunkScriptTests
         Assert.Contains("\"status\":\"failed\"", result.Text, StringComparison.Ordinal);
         Assert.Contains("suffix requires a run ID and attempt", result.Text, StringComparison.Ordinal);
         Assert.False(fixture.HasRelease);
-        Assert.Equal(new[] { "check-lean-report LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build LEAN_REPORT=.lake/build/stratalint/raw-lean-report.json" }, fixture.BuildRuns);
+        Assert.Equal(new[] { "lean-cache-prepare" }, fixture.BuildRuns);
     }
 
     [Fact]
@@ -323,6 +323,7 @@ public sealed class LeanCacheChunkScriptTests
         Assert.Contains("\"status\":\"failed\"", result.Text, StringComparison.Ordinal);
         Assert.True(fixture.Metadata(fixture.Tag)["draft"]!.GetValue<bool>());
         Assert.Single(fixture.Assets(fixture.Tag));
+        fixture.ClearPrivateBuild();
         AssertMiss(fixture.Fetch(), "no published snapshot in this partition");
         Assert.Null(fixture.Unpacked);
         Assert.Null(fixture.UnpackedReport);

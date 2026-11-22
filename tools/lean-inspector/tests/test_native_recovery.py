@@ -191,8 +191,7 @@ class NativeBatchCompatibilityConsumerTests:
         self.ensure()
         self.restore_compiler()
         self.prepare_report_modules(workspace='tools/lean-inspector-reg')
-        result = self.guarded_command(['make', 'lean-report',
-            'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build', 'REGENERATE_REPORT_ARTIFACTS=1'],
+        result = self.guarded_command(['make', 'lean-cache-prepare', 'REGENERATE_REPORT_ARTIFACTS=1'],
             env=dict(self.env, STRATALINT_NATIVE_BATCH_MODULES=str(size),
                      STRATALINT_ACCEPT_COLD_BUILD='1', LEAN_NUM_THREADS='1'))
         self.record_result(f'capacity-{size}-{getattr(self, "capacity_sequence", 0)}',
@@ -246,120 +245,28 @@ class NativeBatchCompatibilityConsumerTests:
                     materials_sha256=hashlib.sha256(report[2]).hexdigest()))
 
 class NativeBatchCapacityConsumerTests:
-    def test_runtime_capacity_through_report_entry(self):
-        # Real pinned compiler/extractor, using the existing statement-only fixture.
-        # No mathematical registration-assessment or Linux memory claim is made.
-        policy = json.loads((self.root / 'lean-report-inputs.json').read_text())
-        policy['report_execution'] = json.loads((ROOT / 'lean-report-inputs.json').read_text())['report_execution']
-        self.write('lean-report-inputs.json', json.dumps(policy))
+    def test_cache_preparation_uses_module_reports_and_records_warm_work(self):
         self.ensure()
         self.restore_compiler()
-        self.copy('tools/scripts/report/runner-diagnostics.py')
-        output = self.root / '.lake/build/stratalint/raw-lean-report.json'
-        logs = Path(str(output) + '.logs')
-        work = self.root / 'module-work.jsonl'
-        self.env['STRATALINT_INSPECTOR_MODULE_WORK'] = str(work)
-        self.env['LEAN_NUM_THREADS'] = '1'
-        self.env['STRATALINT_ACCEPT_COLD_BUILD'] = '1'
-        runtime = ['python3', str(self.root / 'tools/scripts/report/runner-diagnostics.py'), '--',
-            'bash', str(self.root / 'tools/scripts/report/report-supervisor.sh'),
-            '--role', 'lean-cache-slice', '--', 'make', 'lean-report',
-            'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build']
-        # Same pre-Make validation as the action; values are environment data,
-        # never interpolated shell text or Make command-line expressions.
-        command = ['bash', '-euc', 'python3 tools/lean-inspector/native.py batch-size\nexec "$@"',
-                   'native-cache-producer', *runtime]
+        expected = {'D5.A', 'D5.Alone', 'D5.B', 'Fixture'}
+        environment = dict(self.env, STRATALINT_ACCEPT_COLD_BUILD='1', GITHUB_RUN_ID='17',
+                           GITHUB_RUN_ATTEMPT='2')
+        state = native.state(self.root)
+        command = [sys.executable, '-B', 'tools/lean-inspector/build_inputs.py', 'prepare-cache']
 
-        def entry(label, size, *, regenerate=False, success=True):
-            work.write_text('')
-            args = command + (['REGENERATE_REPORT_ARTIFACTS=1'] if regenerate else [])
-            env = dict(self.env, STRATALINT_NATIVE_BATCH_MODULES=size)
-            started = time.monotonic()
-            result = self.guarded_command(args, env=env)
-            self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
-            self.record_result(label, dict(command=args, batch_modules=size, exit=result.returncode,
-                elapsed_seconds=time.monotonic() - started,
-                work=[json.loads(line) for line in work.read_text().splitlines()]))
-            return result
+        def prepare(*extra):
+            result = self.guarded_command([*command, *extra], env=environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            fact = json.loads((self.root / 'build/lean-cache/build-work.json').read_text())
+            self.assertEqual((fact['run_id'], fact['run_attempt']), ('17', '2'))
+            self.assertEqual({path.stem for path in (state / 'modules').glob('*.zip')}, expected)
+            self.assertFalse((state / 'report.zip').exists())
+            return fact
 
-        def captures(label, size):
-            phases = [json.loads(line) for line in (logs / 'native-phases.jsonl').read_text().splitlines()]
-            calls = [phase for phase in phases if phase['phase'] == 'native-inspect'
-                     and phase['boundary'] == 'finish']
-            names, evidence, paths = [], [], [logs / 'native-phases.jsonl']
-            for call in calls:
-                self.assertTrue(call['success'])
-                path = Path(call['request_capture'])
-                request = json.loads(path.read_text())
-                # This is the captured argument vector used by the actual executable.
-                arguments = request['arguments']
-                modules = arguments[arguments.index('--utility-input') + 2::3]
-                self.assertTrue(0 < len(modules) <= size)
-                names.extend(modules)
-                evidence.append(dict(modules=modules, executable_sha256=request['inspector_executable_sha256']))
-                paths.append(path)
-            self.assertEqual(sorted(names), ['D5.A', 'D5.Alone', 'D5.B', 'Fixture'])
-            self.record_result(label, dict(selected_modules=sorted(names), native_calls=evidence), paths)
-            return [len(row['modules']) for row in evidence]
-
-        self.prepare_report_modules(workspace='tools/lean-inspector-reg')
-        entry('default', '100')
-        self.assertEqual(captures('default-captures', 100), [4])
-        baseline = self.report()
-        before = self.stamps()
-        receipt = json.loads(Path(str(output) + '.reuse.json').read_bytes())
-        warm = entry('warm-smaller', '2')
-        self.assertEqual(self.stamps(), before)
-        self.assertEqual(self.report(), baseline)
-        self.assertIn('LEAN_INSPECTOR_WORK extracted_modules=0 aggregates=0', warm.stdout)
-        self.assertEqual(json.loads(Path(str(output) + '.reuse.json').read_bytes())['inputs'], receipt['inputs'])
-        self.assertEqual(work.read_text(), '')
-        # Direct report entry also rejects invalid capacity before a warm hit.
-        invalid = self.guarded_command(runtime, env=dict(self.env, STRATALINT_NATIVE_BATCH_MODULES='0'))
-        self.assertNotEqual(invalid.returncode, 0)
-        self.assertIn('STRATALINT_NATIVE_BATCH_MODULES requires', invalid.stdout + invalid.stderr)
-        self.record_result('direct-warm-invalid', dict(command=runtime, batch_modules='0', exit=invalid.returncode))
-
-        # Remove the local material but retain Lake's valid, precompiled artifact.
-        compiler_input = self.root / '.lake/build/lib/lean/ClaimSupport.olean'
-        original_olean = compiler_input.read_bytes()
-        compiler_input.unlink()
-        entry('small', '2', regenerate=True)
-        self.assertEqual(captures('small-captures', 2), [2, 2])
-        self.assertEqual(compiler_input.read_bytes(), original_olean)
-        report_logs = ''.join((logs / ('report.' + stream + '.log')).read_text()
-                              for stream in ('stdout', 'stderr'))
-        self.assertNotRegex(report_logs, r'Built (?:trureturing/)?ClaimSupport(?:[ (:]|$)')
-        self.assertEqual(self.report(), baseline)
-        self.assertEqual(sorted(row['module'] for row in baseline[0]), ['D5.A', 'D5.Alone', 'D5.B', 'Fixture'])
-        self.record_result('equivalent', dict(report_sha256=hashlib.sha256(baseline[1]).hexdigest(),
-            materials_sha256=hashlib.sha256(baseline[2]).hexdigest(), module_count=len(baseline[0]),
-            report_bytes=len(baseline[1]), materials_bytes=len(baseline[2]),
-            whole_report_and_material_bytes_identical=True, warm_receipt_inputs_and_module_artifacts_unchanged=True),
-            [output, Path(str(output) + '.materials.zip'), Path(str(output) + '.reuse.json')])
-
-        before = self.stamps()
-        marker = self.root / 'injected'
-        for value in ('', '0', '101', '-1', '+2', '01', '2.0', ' 2', '2\n', '\u0662',
-                      f'2; touch {marker}', f'$(touch {marker})', f'$(shell touch {marker})', f'`touch {marker}`'):
-            result = entry('invalid-' + hashlib.sha256(value.encode()).hexdigest()[:8], value, success=False)
-            self.assertIn('STRATALINT_NATIVE_BATCH_MODULES requires an integer from 1 to 100',
-                          result.stdout + result.stderr)
-            self.assertEqual(self.stamps(), before)
-            self.assertEqual(self.report(), baseline)
-            self.assertFalse(marker.exists())
-
-        # The bounded runtime setting still propagates real kernel/audit failures.
-        self.write('Audit.lean', 'def audit : False := True.intro\n')
-        result = self.guarded_command(['make', 'lean', 'LEAN_TARGETS=:report Audit'],
-            env=dict(self.env, STRATALINT_NATIVE_BATCH_MODULES='2'))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('Audit.lean', result.stdout + result.stderr)
-        self.record_result('required-audit-failure', dict(exit=result.returncode))
-        self.write('D5/A.lean', 'def invalid : False := True.intro\n')
-        result = entry('kernel-failure', '2', regenerate=True, success=False)
-        self.assertIn('D5.A', result.stdout + result.stderr)
-
+        first = prepare()
+        self.assertGreaterEqual(first['report'], len(expected))
+        self.assertEqual(prepare()['report'], 0)
+        self.assertGreaterEqual(prepare('--regenerate')['report'], len(expected))
 
 class NativeRecoveryConsumerTests:
     def _exercise_chunk_durability(self, interruption):
@@ -414,7 +321,7 @@ class NativeRecoveryConsumerTests:
         self.assertEqual(self.stamps(), before)
         self.assertEqual(traces, {name: [(state / 'modules' / (name + suffix)).read_bytes()
                         for suffix in ('.zip.trace', '.zip.hash')] for name in first})
-        refused = self.run_lake('--no-build', 'build', ':report', success=False)
+        refused = self.run_lake('--no-build', 'build', ':moduleReports', success=False)
         self.assertFalse((state / 'report.zip').exists())
         self.record_result('fresh-native-reuse', dict(mode=interruption, accepted_exit=accepted.returncode,
             aggregate_refusal_exit=refused.returncode, reused_modules=first,
@@ -452,58 +359,6 @@ class NativeRecoveryConsumerTests:
     def test_completed_chunk_survives_later_truncation(self):
         self._exercise_chunk_durability('truncated')
 
-    def test_release_stage_and_verify_preserve_absent_lake(self):
-        self.build()
-        self.publish()
-        incoming = self.root / 'public.json'
-        with tempfile.TemporaryDirectory(prefix='inspector-release.') as directory:
-            directory = Path(directory)
-            temporary = directory / 'tmp'
-            temporary.mkdir()
-            for damage in ['none', 'missing', 'stale', 'changed-dependency']:
-                with self.subTest(damage=damage):
-                    root = directory / damage
-                    shutil.copytree(self.root, root, ignore=shutil.ignore_patterns('.lake', '.git'))
-                    subprocess.run(['git', 'init', '--quiet', str(root)], check=True,
-                        capture_output=True, timeout=120)
-                    bundle = incoming if damage != 'missing' else directory / 'absent.json'
-                    if damage == 'stale':
-                        source = root / 'D5/Alone.lean'
-                        source.write_text(source.read_text() + '-- changed input\n')
-                    elif damage == 'changed-dependency':
-                        (root / 'ClaimSupport.lean').write_text('def claimSupport : Prop := True\n')
-                    environment = dict(self.env, TMPDIR=str(temporary),
-                        STRATALINT_LEAN_INPUT_MEMO_ROOT=str(directory / 'verify-memo'))
-                    staged = directory / ('staged-' + damage) / publication.RAW
-                    stage = subprocess.run([sys.executable, '-B', str(root / 'tools/lean-inspector/publication.py'),
-                        'stage', '--bundle', str(bundle), '--staging-directory', str(staged.parent),
-                        '--repository', str(root)], cwd=directory, env=environment,
-                        text=True, capture_output=True, timeout=120)
-                    accepted = damage in ['none', 'changed-dependency']
-                    self.assertEqual(stage.returncode, 0 if accepted else 1, stage.stdout + stage.stderr)
-                    self.assertFalse((root / '.lake').exists(), 'stage must preserve whole-tree donor eligibility')
-                    self.assertEqual(list(temporary.iterdir()), [], 'stage must clean its input memo')
-                    verify = subprocess.run(['bash', str(root / 'tools/scripts/report/lean-report-input.sh'),
-                        'verify', '--repository', str(root), '--report', str(staged if accepted else bundle)],
-                        cwd=directory, env=environment, text=True, capture_output=True, timeout=120)
-                    self.assertEqual(verify.returncode,
-                        {'none': 0, 'missing': 2, 'stale': 2, 'changed-dependency': 0}[damage], verify.stdout + verify.stderr)
-                    if accepted:
-                        self.assertEqual(staged.read_bytes(), incoming.read_bytes())
-                        self.assertEqual(publication.member(staged, '.materials.zip').read_bytes(),
-                            publication.member(incoming, '.materials.zip').read_bytes())
-                    else:
-                        self.assertFalse(staged.exists())
-                        diagnostic = {'missing': 'missing bundle member', 'stale': 'stale input/provenance'}[damage]
-                        self.assertIn(diagnostic, stage.stderr)
-                    self.assertFalse((root / '.lake').exists(), 'verify must preserve whole-tree donor eligibility')
-                    self.assertEqual(list(temporary.iterdir()), [])
-                    self.record_result('release-' + damage, dict(stage_exit=stage.returncode,
-                        verify_exit=verify.returncode, lake_absent=True, temporary_clean=True))
-
-
-
-
     def test_native_imports_without_lzma_and_batch_failures_propagate(self):
         self.build()
         request = self.root / 'requests.json'
@@ -517,7 +372,7 @@ class NativeRecoveryConsumerTests:
         errors = [ValueError('required producer failure')]
         if zipfile.lzma is not None:
             errors.append(zipfile.lzma.LZMAError('required producer decoder failure'))
-        for kind, owner in [('produce', 'produce_batch'), ('aggregate', 'aggregate')]:
+        for kind, owner in [('produce', 'produce_batch')]:
             request.write_text(json.dumps([[kind, [str(self.root), str(artifact)]]]))
             for error in errors:
                 with self.subTest(kind=kind, exception=type(error).__name__):
@@ -571,7 +426,7 @@ class NativeModuleFacetTests:
                          [dict(kind='extract', count=1)])
         result = self.run_lake('build', 'D5.Alone:inspectorModuleReport', success=False)
         self.assertIn('unknown module facet', result.stdout + result.stderr)
-        for index, targets in enumerate([(':report', 'D5.Alone:report'), ('D5.Alone:report', ':report')]):
+        for index, targets in enumerate([(':moduleReports', 'D5.Alone:report'), ('D5.Alone:report', ':moduleReports')]):
             with self.subTest(targets=targets):
                 source.write_text(source.read_text() + f'-- shared miss {index}\n')
                 self.write('activity.jsonl', '')

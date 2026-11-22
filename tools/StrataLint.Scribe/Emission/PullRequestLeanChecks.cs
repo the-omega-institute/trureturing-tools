@@ -165,9 +165,23 @@ internal static class PullRequestLeanChecks
     internal static ImmutableArray<RuleFinding> ProofFindings(LeanAxiomReport report) =>
         RepositoryRules.Sorry(report).AddRange(RepositoryRules.Axioms(report));
 
-    internal static int Check(string root, string artifact, ImmutableArray<string> targets,
+    internal static int Check(string root, string? artifact, ImmutableArray<string> targets,
         ImmutableArray<string> paths, TextWriter output, TextWriter error)
     {
+        if (targets.IsEmpty)
+        {
+            if (artifact is not null)
+                throw new InvalidDataException("omit --report when the Lean target manifest is empty");
+            var selection = ScribeDefinitionSelector.Select(root, paths);
+            if (!selection.IsSuccess)
+                throw new InvalidDataException(selection.Failure);
+            if (!selection.Paths.IsEmpty)
+                throw new InvalidDataException("selected Scribe definitions require Lean targets");
+            return ScribeContentChecks.Run(root, paths, LeanAxiomReport.CreateScoped(new Dictionary<string, LeanFileReport>()), true, output, error);
+        }
+        if (artifact is null)
+            throw new InvalidDataException("nonempty Lean targets require --report");
+
         var snapshot = Sources(root);
         var scope = LeanReportScope.Create(snapshot, targets.Select(RepoPath.CreateKnown));
         var report = RawLeanReportArtifact.ReadFileForScope(artifact, scope, validateMaterials: true);

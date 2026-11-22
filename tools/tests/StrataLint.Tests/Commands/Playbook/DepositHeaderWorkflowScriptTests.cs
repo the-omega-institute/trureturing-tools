@@ -195,9 +195,10 @@ public sealed class DepositHeaderUtilityTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void ScopedDepositChecksCurrentSourceOfUnimportedUtilityConsumer(bool changed)
+    [InlineData(null)]
+    [InlineData("source")]
+    [InlineData("materials")]
+    public void ScopedDepositChecksEvidenceForAnUnimportedUtilityConsumer(string? defect)
     {
         var fixture = new RuleFixture();
         AddUtility(fixture, "kind=numeric-reduction; "
@@ -217,12 +218,13 @@ public sealed class DepositHeaderUtilityTests
         RawLeanReportArtifact.WriteFile(path, selected, report);
         File.WriteAllText(path, File.ReadAllText(path).Replace(
             RawLeanReportArtifact.Schema, RawLeanReportArtifact.ScopedSchema, StringComparison.Ordinal));
-        if (changed) fixture.Files[RuleFixture.ValuesBindingPath] += "\ndef changedIdentity : Nat := 0\n";
+        if (defect == "source") fixture.Files[RuleFixture.ValuesBindingPath] += "\ndef changedIdentity : Nat := 0\n";
+        if (defect == "materials") File.Delete(RawLeanReportArtifact.MaterialsPath(path));
 
         var result = Run(fixture, new DagLedgerCommandPreparation.FileLeanReportSource(path));
 
-        Assert.Equal(changed ? 1 : 0, result.ExitCode);
-        if (changed) Assert.Contains("DEPOSIT_HEADER_UTILITY_INPUT_UNKNOWN", result.Output, StringComparison.Ordinal);
+        Assert.Equal(defect is null ? 0 : 1, result.ExitCode);
+        if (defect is not null) Assert.Contains("DEPOSIT_HEADER_UTILITY_INPUT_UNKNOWN", result.Output, StringComparison.Ordinal);
     }
 
     [Fact]

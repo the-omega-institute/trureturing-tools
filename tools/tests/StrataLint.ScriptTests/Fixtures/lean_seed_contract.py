@@ -91,9 +91,6 @@ class TransportTests(ReleaseLegacyCases, ReleaseVerificationCases, ReleaseTransp
                 patch.object(release, "partition_path", return_value=partition), \
                 patch.object(release, "release_key", return_value=cache_key), \
                 patch.object(release, "publication_identity", return_value=identity), \
-                patch.object(release.report_reuse, "capture"), \
-                patch.object(release.report_reuse, "read_receipt", return_value={"completed": release.report_reuse.CHECKED}), \
-                patch.object(release.report_reuse.publication, "validate_bundle"), \
                 patch.object(indexed, "pack", return_value=archive), \
                 patch.object(release, "gh", side_effect=transport), \
                 patch.object(release, "existing_release", side_effect=[None, {"draft": False}]), \
@@ -101,7 +98,7 @@ class TransportTests(ReleaseLegacyCases, ReleaseVerificationCases, ReleaseTransp
                 patch.object(release, "restore_scoped", return_value=(1, 1)), \
                 patch.object(release, "restore_snapshot", side_effect=restore), \
                 patch.object(release, "receipt") as receipt:
-            self.assertEqual(0, release.publish(root, partition, identity, build_report=False, indexed=True))
+            self.assertEqual(0, release.publish(root, partition, identity, build_cache=False, indexed=True))
         self.assertEqual(1, len(promotions))
         self.assertEqual(("publish", "published"), receipt.call_args.args)
 
@@ -789,45 +786,12 @@ ctypes.CDLL = cdll
                 write(self.root / "D5/A.lean", "def a := 1\n")
                 (self.root / "untracked-input.lean").unlink(missing_ok=True)
 
-    def test_local_publication_requires_complete_strict_current_report(self):
-        # Publication requires a complete canonical bundle and current sealed inputs.
-        report = self.root / ".lake/build/stratalint/raw-lean-report.json"
-        originals = {path: path.read_bytes() for path in report.parent.iterdir()}
-        for damage in ("missing", "empty-modules", "unknown-field", "noncanonical", "materials", "receipt", "stale"):
-            with self.subTest(damage=damage):
-                for path, content in originals.items(): path.write_bytes(content)
-                environment = self.local_environment(FAKE_REPORT_PRESERVE="1")
-                if damage == "missing": report.unlink()
-                elif damage in ("empty-modules", "unknown-field", "noncanonical"):
-                    data = json.loads(report.read_text())
-                    if damage == "empty-modules": data["modules"] = []
-                    if damage == "unknown-field": data["unknown"] = True
-                    report.write_text((" " if damage == "noncanonical" else "") + json.dumps(data) + "\n")
-                    # Keep the integrity seal consistent so the strict row reader, not only the hash guard, rejects it.
-                    current_sha = digest(report.read_bytes())
-                    report.with_name(report.name + ".sha256").write_text(current_sha + "  " + report.name + "\n")
-                    provenance_path = report.with_name(report.name + ".provenance.json")
-                    provenance = json.loads(provenance_path.read_text())
-                    old_sha = provenance["report_sha256"]
-                    provenance["report_sha256"] = current_sha
-                    provenance_path.write_text(json.dumps(provenance) + "\n")
-                    attestation = report.with_name(report.name + ".input.attestation")
-                    attestation.write_text(attestation.read_text().replace(old_sha, current_sha))
-                    receipt_path = report.with_name(report.name + ".reuse.json")
-                    seal = json.loads(receipt_path.read_text())
-                    seal["bundle"] = {suffix: digest(report.with_name(report.name + suffix).read_bytes()) for suffix in seal["bundle"]}
-                    receipt_path.write_text(json.dumps(seal) + "\n")
-                elif damage == "materials":
-                    report.with_name(report.name + ".materials.zip").write_bytes(b"not-a-zip")
-                elif damage == "receipt":
-                    report.with_name(report.name + ".reuse.json").unlink()
-                else:
-                    write(self.root / "D5/A.lean", "def a := 2\n")
-                    self.commit_fixture()
-                result = self.transport("publish", **environment)
-                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
-                self.assertIn('"status":"failed"', result.stdout)
-                self.assertEqual([], list(self.remote.iterdir()))
+    def test_local_publication_requires_registered_module_reports(self):
+        (self.root / ".lake/build/lean-inspector/modules/D5.A.zip").unlink()
+        result = self.transport("publish", **self.local_environment(FAKE_REPORT_PRESERVE="1"))
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("project cache is missing the module report for D5.A", result.stdout)
+        self.assertEqual([], list(self.remote.iterdir()))
 
     def test_ci_fetch_never_reads_release_even_when_actions_seed_is_absent(self):
         # CI's ensure fallback must skip Release independently of workflow steps.
@@ -968,21 +932,12 @@ ctypes.CDLL = cdll
             self.assertIn('"prune_error":', result.stdout)
         self.assertEqual(["build"] * len(malformed), calls.read_text().splitlines())
 
-    def test_publication_requires_a_current_inspector_report(self):
+    def test_publication_requires_module_artifacts(self):
         write(self.bin / "make", '#!/bin/sh\nexit 0\n')
-        report = self.root / ".lake/build/stratalint/raw-lean-report.json"
-        report.unlink()
-        missing = self.transport("publish")
-        self.assertEqual(2, missing.returncode, missing.stdout + missing.stderr)
-        self.assertIn('"status":"failed"', missing.stdout.replace(" ", ""))
-        self.assertIn("missing bundle member: raw-lean-report.json", missing.stdout)
-        self.assertEqual([], list(self.remote.iterdir()))
-
-        write(self.bin / "make", '#!/bin/sh\nmkdir -p .lake/build/stratalint\nprintf \'%s\\n\' \'{"modules":[],"schema":"wrong"}\' > .lake/build/stratalint/raw-lean-report.json\nexit 0\n')
-        malformed = self.transport("publish")
-        self.assertEqual(2, malformed.returncode, malformed.stdout + malformed.stderr)
-        self.assertIn('"status":"failed"', malformed.stdout.replace(" ", ""))
-        self.assertIn("reuse receipt bundle mismatch", malformed.stdout)
+        shutil.rmtree(self.root / ".lake/build/lean-inspector/modules")
+        result = self.transport("publish")
+        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+        self.assertIn("project cache is missing lean-inspector/modules", result.stdout)
         self.assertEqual([], list(self.remote.iterdir()))
 
     def host_platform(self, system, machine):
@@ -1018,9 +973,8 @@ ctypes.CDLL = cdll
                 self.assertIn(f'"resolved":"{tag}"', restored.stdout)
                 self.assertIn(f'"partition":"{REV}/{own}"', restored.stdout)
                 self.assertEqual(seed, (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
-                receipt = self.root / ".lake/build/stratalint/raw-lean-report.json.reuse.json"
-                self.assertEqual(dict(system=publisher[0], machine=publisher[1]),
-                                 json.loads(receipt.read_bytes())["inputs"]["execution"]["platform"])
+                self.assertTrue((self.root / ".lake/build/lean-inspector/modules/D5.A.zip").is_file())
+                self.assertFalse((self.root / ".lake/build/stratalint/raw-lean-report.json").exists())
 
 
 def _all_test_cases():

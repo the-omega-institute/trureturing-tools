@@ -237,6 +237,13 @@ def _owner(path, module_paths, modules):
     return None, "other"
 
 
+def retired_report_path(path):
+    if path.parent == PurePosixPath("stratalint"):
+        return path.name.startswith("raw-lean-report.json")
+    return (path.parent == PurePosixPath("lean-inspector")
+            and (path.name.startswith("report.zip") or path.name == "inputs.json"))
+
+
 def build_inventory(root: Path, modules: dict[str, Module]) -> Inventory:
     """Cover the private build tree, including report files and native tools."""
     build = root / PROJECT_BUILD
@@ -264,6 +271,8 @@ def build_inventory(root: Path, modules: dict[str, Module]) -> Inventory:
             if name.endswith(".setup.json"):
                 continue
             path = PurePosixPath(source.relative_to(build))
+            if retired_report_path(path):
+                continue
             module, kind = _owner(path, module_paths, modules)
             result.artifacts.append(Artifact(path, stat.S_IMODE(info.st_mode), info.st_size,
                                              module, kind if module is not None else "other"))

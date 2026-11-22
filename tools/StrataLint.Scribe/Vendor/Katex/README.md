@@ -17,21 +17,12 @@ Only the parser is exercised: the gate calls `katex.renderToString` with
 `throwOnError` and keeps the verdict, never the HTML. Fonts, stylesheets and the
 browser bundle are therefore not vendored.
 
-`scribe-content-checks.sh` invokes `content-check` with an explicit Lean report and an
-paths file (or a manifest of all definitions when none is supplied). The command loads the report once, runs `projections --check`,
-the selected definitions' content predicates, and their Markdown formulas in order,
-and stops at the first failure. The caller supplies a NUL-separated path manifest.
-The paths file selects which definitions execute and which Markdown files are checked.
+The scoped `content-check` validates selected Markdown formulas. Its NUL-separated
+path manifest selects the documents, and its target manifest identifies the Lean
+inputs associated with the report.
 
 The bundle is a program this assembly executes, not declarative data, which is why it
 lives inside the project that runs it rather than in a data residence.
 
-Raising the version means replacing both files, updating the table above, and running the
-gate over the whole corpus once — a stricter KaTeX release can turn formulas red that the
-previous one accepted, and those documents are not in the diff that raises it:
-
-```sh
-find Blueprint -name '*.md' -print0 |
-  dotnet run --project tools/StrataLint.Scribe --configuration Release -- \
-    markdown-check --report .lake/build/stratalint/raw-lean-report.json --paths-from -
-```
+When raising the KaTeX version, run the scoped gate on the Blueprint documents
+that use the vendored renderer.

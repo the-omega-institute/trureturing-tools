@@ -104,31 +104,23 @@ public sealed class LedgerAlignWriterTests
     }
 
     [Fact]
-    public void FullBundleStillAcquiresAndChecksUnselectedSources()
+    public void FullBundleIsRejectedWithoutReadingUnselectedSources()
     {
         using var fixture = new AlignFixture(Module("A"), Module("C"));
-        var report = new DagLedgerCommandPreparation.FileLeanReportSource(
-            fixture.ReportPath(scoped: false, "--add", PathFor("A")));
+        var path = fixture.ReportPath(scoped: false, "--add", PathFor("A"));
 
-        var truth = DagLedgerCommandPreparation.BuildTruthScoped(
-            fixture.Repository, report, [RepoPathFor("A")]);
-
-        Assert.True(truth.Report.IsScoped);
-        Assert.Single(truth.Report.Files);
-        Assert.False(truth.Snapshot.Files[RepoPathFor("C")].ContentWasRead);
-        Assert.Equal(2, fixture.Repository.WholeTreeReadCount);
+        AssertRejectedBeforeAnyWrite(fixture, path, RawLeanReportArtifact.ScopedSchema);
+        Assert.Equal(1, fixture.Repository.WholeTreeReadCount);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void FullOrScopedBundleAddsOnlySelectedOwner(bool scoped)
+    [Fact]
+    public void ScopedBundleAddsOnlySelectedOwner()
     {
         var a = Module("A", source: "import D5.S0.Carrier.B\ntheorem a : True := by trivial\n", imports: ["B"]);
         var b = Module("B");
         var c = Module("C") with { StatementMaterial = "True = True" };
         using var fixture = new AlignFixture(a, b, c);
-        var path = fixture.ReportPath(scoped, "--add", PathFor("A"));
+        var path = fixture.ReportPath(scoped: true, "--add", PathFor("A"));
 
         var result = fixture.Invoke(["--add", PathFor("A"), "--candidate-lean-report", path]);
 
@@ -141,36 +133,18 @@ public sealed class LedgerAlignWriterTests
     }
 
     [Theory]
-    [InlineData("source", "source hash does not match D5/S0/Carrier/C.lean")]
+    [InlineData("source", "source hash does not match D5/S0/Carrier/A.lean")]
     [InlineData("material", "Lean statement material hash mismatch")]
-    [InlineData("imports", "imports must be sorted and unique")]
-    public void FullBundleRejectsUnselectedCorruptionBeforeAnyWrite(string defect, string expectedError)
+    [InlineData("source-imports", "imports do not match source")]
+    [InlineData("statement", "statement identity does not match material")]
+    [InlineData("axioms", "expected Closed")]
+    public void ScopedBundleRetainsSelectedValidationBeforeAnyWrite(string defect, string expectedError)
     {
         using var fixture = new AlignFixture(Module("A"), Module("C") with { StatementMaterial = "True = True" });
-        var path = fixture.ReportPath(scoped: false, "--add", PathFor("A"));
-        fixture.Corrupt(path, "C", defect);
-
-        AssertRejectedBeforeAnyWrite(fixture, path, expectedError, defect is "material" or "statement");
-    }
-
-    [Theory]
-    [InlineData(false, "source", "source hash does not match D5/S0/Carrier/A.lean")]
-    [InlineData(true, "source", "source hash does not match D5/S0/Carrier/A.lean")]
-    [InlineData(false, "material", "Lean statement material hash mismatch")]
-    [InlineData(true, "material", "Lean statement material hash mismatch")]
-    [InlineData(false, "source-imports", "imports do not match source")]
-    [InlineData(true, "source-imports", "imports do not match source")]
-    [InlineData(false, "statement", "statement identity does not match material")]
-    [InlineData(true, "statement", "statement identity does not match material")]
-    [InlineData(false, "axioms", "expected Closed")]
-    [InlineData(true, "axioms", "expected Closed")]
-    public void FullOrScopedBundleRetainsSelectedValidationBeforeAnyWrite(bool scoped, string defect, string expectedError)
-    {
-        using var fixture = new AlignFixture(Module("A"), Module("C") with { StatementMaterial = "True = True" });
-        var path = fixture.ReportPath(scoped, "--add", PathFor("A"));
+        var path = fixture.ReportPath(scoped: true, "--add", PathFor("A"));
         fixture.Corrupt(path, "A", defect);
 
-        AssertRejectedBeforeAnyWrite(fixture, path, expectedError, defect is "material" or "statement");
+        AssertRejectedBeforeAnyWrite(fixture, path, expectedError);
     }
 
     [Theory]
@@ -240,21 +214,12 @@ public sealed class LedgerAlignWriterTests
         Assert.Equal(0, fixture.Repository.ReadCount);
     }
 
-    private static void AssertRejectedBeforeAnyWrite(AlignFixture fixture, string path, string expectedError, bool invalidData)
+    private static void AssertRejectedBeforeAnyWrite(AlignFixture fixture, string path, string expectedError)
     {
-        string error;
-        if (invalidData)
-            error = Assert.Throws<InvalidDataException>(() =>
-                fixture.Invoke(["--add", PathFor("A"), "--candidate-lean-report", path])).Message;
-        else
-        {
-            var result = fixture.Invoke(["--add", PathFor("A"), "--candidate-lean-report", path]);
-            Assert.False(result.Success);
-            error = result.Error;
-        }
-        Assert.Contains(expectedError, error, StringComparison.Ordinal);
+        var result = fixture.Invoke(["--add", PathFor("A"), "--candidate-lean-report", path]);
+        Assert.False(result.Success);
+        Assert.Contains(expectedError, result.Error, StringComparison.Ordinal);
         Assert.Empty(fixture.Image());
-        Assert.False(Directory.Exists(Path.GetDirectoryName(fixture.StateFile("A"))));
     }
 
     private sealed class AlignFixture : IDisposable
@@ -282,7 +247,8 @@ public sealed class LedgerAlignWriterTests
         }
         internal CommandResult Invoke(string[] arguments) => DagLedgerAlignWriter.Align(temporary.Path, Repository, arguments);
         internal CommandResult Align(params string[] options) =>
-            Invoke([.. options, "--candidate-lean-report", ReportPath(scoped: true, options)]);
+            Invoke(options.Any(static option => option is "--selector" or "--add")
+                ? [.. options, "--candidate-lean-report", ReportPath(scoped: true, options)] : options);
         internal string ReportPath(bool scoped, params string[] options)
         {
             var targets = options.Select((option, index) => (option, index))

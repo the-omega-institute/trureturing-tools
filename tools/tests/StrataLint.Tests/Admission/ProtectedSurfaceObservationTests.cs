@@ -214,10 +214,7 @@ public sealed class ProtectedSurfaceObservationTests
     private static (int ExitCode, string Output) Render(AdmissionOutcome outcome)
     {
         var console = new BufferedConsole();
-        var exitCode = CliApplication.Run(
-            ["check"],
-            new StubCliEnvironment(outcome),
-            console);
+        var exitCode = CliApplication.RenderAdmission(outcome, console);
         return (exitCode, console.Output);
     }
 

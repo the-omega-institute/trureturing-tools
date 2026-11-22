@@ -213,14 +213,14 @@ public sealed partial class ProductionEnvironmentTests
         var source = new FakeLeanReportSource(LeanAxiomReport.Create(fixture.Reports));
         var environment = new ProductionCliEnvironment("/repo", gateway, source);
 
-        var outcome = environment.Check(new[]
+        var outcome = environment.CheckDelta(new[]
         {
             "--merge-base", "0000000000000000000000000000000000000000",
-            "--candidate-lean-report", "candidate.json",
+            "--changed-paths-from", "paths",
         });
 
-        var failure = Assert.IsType<AdmissionOutcome.InfrastructureFailure>(outcome);
-        Assert.Contains("USAGE:", failure.Message, StringComparison.Ordinal);
+        Assert.Equal(2, outcome.ExitCode);
+        Assert.Contains("USAGE:", outcome.Error, StringComparison.Ordinal);
         Assert.Equal(0, source.CallCount);
     }
 
@@ -244,7 +244,7 @@ public sealed partial class ProductionEnvironmentTests
         var outcome = environment.Check(Array.Empty<string>());
 
         var failure = Assert.IsType<AdmissionOutcome.InfrastructureFailure>(outcome);
-        Assert.Contains("--candidate-lean-report", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("requires a Lean report", failure.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("--baseline-lean-report", failure.Message, StringComparison.Ordinal);
         Assert.Equal(0, source.CallCount);
     }
@@ -425,4 +425,16 @@ public sealed partial class ProductionEnvironmentTests
         return fixture;
     }
 
+}
+
+internal static class AdmissionFixtureReport
+{
+    internal static AdmissionOutcome Check(this ProductionCliEnvironment environment, IReadOnlyList<string> arguments)
+    {
+        var options = Enumerable.Range(0, arguments.Count / 2)
+            .ToDictionary(index => arguments[index * 2], index => arguments[index * 2 + 1], StringComparer.Ordinal);
+        var report = options.GetValueOrDefault("--candidate-lean-report");
+        return environment.EvaluateAdmission(options.GetValueOrDefault("--protected-base"),
+            report is null ? null : snapshot => RawLeanReportArtifact.ReadFile(report, snapshot));
+    }
 }

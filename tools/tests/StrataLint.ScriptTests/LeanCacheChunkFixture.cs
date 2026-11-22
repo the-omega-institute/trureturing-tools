@@ -59,7 +59,7 @@ internal sealed class LeanCacheChunkFixture : IDisposable
         WriteStub("make",
             """
             printf '%s\n' "$*" >> "$CHUNK_FIXTURE/build-runs"
-            if [ "$1" = "check-lean-report" ] && [ "$FAKE_BUILD_EXIT" = "0" ]; then
+            if [ "$1" = "lean-cache-prepare" ] && [ "$FAKE_BUILD_EXIT" = "0" ]; then
                 python3 -B "$FAKE_REPORT_FACTORY" write-release-report "$PWD"
             fi
             exit "$FAKE_BUILD_EXIT"
@@ -96,8 +96,8 @@ internal sealed class LeanCacheChunkFixture : IDisposable
     internal byte[] ArchiveBytes { get; private set; }
     internal string Tag => CandidateTag(4242);
     internal string CandidateTag(int run, string? partition = null) => $"lean-cache-v2-{(partition ?? Partition).Replace('/', '-')}-report-{CacheKey["report_format"]!.GetValue<string>()}-env-{CacheKey["execution_sha256"]!.GetValue<string>()[..12]}-ci-{run}-1";
-    internal string? Unpacked => ReadInstalled("build/cache.olean");
-    internal string? UnpackedReport => ReadInstalled("build/lean-inspector/report.zip");
+    internal string? Unpacked => ReadInstalled("build/lib/lean/cache.olean");
+    internal string? UnpackedReport => ReadInstalled("build/lean-inspector/modules/Trureturing.zip");
     internal string[] DownloadPatterns => ScriptHarnessScratch.ReadRecordedCalls(Path.Combine(temporary.Path, "download-patterns"));
     internal string[] DownloadTags => ScriptHarnessScratch.ReadRecordedCalls(Path.Combine(temporary.Path, "download-tags"));
     internal string[][] GhCalls => ScriptHarnessScratch.ReadRecordedCalls(Path.Combine(temporary.Path, "gh-calls"))
@@ -261,7 +261,7 @@ internal sealed class LeanCacheChunkFixture : IDisposable
         using (var gzip = new GZipStream(output, CompressionLevel.SmallestSize, leaveOpen: true))
         using (var tar = new TarWriter(gzip, leaveOpen: true))
         {
-            foreach (var (name, value) in new[] { ("build/cache.olean", payload), ("build/lean-inspector/report.zip", "report-seed") })
+            foreach (var (name, value) in new[] { ("build/lib/lean/cache.olean", payload), ("build/lean-inspector/modules/Trureturing.zip", "report-seed") })
             {
                 using var input = new MemoryStream(Encoding.ASCII.GetBytes(value));
                 tar.WriteEntry(new UstarTarEntry(TarEntryType.RegularFile, name)

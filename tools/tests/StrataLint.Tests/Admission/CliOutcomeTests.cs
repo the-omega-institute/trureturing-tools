@@ -25,9 +25,7 @@ public sealed class CliOutcomeTests
         bool markerOnError)
     {
         var console = new BufferedConsole();
-        var environment = new StubCliEnvironment(Outcome(fixture));
-
-        var exitCode = CliApplication.Run(new[] { "check" }, environment, console);
+        var exitCode = CliApplication.RenderAdmission(Outcome(fixture), console);
 
         Assert.Equal(expectedExit, exitCode);
         Assert.Contains(marker, markerOnError ? console.Error : console.Output, StringComparison.Ordinal);
@@ -90,10 +88,8 @@ public sealed class CliOutcomeTests
             AdmissionEffect.Observe,
             "Meta/FILEMAP.toml",
             "ADMISSION-PLANE-MIXED: candidate changes judge and content inputs");
-        var environment = new StubCliEnvironment(
-            new AdmissionOutcome.Admitted(admitted.Certificate, [observation]));
-
-        var exitCode = CliApplication.Run(["check"], environment, console);
+        var exitCode = CliApplication.RenderAdmission(
+            new AdmissionOutcome.Admitted(admitted.Certificate, [observation]), console);
 
         // 不阻断:退出码仍是 0。
         Assert.Equal(0, exitCode);

@@ -65,7 +65,7 @@ internal static partial class UtilityDeclarationValidator
             report = loadLeanReport();
         }
         catch (Exception exception) when (
-            exception is InvalidOperationException or FormatException or ArgumentException or IOException)
+            exception is InvalidOperationException or FormatException or ArgumentException or IOException or InvalidDataException)
         {
             return Failure(declaration!, UtilityValidationFailure.InputUnknown,
                 "reason=current-lean-report-load-failed");

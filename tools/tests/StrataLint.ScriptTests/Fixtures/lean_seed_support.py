@@ -13,7 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[4]
 INPUT = ROOT / "tools/scripts/worktree/lean-cache-input.sh"
 REV = "0123456789abcdef0123456789abcdef01234567"
 OTHER = "f" * 40
-REPORT_BUILD = "check-lean-report LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build LEAN_REPORT=.lake/build/stratalint/raw-lean-report.json"
+REPORT_BUILD = "lean-cache-prepare"
 PUBLISH = ROOT / "tools/scripts/worktree/lean-cache-publish.sh"
 
 
@@ -54,8 +54,8 @@ class PartitionFixture:
 
 
 def prepare_release_report(root):
-    """Canonical synthetic bundle for Release transport's existing strict reader."""
-    for directory, names in (("tools/lean-inspector", ("reuse.py", "publication.py", "materials.py")),
+    """Register Lean execution inputs for the Release transport fixture."""
+    for directory, names in (("tools/lean-inspector", ("publication.py", "materials.py")),
                              ("tools/scripts/report", ("lean-report-selection.py", "lean-report-input.sh"))):
         target = root / directory
         target.mkdir(parents=True, exist_ok=True)
@@ -73,35 +73,16 @@ def prepare_release_report(root):
 
 
 def write_release_report(root):
-    sys.path.insert(0, str(root / "tools/lean-inspector"))
-    import reuse
-    publication, materials = reuse.publication, reuse.materials
-    captured = reuse.capture(root)
-    report = root / ".lake/build/stratalint/raw-lean-report.json"
-    try:
-        receipt = reuse.read_receipt(report, captured)
-        if receipt['completed'] != reuse.CHECKED:
-            reuse.write_receipt(report, captured, checked=True)
-        return
-    except reuse.INVALID_SEED:
-        pass
-    report.parent.mkdir(parents=True, exist_ok=True)
-    rows = [dict(module=name, source_path=path, source_sha256="sha256:" + publication.digest(root / path),
-                 imports=[], declarations=[]) for name, path in sorted(publication.selection.Selection(root).modules().items())]
-    report.write_bytes(materials.canonical_json(dict(schema=publication.selection.REPORT_FORMAT, modules=rows)))
-    with zipfile.ZipFile(publication.member(report, ".materials.zip"), "w"):
-        pass
-    origins = {row["module"]: dict(module=row["module"],
-        report_sha256=digest(materials.canonical_json(dict(schema=materials.REPORT_SCHEMA, modules=[row]))),
-        input_projection=dict(schema="stratalint-judge-input-projection-v1", module=row["module"], inputs=[]),
-        producer_sources_sha256="a" * 64, inspector_executable_sha256="b" * 64) for row in rows}
-    producer, sources, config = "c" * 64, "d" * 64, "e" * 64
-    coordinates = subprocess.check_output([str(root / "tools/scripts/report/lean-report-input.sh"), "coordinates",
-        producer, producer, sources, config], text=True).strip().split()
-    publication.write_sidecars(report, dict(input=coordinates[0], repository=coordinates[1],
-        producer=producer, sources=sources, config=config), origins)
-    publication.validate_bundle(report, repository=root)
-    reuse.write_receipt(report, captured, checked=True)
+    directory = root / ".lake/build/lean-inspector/modules"
+    directory.mkdir(parents=True, exist_ok=True)
+    compiled = root / ".lake/build/lib/lean"
+    if not compiled.is_dir():
+        write(compiled / "Trureturing.olean", "fixture compiler artifact")
+    for path in [root / "Trureturing.lean", *sorted((root / "D5").rglob("*.lean"))]:
+        address = path.relative_to(root).with_suffix("")
+        module = ".".join(address.parts)
+        with zipfile.ZipFile(directory / (module + ".zip"), "w") as archive:
+            archive.writestr("fixture.txt", module)
 
 
 if __name__ == "__main__":
@@ -109,8 +90,7 @@ if __name__ == "__main__":
     if sys.argv[1] == "prepare-release-report":
         prepare_release_report(root)
     else:
-        # The canonical report entry owns a writer lock; the tiny fake producer
-        # needs the same serialization while it writes a multi-file bundle.
+        # Concurrent publisher fixtures share the same synthetic compiler output.
         import fcntl
         with (root / ".fixture-report.lock").open("a+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)

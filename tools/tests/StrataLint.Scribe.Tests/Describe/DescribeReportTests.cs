@@ -1,6 +1,5 @@
 using System.Collections.Immutable;
 using System.Text;
-using System.Text.Json;
 using StrataLint.Engine;
 
 namespace StrataLint.Scribe.Tests;
@@ -177,7 +176,7 @@ public sealed class DescribeReportTests
     }
 
     [Fact]
-    public void JsonReportIsAQueryableAssessedClassificationLedgerWithGradedObservations()
+    public void ReportCountsSelectedNodesAndRecordsObservations()
     {
         WithRepository(root =>
         {
@@ -203,32 +202,16 @@ public sealed class DescribeReportTests
                 ]));
 
             var report = DescribeReport.Build(root, [document]);
-            var first = DescribeReportWriter.WriteJson(report);
-            var second = DescribeReportWriter.WriteJson(report);
-
-            Assert.Equal(first, second);
-            using var json = JsonDocument.Parse(first);
-            var rootElement = json.RootElement;
-            Assert.Equal("DESCRIBE-NODES", rootElement.GetProperty("case_id").GetString());
-            Assert.Equal("classified", rootElement.GetProperty("status").GetString());
-            // open_count counted unassessed nodes. No node can carry that provenance any more,
-            // so the field is gone rather than pinned at zero — a constant assertion measures nothing.
-            Assert.False(rootElement.TryGetProperty("open_count", out _));
-            var stats = rootElement.GetProperty("node_stats");
-            Assert.Equal(3, stats.GetProperty("total").GetInt32());
-            Assert.Equal(2, stats.GetProperty("formula_content_slots").GetInt32());
-            Assert.Equal(0, stats.GetProperty("formula_statements").GetInt32());
-            var byProvenance = stats.GetProperty("by_provenance");
-            Assert.Equal(1, byProvenance.GetProperty("repo-derived").GetInt32());
-            Assert.Equal(1, byProvenance.GetProperty("literature-attested").GetInt32());
-            Assert.Equal(1, byProvenance.GetProperty("suspected-novel").GetInt32());
-            Assert.Single(rootElement.GetProperty("suspected_novel").EnumerateArray());
-            Assert.False(rootElement.TryGetProperty("unassessed", out _));
-            Assert.Empty(rootElement.GetProperty("red_findings").EnumerateArray());
-            var observationCodes = rootElement.GetProperty("observations")
-                .EnumerateArray()
-                .Select(static item => item.GetProperty("code").GetString())
-                .ToArray();
+            Assert.Equal("classified", report.Status);
+            Assert.Equal(3, report.NodeStats.Total);
+            Assert.Equal(2, report.NodeStats.FormulaContentSlots);
+            Assert.Equal(0, report.NodeStats.FormulaStatements);
+            Assert.Equal(1, report.NodeStats.ByProvenance["repo-derived"]);
+            Assert.Equal(1, report.NodeStats.ByProvenance["literature-attested"]);
+            Assert.Equal(1, report.NodeStats.ByProvenance["suspected-novel"]);
+            Assert.Single(report.SuspectedNovel);
+            Assert.Empty(report.RedFindings);
+            var observationCodes = report.Observations.Select(item => item.Code).ToArray();
             Assert.Contains("code-span", observationCodes);
             Assert.Contains("unicode-suspected-formula", observationCodes);
             Assert.Contains("lean-docstring-formula", observationCodes);
@@ -254,11 +237,9 @@ public sealed class DescribeReportTests
                 ]));
 
             var report = DescribeReport.Build(root, [document]);
-            var text = DescribeReportWriter.WriteText(report);
 
             Assert.Equal("classified", report.Status);
             Assert.Single(report.SuspectedNovel);
-            Assert.Contains("suspected_novel=1", text, StringComparison.Ordinal);
         });
     }
 
@@ -301,7 +282,7 @@ public sealed class DescribeReportTests
     [Theory]
     [InlineData("not-a-doi", "invalid-doi")]
     [InlineData("10.1007/BF01389053", "duplicate-doi")]
-    public void JsonReportRecordsDoiViolationsAsRedFindings(
+    public void ReportRecordsDoiViolationsAsRedFindings(
         string firstDoi,
         string expectedCode)
     {
@@ -318,13 +299,9 @@ public sealed class DescribeReportTests
                 }
 
                 var report = DescribeReport.Build(root, []);
-                var json = DescribeReportWriter.WriteJson(report);
 
                 Assert.Equal("invalid", report.Status);
                 Assert.Contains(report.RedFindings, finding => finding.Code == expectedCode);
-                using var document = JsonDocument.Parse(json);
-                Assert.Contains(document.RootElement.GetProperty("red_findings").EnumerateArray(), finding =>
-                    finding.GetProperty("code").GetString() == expectedCode);
             },
             doi: firstDoi);
     }

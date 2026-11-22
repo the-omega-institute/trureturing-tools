@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 
 namespace StrataLint.Scribe.Tests;
 
@@ -40,7 +41,7 @@ public sealed class MarkdownCurrentCommandTests
         var output = new StringWriter();
         var error = new StringWriter();
 
-        var exit = Run(temporary, output, error, "--paths-from", "-");
+        var exit = Run(temporary, output, error, emptyScope: true);
 
         Assert.True(exit == 0, error.ToString());
         Assert.Contains("markdown: judged=0", output.ToString(), StringComparison.Ordinal);
@@ -73,14 +74,12 @@ public sealed class MarkdownCurrentCommandTests
         return temporary;
     }
 
-    private static int Run(TemporaryRoot temporary, TextWriter output, TextWriter error, params string[] options)
+    private static int Run(TemporaryRoot temporary, TextWriter output, TextWriter error, bool emptyScope = false)
     {
-        var paths = options.Length == 0
-            ? string.Join('\0', Directory.EnumerateFiles(temporary.Resolve("Blueprint"), "*", SearchOption.AllDirectories)
-                .Select(path => System.IO.Path.GetRelativePath(temporary.Path, path).Replace('\\', '/')))
-            : string.Empty;
-        return ScribeCli.Run(["markdown-check", "--report", "fixture.json", "--paths-from", "-"],
-            temporary.Path, output, error, LeanReportFixture.ForDocuments([Definition().Document]), new StringReader(paths));
+        ImmutableArray<string> paths = emptyScope ? []
+            : [.. Directory.EnumerateFiles(temporary.Resolve("Blueprint"), "*", SearchOption.AllDirectories)
+                .Select(path => System.IO.Path.GetRelativePath(temporary.Path, path).Replace('\\', '/'))];
+        return ScribeContentChecks.Run(temporary.Path, paths, LeanReportFixture.ForDocuments([Definition().Document]),
+            checkContent: false, output, error);
     }
-
 }

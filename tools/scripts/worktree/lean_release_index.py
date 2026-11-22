@@ -14,7 +14,7 @@ import re
 import tarfile
 
 from lean_artifact_inventory import (
-    PROJECT_BUILD, build_inventory, import_closure, lake_configuration, lean_artifact_paths,
+    PROJECT_BUILD, build_inventory, retired_report_path, import_closure, lake_configuration, lean_artifact_paths,
     project_imports, required_compiler_paths, workspace_modules,
 )
 from lean_cache_release_io import (
@@ -241,6 +241,8 @@ def extract_frame(stream, row, destination, installed, deadline):
                     raise ValueError(f"invalid archived member path: {entry.name}")
                 installed.add(path)
                 observed.add(entry.name)
+                if retired_report_path(path):
+                    continue
                 target = destination / path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with target.open("xb") as output:

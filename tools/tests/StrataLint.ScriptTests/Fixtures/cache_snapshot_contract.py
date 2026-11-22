@@ -124,7 +124,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "known scenario"):
                     shards.binding(self.root, "resume")
 
-    def test_warm_repack_keeps_full_aggregate_out_of_scoped_restore(self):
+    def test_warm_repack_drops_the_legacy_aggregate_and_reuses_the_module_payload(self):
         self.restore_owner()
         shards = importlib.import_module("lean_actions_shards")
         inventory = importlib.import_module("lean_artifact_inventory")
@@ -139,12 +139,13 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
         build = self.root / shards.PROJECT_BUILD
         compiler_paths = set(map(str, inventory.required_compiler_paths(name, module)))
         module_paths = compiler_paths | {"lean-inspector/modules/D5.Fixture.zip"}
-        report_paths = {shards.REPORT_PATH + suffix for suffix in shards.report_reuse.publication.SUFFIXES}
-        report_paths.add(str(shards.REPORT_RECEIPT))
+        legacy_report = "stratalint/raw-lean-report.json"
+        report_paths = {legacy_report + suffix for suffix in (*shards.publication.SUFFIXES, ".reuse.json")}
         aggregate_paths = {"lean-inspector/report.zip", "lean-inspector/report.zip.trace",
                            "lean-inspector/report.zip.hash"}
         inspector = "lean-inspector/producer/bin/reportInspector"
-        extras_paths = {inspector, "lean-inspector/report.zip.trace.nobuild"}
+        aggregate_paths.add("lean-inspector/report.zip.trace.nobuild")
+        extras_paths = {inspector}
         all_paths = module_paths | report_paths | aggregate_paths | extras_paths
         for relative in all_paths:
             file = build / relative
@@ -159,9 +160,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                 mock.patch.object(shards, "resume_spec"), \
                 mock.patch.object(shards, "project_publication", return_value=(True, "new-work", 1)), \
                 mock.patch.object(shards, "actions_keys", return_value={"project_save_allowed": True}), \
-                mock.patch.object(shards.report_reuse, "read_receipt"), \
-                mock.patch.object(shards.report_reuse, "capture"), \
-                mock.patch.object(shards.report_reuse.publication.selection, "Selection") as selection, \
+                mock.patch.object(shards.publication.selection, "Selection") as selection, \
                 contextlib.redirect_stdout(io.StringIO()):
             selection.return_value.modules.return_value = {name: {}}
             index = self.root / "shards.json"
@@ -182,7 +181,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
             previous = shards.read_index(index, {}, "complete")
             shutil.rmtree(build)
             self.assertTrue(shards.install(self.root, previous, require_complete=True)["complete"])
-            self.assertEqual(all_paths, {path.relative_to(build).as_posix()
+            self.assertEqual(module_paths | extras_paths, {path.relative_to(build).as_posix()
                                          for path in build.rglob("*") if path.is_file()})
 
             packed = []
@@ -191,14 +190,14 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                                     deliver=lambda payload, size: packed.append(payload))
             index.write_text(json.dumps(record))
             record = shards.read_index(index, {}, "complete")
-            self.assertEqual(required, record["required"])
+            self.assertEqual({key: sorted(module_paths)}, record["required"])
             self.assertEqual(previous["layout"], record["layout"])
             self.assertEqual(previous["entries"][key], record["entries"][key])
             self.assertEqual(previous["fingerprints"][key], record["fingerprints"][key])
-            self.assertCountEqual(packed, [record["entries"][shards.EXTRAS], record["entries"][shards.REPORT]])
+            self.assertEqual(packed, [record["entries"][shards.EXTRAS]])
+            self.assertNotIn(shards.REPORT, record["entries"])
 
-            expected_groups = {key: module_paths, shards.EXTRAS: extras_paths,
-                               shards.REPORT: report_paths | aggregate_paths}
+            expected_groups = {key: module_paths, shards.EXTRAS: extras_paths}
             for group_key, paths in expected_groups.items():
                 payload = self.root / shards.transport_payload(record["entries"][group_key])
                 with tarfile.open(payload, "r:gz") as archive:
@@ -206,7 +205,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
 
             scoped = {key: record["entries"][key], shards.EXTRAS: record["entries"][shards.EXTRAS]}
             self.assertEqual(scoped, shards.selected_keys(self.root, record, [name]))
-            for targets, expected in (([name], module_paths | extras_paths), (None, all_paths)):
+            for targets, expected in (([name], module_paths | extras_paths), (None, module_paths | extras_paths)):
                 with self.subTest(targets=targets):
                     shutil.rmtree(build)
                     restored = shards.install(self.root, record, targets, require_complete=True)
@@ -230,12 +229,11 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                 mock.patch.object(shards, "actions_keys", return_value={"project_save_allowed": True}), \
                 mock.patch.object(shards, "manual_source_is_valid", return_value=False), \
                 mock.patch.object(shards, "resume_verified", return_value=False), \
-                mock.patch.object(shards.report_reuse, "capture"), \
-                mock.patch.object(shards.report_reuse, "read_receipt", side_effect=ValueError("receipt rejected")):
+                mock.patch.object(shards, "check_native_products", side_effect=ValueError("invalid native products")):
             with self.assertRaisesRegex(ValueError, "publication denied: no-build-work"):
                 shards.prepare(self.root, {}, "complete", None, "a" * 40)
             with mock.patch.dict(os.environ, {"STRATALINT_ACTIONS_CACHE_SEEDED": "1"}):
-                with self.assertRaisesRegex(ValueError, "receipt rejected"):
+                with self.assertRaisesRegex(ValueError, "invalid native products"):
                     shards.prepare(self.root, {}, "complete", None, "a" * 40)
 
     def test_sharded_resume_recovers_verified_entries_and_reports_eviction(self):
@@ -295,7 +293,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
             "entries": {key: "a" * 64, "report": "b" * 64},
             "fingerprints": {key: "c" * 64, "report": "d" * 64},
             "sources": {"D5.Fixture": "e" * 64},
-            "required": {key: ["lib/lean/D5/Fixture.olean"], "report": [shards.REPORT_PATH]},
+            "required": {key: ["lib/lean/D5/Fixture.olean"], "report": ["stratalint/raw-lean-report.json"]},
         }
         index = self.root / "shards.json"
         index.write_text(json.dumps(record))
@@ -330,14 +328,14 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
         producer = self.root / "producer"
         build = self.root / ".lake/build"
         group = shards.group_identity([["D5.Fixture"]])
-        paths = {group: "lib/lean/D5/Fixture.olean", shards.REPORT: shards.REPORT_PATH}
+        paths = {group: "lib/lean/D5/Fixture.olean", shards.EXTRAS: "lean-inspector/modules/D5.Fixture.zip"}
         for path in paths.values():
             source = producer / path
             source.parent.mkdir(parents=True, exist_ok=True)
             source.write_text(path)
         compiler = shards.write_payload(self.root, producer, [paths[group]])
-        report = shards.write_payload(self.root, producer, [paths[shards.REPORT]])
-        record = {"state": "complete", "entries": {group: compiler, shards.REPORT: report},
+        report = shards.write_payload(self.root, producer, [paths[shards.EXTRAS]])
+        record = {"state": "complete", "entries": {group: compiler, shards.EXTRAS: report},
                   "required": {key: [path] for key, path in paths.items()}}
         report_file = self.root / shards.transport_payload(report)
         report_bytes = report_file.read_bytes()
@@ -349,13 +347,13 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
         partial = shards.install(self.root, record)
         self.assertEqual(strict | {"available": 1}, partial)
         self.assertEqual(paths[group], (build / paths[group]).read_text())
-        self.assertFalse((build / shards.REPORT_PATH).exists())
+        self.assertFalse((build / paths[shards.EXTRAS]).exists())
         shutil.rmtree(build)
 
         report_file.write_bytes(report_bytes)
         complete = shards.install(self.root, record)
         self.assertEqual({"available": 2, "missing": [], "requested": 2, "complete": True}, complete)
-        self.assertEqual(shards.REPORT_PATH, (build / shards.REPORT_PATH).read_text())
+        self.assertEqual(paths[shards.EXTRAS], (build / paths[shards.EXTRAS]).read_text())
 
     def test_restore_plan_accepts_large_and_empty_target_files(self):
         self.restore_owner()

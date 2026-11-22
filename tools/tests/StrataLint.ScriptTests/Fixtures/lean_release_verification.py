@@ -625,6 +625,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
 
     def test_verification_rejects_invalid_post_edit_confirmation(self):
         self.verification_fixture()
+        write(self.root / "D5/A.lean", "def a := 1\n")
         partition = json.loads(self.transport("address").stdout)["partition"]
         tag = json.loads(self.transport("address").stdout)["release_prefix"].replace("lean-cache-v2-", "lean-cache-verify-v1-", 1) + "ci-123-1"
         for metadata, status in self.invalid_post_edit_responses(tag, self.verification_commit):
@@ -792,34 +793,13 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertFalse(any(call[:2] in (["api", "graphql"], ["release", "list"], ["release", "delete"]) or
                              (call[0] == "api" and "/branches/dev" in call[1]) for call in calls))
 
-    def test_candidate_publish_only_rejects_stale_report_without_building(self):
+    def test_candidate_publish_only_rejects_missing_module_without_building(self):
         self.candidate_fixture()
-        (self.root / ".lake/build/stratalint/raw-lean-report.json.reuse.json").unlink()
+        (self.root / ".lake/build/lean-inspector/modules/D5.A.zip").unlink()
         result = self.candidate_transport("publish")
         self.assertNotEqual(0, result.returncode)
         self.assertFalse((self.root / "build-runs").exists())
         self.assertEqual([], list(self.remote.iterdir()))
-
-    def test_candidate_publish_only_requires_a_check_after_standalone_analysis(self):
-        from lean_cache_release import report_reuse
-        self.candidate_fixture()
-        failed = self.transport("publish", FAKE_BUILD_EXIT="41")
-        self.assertEqual(41, failed.returncode, failed.stdout + failed.stderr)
-        report = report_reuse.canonical_seed(self.root)
-        # Standalone analysis seals its produced bundle with an unchecked receipt.
-        report_reuse.seal(self.root, report, report_reuse.capture(self.root),
-                          report_reuse.publication.bundle_identity(report))
-        self.assertTrue(report_reuse.seed_format(report)["compatible"])
-        rejected = self.candidate_transport("publish")
-        self.assertEqual(1, rejected.returncode, rejected.stdout + rejected.stderr)
-        self.assertIn("make check-lean-report FULL_BUILD=1", rejected.stdout)
-        self.assertEqual([REPORT_BUILD], (self.root / "build-runs").read_text().splitlines())
-        self.assertEqual([], list(self.remote.iterdir()))
-        checked = self.transport("publish")
-        self.assertEqual(0, checked.returncode, checked.stdout + checked.stderr)
-        accepted = self.candidate_transport("publish")
-        self.assertEqual(0, accepted.returncode, accepted.stdout + accepted.stderr)
-        self.assertEqual([REPORT_BUILD, REPORT_BUILD], (self.root / "build-runs").read_text().splitlines())
 
     def test_candidate_publication_rejects_dirty_missing_source_and_ci_callers(self):
         self.candidate_fixture()
@@ -903,6 +883,40 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertIn('"status":"unpacked"', result.stdout)
         self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
 
+    def test_candidate_restores_existing_production_cache_without_aggregate_members(self):
+        self.verification_fixture()
+        publication = self.transport("publish")
+        self.assertEqual(0, publication.returncode, publication.stdout + publication.stderr)
+        snapshot = next(self.remote.iterdir())
+        manifest_path = snapshot / "manifest.json"
+        archive = snapshot / "lean-build.tgz"
+        retired = ("build/stratalint/raw-lean-report.json", "build/lean-inspector/report.zip")
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = pathlib.Path(temporary)
+            with tarfile.open(archive) as source:
+                source.extractall(stage, filter="data")
+            for member in retired:
+                write(stage / member, "legacy aggregate")
+            with tarfile.open(archive, "w:gz") as output:
+                output.add(stage / "build", arcname="build")
+        packed = archive.read_bytes()
+        manifest = json.loads(manifest_path.read_text())
+        manifest.update(archive_bytes=len(packed), archive_sha256=digest(packed),
+                        parts=[{"name": archive.name, "bytes": len(packed), "sha256": digest(packed)}])
+        write(manifest_path, json.dumps(manifest))
+        write(self.root / ".lake/build/keep.txt", "keep current material")
+        consumer = self.candidate_consumer()
+        wrong = self.transport("fetch", arguments=("--mode", "candidate", "--tag", snapshot.name,
+            "--source-commit", "f" * 40), **consumer)
+        self.assertEqual(1, wrong.returncode, wrong.stdout + wrong.stderr)
+        self.assertEqual("keep current material", (self.root / ".lake/build/keep.txt").read_text())
+        result = self.transport("fetch", arguments=("--mode", "candidate", "--tag", snapshot.name,
+            "--source-commit", manifest["producer_commit_sha"]), **consumer)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
+        for member in retired:
+            self.assertFalse((self.root / ".lake" / member).exists())
+
     def test_candidate_restore_rejects_ordinary_ci_and_wrong_source_without_replacing_build(self):
         self.candidate_fixture()
         tag = self.candidate_tag()
@@ -919,7 +933,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertNotEqual(0, result.returncode)
         self.assertEqual("keep current material", (self.root / ".lake/build/keep.txt").read_text())
 
-    def test_candidate_restore_rejects_incompatible_sealed_report_before_replacement(self):
+    def test_candidate_restore_rejects_missing_module_layout_before_replacement(self):
         self.candidate_fixture()
         tag = self.candidate_tag()
         snapshot = self.remote / tag
@@ -927,11 +941,8 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         with tempfile.TemporaryDirectory() as temporary:
             stage = pathlib.Path(temporary)
             with tarfile.open(archive) as source:
-                source.extractall(stage)
-            seal = stage / "build/stratalint/raw-lean-report.json.reuse.json"
-            value = json.loads(seal.read_text())
-            value["inputs"]["report_format"] = "incompatible-report-format"
-            seal.write_text(json.dumps(value))
+                source.extractall(stage, filter="data")
+            shutil.rmtree(stage / "build/lean-inspector/modules")
             with tarfile.open(archive, "w:gz") as output:
                 output.add(stage / "build", arcname="build")
         packed = archive.read_bytes()
@@ -942,7 +953,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         write(self.root / ".lake/build/keep.txt", "keep current material")
         result = self.candidate_transport("fetch", tag, **self.candidate_consumer())
         self.assertEqual(1, result.returncode, result.stdout + result.stderr)
-        self.assertIn("staged report seed is incompatible", result.stdout)
+        self.assertIn("project cache is missing lean-inspector/modules", result.stdout)
         self.assertEqual("keep current material", (self.root / ".lake/build/keep.txt").read_text())
 
     def test_candidate_notification_failure_rolls_back_installation(self):

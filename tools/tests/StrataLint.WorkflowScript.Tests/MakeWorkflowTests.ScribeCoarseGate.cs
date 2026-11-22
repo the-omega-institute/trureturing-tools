@@ -92,6 +92,8 @@ public sealed partial class MakeWorkflowTests
         var report = Path.Combine(root, "report.json");
         var dll = Path.Combine(root, "scribe.dll");
         var paths = Path.Combine(root, "selected paths.txt");
+        var targets = Path.Combine(Path.GetDirectoryName(paths)!, "selected targets");
+        File.WriteAllText(targets, "D5/Probe.lean\0");
         File.WriteAllText(report, "candidate report");
         File.WriteAllText(dll, "candidate binary");
         File.WriteAllText(paths, changedPath.Length > 0 ? changedPath + "\0" : string.Empty);
@@ -99,10 +101,10 @@ public sealed partial class MakeWorkflowTests
         WriteExecutable(Path.Combine(bin, "dotnet"), "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$SCRIBE_LOG\"\n");
         ProcessOutput Run(params string[] selection) => TestProcessRunner.Run("/usr/bin/env",
             [$"PATH={bin}:/usr/bin:/bin", $"SCRIBE_LOG={log}", "BASE=unavailable",
-             "/bin/bash", script, report, dll, .. selection], root, BoundedProcessRunner.HangDetectionBudget, 64 * 1024);
+             "/bin/bash", script, report, dll, .. selection, targets], root, BoundedProcessRunner.HangDetectionBudget, 64 * 1024);
         var result = Run(paths);
         Assert.True(result.ExitCode == 0, Encoding.UTF8.GetString(result.StandardError));
-        Assert.StartsWith($"{dll} content-check --report {report} --paths-from ", Assert.Single(File.ReadAllLines(log)));
+        Assert.StartsWith($"{dll} content-check --scoped --report {report} --targets-from {targets} --paths-from ", Assert.Single(File.ReadAllLines(log)));
         foreach (var invalid in new[] { new string('a', 40), root, "" })
         {
             var rejected = Run(invalid);
@@ -115,7 +117,7 @@ public sealed partial class MakeWorkflowTests
         Assert.True(selected.ExitCode == 0, Encoding.UTF8.GetString(selected.StandardError));
         Assert.Equal(new[]
         {
-            $"{dll} content-check --report {report} --paths-from {paths}",
+            $"{dll} content-check --scoped --report {report} --targets-from {targets} --paths-from {paths}",
         }, File.ReadAllLines(log).Skip(1));
     }
 
@@ -132,6 +134,8 @@ public sealed partial class MakeWorkflowTests
         var report = Path.Combine(root.Path, "report.json");
         var dll = Path.Combine(root.Path, "scribe.dll");
         var paths = Path.Combine(root.Path, "selected paths");
+        var targets = Path.Combine(Path.GetDirectoryName(paths)!, "selected targets");
+        File.WriteAllText(targets, "D5/Probe.lean\0");
         File.WriteAllText(report, "candidate report");
         File.WriteAllText(dll, "candidate binary");
         File.WriteAllText(paths, string.Empty);
@@ -139,7 +143,7 @@ public sealed partial class MakeWorkflowTests
             "#!/bin/bash\nprintf 'check output\\n'\nprintf 'check error\\n' >&2\nexit \"$CHILD_EXIT\"\n");
         var result = TestProcessRunner.Run("/usr/bin/env",
             [$"PATH={bin}:/usr/bin:/bin", $"CHILD_EXIT={childExit}", "/bin/bash",
-             Path.Combine(TestRepositoryLayout.FindRoot(), ScribeContentChecksScriptPath), report, dll, paths],
+             Path.Combine(TestRepositoryLayout.FindRoot(), ScribeContentChecksScriptPath), report, dll, paths, targets],
             root.Path, BoundedProcessRunner.HangDetectionBudget, 64 * 1024);
         Assert.Equal(childExit, result.ExitCode);
         Assert.Equal("check output\n", Encoding.UTF8.GetString(result.StandardOutput));
