@@ -100,6 +100,50 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                 shards.restore_checkpoint(self.root, identity, artifact, 1)
             self.assertFalse(build_output.exists())
 
+    def test_complete_discovery_survives_lake_edits_and_preserves_runtime_partitions(self):
+        actions = self.restore_owner()
+        shards = importlib.import_module("lean_actions_shards")
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(shards, "resume_spec", return_value={"identity": "checkpoint"}), \
+                mock.patch.object(shards, "source_commit", return_value="a"*40):
+            def addresses(state="complete"):
+                return shards.index_addresses(shards.binding(self.root, state))
+
+            original = addresses()
+            resume = addresses("resume")
+            exact = shards.binding(self.root, "complete")
+            exact.pop("runtime")
+            self.assertEqual(exact["execution"], actions.dependency_inputs(self.root))
+            self.assertEqual(original["legacy_prefix"], "lean-shard-index-v1-" + shards.digest(exact) + "-")
+            self.assertEqual(original["snapshot_prefix"], original["prefix"] + "snapshot-" + shards.digest(exact) + "-")
+            self.assertIsNone(resume["legacy_prefix"])
+            self.assertEqual(resume["snapshot_prefix"], resume["prefix"] + "snapshot-")
+
+            for relative in ("lakefile.toml", "lakefile.lean", "Reg/lakefile.toml", "lake-manifest.json"):
+                path = self.root / relative
+                path.parent.mkdir(exist_ok=True)
+                with path.open("a") as file:
+                    file.write("\n")
+                with self.subTest(path=relative):
+                    after = addresses()
+                    self.assertEqual(original["prefix"], after["prefix"])
+                    self.assertNotEqual(original["snapshot_prefix"], after["snapshot_prefix"])
+                    self.assertNotEqual(original["legacy_prefix"], after["legacy_prefix"])
+                    self.assertNotEqual(resume["prefix"], addresses("resume")["prefix"])
+                    original = after
+                    resume = addresses("resume")
+            for path, data in (("lean-toolchain", "other toolchain"),
+                               ("lake-manifest.json", json.dumps({"packages": [{"name": "mathlib", "rev": "b"*40}]}))):
+                (self.root / path).write_text(data)
+                after = addresses()
+                self.assertNotEqual(original["prefix"], after["prefix"])
+                original = after
+            with mock.patch.dict(os.environ, LEAN_OPTS="changed"):
+                self.assertNotEqual(original["prefix"], addresses()["prefix"])
+            current = shards.binding(self.root, "complete")
+            for field in ("os", "arch"):
+                self.assertNotEqual(original["prefix"], shards.index_prefix(dict(current, **{field: "other"})))
+
     def test_resume_separates_producer_and_verification_runs(self):
         self.restore_owner()
         shards = importlib.import_module("lean_actions_shards")
@@ -133,6 +177,9 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
         group = ((name,),)
         key = shards.group_identity(group)
         owner = {"commit": "b" * 40, "ref": "refs/heads/dev", "run": "17", "attempt": "2"}
+        old_binding = dict(schema=shards.SCHEMA, os="linux", arch="arm64", mathlib="a"*40,
+                           runtime="b"*64, config="c"*64, execution="d"*64)
+        new_binding = dict(old_binding, config="1"*64, execution="2"*64)
         source = self.root / module.source
         source.parent.mkdir()
         source.write_text("def fixture := 1\n")
@@ -167,7 +214,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
             required = {key: sorted(compiler_paths), shards.REPORT: sorted(report_paths)}
             old_groups = {key: module_paths, shards.REPORT: report_paths, shards.EXTRAS: extras_paths | aggregate_paths}
             previous = {
-                "binding": {}, "state": "complete", "owner": owner, "layout": {key: group}, "required": required,
+                "binding": old_binding, "state": "complete", "owner": owner, "layout": {key: group}, "required": required,
                 "sources": shards.tracked_sources(self.root, {name: module}),
                 "entries": {group_key: shards.write_payload(self.root, build, paths)
                             for group_key, paths in old_groups.items()},
@@ -177,19 +224,29 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                     for group_key, paths in old_groups.items()
                 },
             }
+            legacy = {field: value for field, value in old_binding.items() if field != "runtime"}
+            index.write_text(json.dumps(dict(previous, binding=legacy)))
+            self.assertEqual(legacy, shards.read_index(index, old_binding, "complete")["binding"])
+            with self.assertRaises(shards.IncompatibleShardBinding):
+                shards.read_index(index, new_binding, "complete", layout_candidate=True)
             index.write_text(json.dumps(previous))
-            previous = shards.read_index(index, {}, "complete")
+            with self.assertRaises(shards.IncompatibleShardBinding):
+                shards.read_index(index, new_binding, "complete")
+            for field in ("schema", "mathlib", "os", "arch", "runtime"):
+                with self.subTest(field=field), self.assertRaises(shards.IncompatibleShardBinding):
+                    shards.read_index(index, dict(new_binding, **{field: "other"}), "complete", layout_candidate=True)
+            previous = shards.read_index(index, new_binding, "complete", layout_candidate=True)
             shutil.rmtree(build)
             self.assertTrue(shards.install(self.root, previous, require_complete=True)["complete"])
             self.assertEqual(module_paths | extras_paths, {path.relative_to(build).as_posix()
                                          for path in build.rglob("*") if path.is_file()})
 
             packed = []
-            record = shards.prepare(self.root, {}, "complete", previous, owner["commit"],
+            record = shards.prepare(self.root, new_binding, "complete", previous, owner["commit"],
                                     available=set(previous["entries"].values()),
                                     deliver=lambda payload, size: packed.append(payload))
             index.write_text(json.dumps(record))
-            record = shards.read_index(index, {}, "complete")
+            record = shards.read_index(index, new_binding, "complete")
             self.assertEqual({key: sorted(module_paths)}, record["required"])
             self.assertEqual(previous["layout"], record["layout"])
             self.assertEqual(previous["entries"][key], record["entries"][key])
