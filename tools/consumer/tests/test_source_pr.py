@@ -26,7 +26,7 @@ class SourcePrTests(unittest.TestCase):
         self.create_sha = self.source
         self.tag_sha = self.source
         self.remote_pin = self.pin
-        self.enterContext(patch.object(source_pr, "release_pin", return_value=self.pin))
+        self.published_pin = self.enterContext(patch.object(source_pr, "release_pin", return_value=self.pin))
         self.read = self.enterContext(patch.object(source_pr, "gh_json", side_effect=self.consumer))
         self.enterContext(patch.object(source_pr, "tools_api", side_effect=self.api))
         self.enterContext(patch.object(source_pr, "open_pulls", side_effect=lambda: self.open))
@@ -67,6 +67,23 @@ class SourcePrTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "differs"):
             source_pr.source_pr(None)
         self.assertEqual([], self.refs)
+
+    def test_workflow_provenance_is_independent_of_release_digest(self):
+        self.reachable.add(self.base)
+        self.remote_pin = dict(self.pin, workflow_sha="9" * 40)
+        self.assertIn("already in", source_pr.source_pr(None))
+        self.remote_pin["workflow_sha"] = "malformed"
+        with self.assertRaisesRegex(ValueError, "workflow_sha"):
+            source_pr.source_pr(None)
+
+    def test_automatic_preview_checks_full_commit_even_with_matching_prefix(self):
+        self.pin = dict(self.pin, version="v1.0.0-dev.g" + self.source)
+        self.published_pin.return_value = self.remote_pin = self.pin
+        self.reachable.add(self.base)
+        self.assertIn("already in", source_pr.source_pr(None))
+        self.tag_sha = self.source[:12] + "f" * 28
+        with self.assertRaisesRegex(ValueError, "different source"):
+            source_pr.source_pr(None)
 
     def test_moved_preview_tag_stops_before_writes(self):
         self.tag_sha = self.tip
@@ -165,6 +182,13 @@ class InventoryTests(unittest.TestCase):
     def test_conflicting_delta_requires_review(self):
         self.commit("three", "conflicting edit")
         self.assertIn("conflict", self.state())
+
+    def test_historical_equivalent_with_current_conflict(self):
+        self.commit("two", "equivalent change")
+        self.commit("three", "later replacement")
+        state = self.state()
+        self.assertIn("patches in dev history", state)
+        self.assertIn("conflict", state)
 
     def test_ancestry_survives_revert(self):
         self.git("merge", "--ff-only", self.head)

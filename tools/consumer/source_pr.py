@@ -60,6 +60,10 @@ def source_pr(lockfile):
         pin = gh_json(f"repos/{CONSUMER}/contents/Meta/tools-release.json?ref={adoption}",
                       "-H", "Accept: application/vnd.github.raw+json")
         provenance = f"The [consumer dev lock](https://github.com/{CONSUMER}/blob/{adoption}/Meta/tools-release.json)"
+    if "workflow_sha" in pin:
+        workflow = pin.pop("workflow_sha")
+        if not isinstance(workflow, str) or not re.fullmatch("[0-9a-f]{40}", workflow):
+            raise ValueError("Invalid workflow_sha in consumer pin")
     tag = pin["version"]
     if release_pin(tag) != pin:
         raise ValueError(f"Consumer pin differs from the published {tag} archive")
@@ -67,8 +71,8 @@ def source_pr(lockfile):
     source = ref["sha"]
     if ref["type"] != "commit" or not re.fullmatch("[0-9a-f]{40}", source):
         raise ValueError(f"Expected {tag} to point to its release commit")
-    preview_sha = re.search(r"\.g([0-9a-f]{12})$", tag)
-    if preview_sha and not source.startswith(preview_sha[1]):
+    _, marker, suffix = tag.rpartition(".g")
+    if marker and (len(suffix) not in (12, 40) or not source.startswith(suffix)):
         raise ValueError(f"Tag {tag} points to a different source commit")
     if contains(source, tools_api("git/ref/heads/dev")["object"]["sha"]):
         return f"{tag} ({source}) is already in {REPOSITORY}/dev history"
@@ -116,14 +120,16 @@ def relationship(repo, dev, base, head):
     # Reapply only this PR's net change; its base may itself be an unmerged feature.
     replay = subprocess.run(["git", "-C", repo, "merge-tree", "--write-tree", "--merge-base=" + fork, dev, head],
                             capture_output=True, text=True)
-    if replay.returncode == 1:
-        return "review (conflict replaying PR delta on dev)"
-    replay.check_returncode()
-    if replay.stdout.strip() == dev_tree:
+    conflict = replay.returncode == 1
+    if not conflict:
+        replay.check_returncode()
+    if not conflict and replay.stdout.strip() == dev_tree:
         return "patch present in current dev"
     patches = git(repo, "cherry", dev, head, fork).splitlines()
     if patches and all(row.startswith("- ") for row in patches):
-        return "patches in dev history; review current difference"
+        return "patches in dev history; review current difference" + (" (replay conflict)" if conflict else "")
+    if conflict:
+        return "review (conflict replaying PR delta on dev)"
     return "distinct PR delta; assess usefulness"
 
 

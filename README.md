@@ -42,7 +42,7 @@ gh workflow run release.yml --ref dev -f source=pr/123
 
 To refresh an expired artifact, rerun the pull request CI or use `gh workflow run ci.yml --ref my-feature` for a branch.
 
-The preview tag contains the channel, run number and source commit. Set the repository variable `TOOLS_RELEASE_SERIES` to choose the version under development (default `0.1.0`).
+Manual preview tags include the channel, workflow run number, and first 12 digits of the source SHA. An automatic dev preview uses `v<series>-dev.g<full-commit-sha>`. Set the repository variable `TOOLS_RELEASE_SERIES` to choose the version under development (default `0.1.0`).
 
 1. Trial the published preview in a consumer checkout with `make install-tools` and `python3 tools/consumer/pin.py <preview-tag>`. The pin command verifies the archive SHA-256 and updates the local `Meta/tools-release.json`.
 2. Submit the tested source for tools `dev` review. From the tools checkout, use the explicit lock path for a proposed adoption. With no argument the command reads the lock already committed to `trureturing/dev`.
