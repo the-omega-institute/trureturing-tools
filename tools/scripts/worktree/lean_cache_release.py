@@ -819,8 +819,11 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
                                                else prune(partition, tag, deadline))
         receipt("publish", "published", tag=tag, pruned=pruned, prune_error=prune_error, **metadata)
     except ImportError as error:
-        receipt("publish", "skipped", reason="POSIX cache locking unavailable: " + str(error))
-        return 1 if verification is not None else 0
+        if error.name == "fcntl":
+            receipt("publish", "skipped", reason="POSIX cache locking unavailable: " + str(error))
+            return 1 if verification is not None else 0
+        receipt("publish", "failed", _error=error, reason=str(error))
+        return 1 if verification is not None else 2
     except (OSError, EOFError, ValueError, TypeError, KeyError, subprocess.SubprocessError, tarfile.TarError) as error:
         receipt("publish", "failed", _error=error, reason=str(error))
         return 1 if verification is not None else (0 if content_validated and not preparing else 2)

@@ -1052,6 +1052,15 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         self.assertIn("fcntl", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_missing_publisher_dependency_fails_after_build_success(self):
+        write(self.bin / "sitecustomize.py", 'import sys\nsys.modules["lean_artifact_inventory"] = None\n')
+        result = self.transport("publish", PYTHONPATH=str(self.bin))
+        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+        self.assertIn('"status":"failed"', result.stdout)
+        self.assertIn("lean_artifact_inventory", result.stdout)
+        self.assertNotIn("POSIX cache locking", result.stdout)
+        self.assertEqual([], list(self.remote.iterdir()))
+
     def test_unavailable_lock_skips_publication_after_build_success(self):
         write(self.bin / "sitecustomize.py", 'import sys\nsys.modules["fcntl"] = None\n')
         result = self.transport("publish", PYTHONPATH=str(self.bin), FAKE_COMPILER_PRESERVE="1")
