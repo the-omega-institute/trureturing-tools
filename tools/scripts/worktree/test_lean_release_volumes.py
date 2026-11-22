@@ -43,6 +43,60 @@ def restore_file_limit(size):
 
 
 class VolumeDownloads(unittest.TestCase):
+    def test_prepare_only_checks_report_without_publishing(self):
+        import lean_cache_release as release
+        import lean_release_sparse as sparse
+
+        with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
+            root = Path(temp)
+            (root / "Makefile").write_text(
+                'check-lean-report:\n\t@echo "$(LEAN_REPORT_CACHE_MISS_POLICY) $(LEAN_REPORT)" > checked\n')
+            stack.enter_context(patch.dict(os.environ, LEAN_CACHE_RELEASE_VOLUMES="1",
+                                          LEAN_CACHE_SPARSE_PLAN="", FULL_BUILD="1"))
+            stack.enter_context(patch.object(release, "partition_path", return_value="fixture"))
+            identity = stack.enter_context(patch.object(release, "publication_identity"))
+            gh = stack.enter_context(patch.object(release, "gh"))
+            args = ["release", "publish", "--indexed", "--prepare-only", "--repository", str(root)]
+            with patch.object(sys, "argv", args), redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(release._main(), 0)
+                self.assertIn('"phase":"report_checked","sparse":false', output.getvalue())
+                self.assertEqual((root / "checked").read_text().strip(),
+                                 "reuse-or-build .lake/build/stratalint/raw-lean-report.json")
+
+                marker = root / release.SPARSE_PLAN
+                marker.parent.mkdir()
+                plan = {"schema": sparse.SCHEMA, "target_commit": "f"*40}
+                marker.write_text(json.dumps(plan))
+                stack.enter_context(patch.object(sparse.compiler, "checkout", return_value="f"*40))
+                with patch.object(sparse, "check_report") as check:
+                    check.return_value.returncode = 0
+                    self.assertEqual(release._main(), 0)
+                    self.assertEqual(check.call_args.args[-1], plan)
+                    self.assertIn('"phase":"report_checked","sparse":true', output.getvalue())
+                    check.return_value.returncode = 17
+                    self.assertEqual(release._main(), 17)
+            marker.write_text(json.dumps(dict(plan, restoring_full=True)))
+            with patch.object(sys, "argv", [arg if arg != "--prepare-only" else "--no-build" for arg in args]):
+                self.assertEqual(release._main(), 2)
+            with patch.object(sys, "argv", args + ["--no-build"]), self.assertRaises(SystemExit) as error:
+                release._main()
+            self.assertEqual(error.exception.code, 2)
+            identity.assert_not_called()
+            gh.assert_not_called()
+
+    def test_stream_progress_counts_actual_bytes_at_bounded_intervals(self):
+        output = io.BytesIO()
+        events = Mock()
+        def emit(selected, writer):
+            for n in selected:
+                writer.write(b"abc")
+                yield n
+        with patch.object(volumes.time, "monotonic", side_effect=[0, 59, 60, 63]):
+            self.assertEqual(list(volumes.stream_frames(emit, range(3), output, "pass", events)), [0, 1, 2])
+        self.assertEqual([e.kwargs for e in events.call_args_list],
+                         [dict(status="started", frames=3, stream_bytes=0),
+                          dict(status="streaming", stream_bytes=6), dict(status="finished", frames=3, stream_bytes=9)])
+
     def test_sparse_report_make_failure_requires_a_bound_compatibility_signal(self):
         from contextlib import nullcontext
         import lean_release_sparse as sparse
@@ -825,6 +879,7 @@ class VolumeReleases(unittest.TestCase):
 
             stack.enter_context(patch.object(release, "gh", side_effect=observed_send))
             encode = stack.enter_context(patch.object(index, "write_frame", wraps=index.write_frame))
+            progress = []
 
             def publish(num, status="published"):
                 suffix = f"ci-{num}-1"
@@ -835,6 +890,8 @@ class VolumeReleases(unittest.TestCase):
                 with redirect_stdout(io.StringIO()) as output:
                     result = release.publish(self.project, partition, build_report=False, indexed=True)
                 events = dict(line.split(" ", 1) for line in output.getvalue().splitlines())
+                progress[:] = [json.loads(line.split(" ", 1)[1]) for line in output.getvalue().splitlines()
+                               if line.startswith("LEAN_CACHE_RELEASE_PROGRESS ")]
                 self.assertEqual(result, 2 if status == "failed" else 0, output.getvalue())
                 self.assertEqual(json.loads(events["LEAN_CACHE_PUBLISH"])["status"], status, output.getvalue())
                 return release.prefix(partition, key, indexed="volumes") + suffix
@@ -845,6 +902,15 @@ class VolumeReleases(unittest.TestCase):
             self.assertEqual((manifest["archive_bytes"], manifest["archive_sha256"]),
                              (expected["archive_bytes"], expected["archive_sha256"]))
             tree = volumes.read_tree(self.pool / tag / volumes.INDEX, manifest)
+            confirmations = [event for event in progress if event["phase"] == "volume_confirmed"]
+            self.assertEqual({event["sha256"]: event["bytes"] for event in confirmations}, tree["volumes"])
+            self.assertEqual(confirmations[-1]["uploaded_bytes"], sum(tree["volumes"].values()))
+            self.assertEqual(confirmations[-1]["existing_bytes"], 0)
+            self.assertEqual([event["sha256"] for event in progress if event["phase"] == "volume_upload_started"],
+                             [event["sha256"] for event in confirmations])
+            self.assertEqual([event["phase"] for event in progress if event["phase"].startswith("snapshot_")],
+                             ["snapshot_draft", "snapshot_verify_draft", "snapshot_promote",
+                              "snapshot_readback", "snapshot_prune"])
             row = tree["members"][1]
             self.assertGreater(len(tree["locations"][1]), 6)
             self.assertEqual(max(n for n, _ in measurements), chunk)
@@ -857,6 +923,10 @@ class VolumeReleases(unittest.TestCase):
             publish(702)
             self.assertEqual([call.args[2] for call in encode.call_args_list], modules)
             self.assertEqual(transfers, [])
+            confirmations = [event for event in progress if event["phase"] == "volume_confirmed"]
+            self.assertTrue(all(event["source"] == "inherited" for event in confirmations))
+            self.assertEqual(confirmations[-1]["existing_bytes"], sum(tree["volumes"].values()))
+            self.assertEqual(confirmations[-1]["uploaded_bytes"], 0)
 
             artifact.write_bytes(random.Random(2).randbytes(6 * chunk))
             confirm = remote.ensure_asset
@@ -873,12 +943,17 @@ class VolumeReleases(unittest.TestCase):
                 failed_tag = publish(703, "failed")
             self.assertEqual(transfers, confirmed)
             self.assertEqual(len(confirmed), 1)
+            self.assertFalse(any(event["phase"] == "volume_confirmed" for event in progress))
             self.assertFalse((self.pool / failed_tag).exists())
             self.assertTrue((self.pool / tag / volumes.MANIFEST).exists())
 
             retry = publish(703)
             self.assertEqual([call.args[2] for call in encode.call_args_list], modules + ["D5.B"])
             self.assertNotIn(confirmed[0], transfers)
+            resumed = next(event for event in progress if event["phase"] == "volume_confirmed"
+                           and event["sha256"] == confirmed[0].rsplit("-", 1)[1])
+            self.assertFalse(resumed["uploaded"])
+            self.assertEqual(resumed["source"], "staged")
             self.assertTrue(transfers)
             manifest = json.loads((self.pool / retry / volumes.MANIFEST).read_bytes())
             tree = volumes.read_tree(self.pool / retry / volumes.INDEX, manifest)

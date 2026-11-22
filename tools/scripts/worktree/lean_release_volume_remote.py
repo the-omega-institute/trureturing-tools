@@ -11,7 +11,7 @@ import tempfile
 import subprocess
 
 import lean_release_index as index
-from lean_cache_release_io import archive_sha, remaining
+from lean_cache_release_io import archive_sha, publish_progress, remaining
 import lean_release_volumes as volumes
 
 SCHEMA = "lean-release-seed-v6"
@@ -83,6 +83,7 @@ def ensure_asset(host, tag, digest, size, source, deadline, *, serialized=False)
         with tempfile.TemporaryDirectory(dir=source.parent) as temp:
             payload = Path(temp) / digest
             os.link(source, payload)
+            publish_progress("volume_upload_started", sha256=digest, bytes=size)
             host.gh(deadline, "release", "upload", tag, str(payload), "--repo", host.REPO)
             uploaded = True
     host.gh(deadline, "release", "edit", tag, "--repo", host.REPO, "--draft=false", "--latest=false")
@@ -126,31 +127,48 @@ def stage_publication(host, root, stage, partition, cache_key, identity, verific
     import lean_release_sparse as sparse
 
     plan = sparse.read_plan(root)
+    publish_progress("predecessor_lookup", sparse=plan is not None)
     if plan is not None:
         prior_stage = stage / "sparse-base"
         prior_stage.mkdir()
         previous = sparse.overlay_base(host, root, prior_stage, partition, cache_key, verification, scope, plan, deadline)
     else:
         previous = published_base(host, scope, partition, cache_key, verification, deadline)
+    publish_progress("predecessor_selected", producer=previous[0]["producer_commit_sha"] if previous else None)
     binding = None
     if old_tag := os.environ.get("LEAN_CACHE_VOLUME_RETIRE_TAG"):
         binding = predecessor_binding(host, partition, cache_key, scope, test_id, identity, old_tag,
                                       previous[0] if previous else None, deadline)
     uploads = []
     confirmed = set()
+    uploaded_bytes = existing_bytes = 0
     pool = volume_prefix(scope)
     serialized = os.environ.get("GITHUB_ACTIONS") == "true" and identity["publication_id"].startswith("ci-")
 
-    def save_part(part, path):
-        digest = part["sha256"]
-        if ensure_asset(host, pool + digest, digest, part["bytes"], path, deadline, serialized=serialized):
+    def confirm_volume(digest, size, path):
+        nonlocal uploaded_bytes, existing_bytes
+        if digest in confirmed:
+            return
+        uploaded = ensure_asset(host, pool + digest, digest, size, path, deadline, serialized=serialized)
+        if uploaded:
             uploads.append(digest)
+            uploaded_bytes += size
+        else:
+            existing_bytes += size
         confirmed.add(digest)
+        publish_progress("volume_confirmed", sha256=digest, bytes=size, uploaded=uploaded,
+                         source="staged" if path is not None else "inherited",
+                         uploaded_volumes=len(uploads), uploaded_bytes=uploaded_bytes,
+                         existing_volumes=len(confirmed) - len(uploads), existing_bytes=existing_bytes)
+
+    def save_part(part, path):
+        confirm_volume(part["sha256"], part["bytes"], path)
 
     prior_requests = prior_bytes = 0
+    publish_progress("volume_inventory", sparse=plan is not None, chunk_bytes=host.CHUNK_BYTES)
     if plan is None:
         contents, tree, written, compact, peak = volumes.pack_volumes(
-            root, stage, previous, host.CHUNK_BYTES, save_part, deadline)
+            root, stage, previous, host.CHUNK_BYTES, save_part, deadline, progress=publish_progress)
     else:
         from lean_release_sparse_pack import pack_overlay
         prior_assets = {}
@@ -160,10 +178,9 @@ def stage_publication(host, root, stage, partition, cache_key, identity, verific
             prior_requests += requests
             prior_bytes += size
         contents, tree, written, compact, peak = pack_overlay(
-            root, stage, previous, plan, host.CHUNK_BYTES, save_part, read_prior, deadline)
+            root, stage, previous, plan, host.CHUNK_BYTES, save_part, read_prior, deadline, progress=publish_progress)
     for digest, size in tree["volumes"].items():
-        if digest not in confirmed:
-            ensure_asset(host, pool + digest, digest, size, None, deadline, serialized=serialized)
+        confirm_volume(digest, size, None)
     volumes.write_tree(stage / volumes.INDEX, tree)
     host.receipt("volume-upload", "saved", new_volumes=uploads,
                  payload_bytes=sum(tree["volumes"][name] for name in uploads),
