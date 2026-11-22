@@ -138,7 +138,7 @@ public static class LeanReportRegistrationFixture
                 },
                 {
                   "optional": true,
-                  "pattern": "tools/lean-inspector/inspect.sh"
+                  "pattern": "tools/scripts/report/lean-report-scoped.sh"
                 },
                 {
                   "optional": true,
@@ -146,7 +146,7 @@ public static class LeanReportRegistrationFixture
                 },
                 {
                   "optional": true,
-                  "pattern": "tools/scripts/report/lean-report.sh"
+                  "pattern": "tools/scripts/report/lean-report-input.sh"
                 },
                 {
                   "optional": true,

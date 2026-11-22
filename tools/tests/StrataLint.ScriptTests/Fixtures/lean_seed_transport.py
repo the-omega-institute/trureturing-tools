@@ -32,7 +32,7 @@ class ReleaseTransportCases(PartitionFixture):
               '{"modules":[],"schema":"stratalint-raw-lean-report-v3"}\n')
         write(self.bin / "make", '''#!/bin/sh
 printf "%s\\n" "$*" >> "$FAKE_BUILD_LOG"
-if [ "$1" = "check-lean-report" ] && [ "${FAKE_BUILD_EXIT:-0}" = "0" ]; then
+if [ "$1" = "lean-cache-prepare" ] && [ "${FAKE_BUILD_EXIT:-0}" = "0" ]; then
     if [ "${FAKE_REPORT_PRESERVE:-0}" != "1" ]; then
         python3 -B "$FAKE_REPORT_FACTORY" write-release-report "$PWD"
     fi
@@ -44,7 +44,8 @@ exit "${FAKE_BUILD_EXIT:-0}"
         helper_dir.mkdir(parents=True, exist_ok=True)
         # Exercise the production shell entry point with its declared transport
         # dependencies in the fixture repository.
-        for name in ("lean-cache-publish.sh", "cache_material.py", "lean_cache.py", "lean_cache_release.py", "lean_cache_release_io.py", "lean_cache_topology.py", "lean_actions.py"):
+        for name in ("lean-cache-publish.sh", "cache_material.py", "lean_cache.py", "lean_cache_release.py", "lean_cache_release_io.py", "lean_cache_topology.py", "lean_actions.py",
+                     "lean_artifact_inventory.py", "lean_release_index.py"):
             shutil.copy2(PUBLISH.with_name(name), helper_dir / name)
         prepare_release_report(self.root)
         shutil.copy2(ROOT / "Makefile", self.root / "Makefile")
@@ -332,7 +333,7 @@ shutil.rmtree = cleanup
         result = self.transport("fetch", FAKE_GH_LOG=str(log))
         self.assertEqual(1, result.returncode, result.stdout + result.stderr)
         calls = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertTrue(any(call[:2] == ["release", "list"] for call in calls),
+        self.assertTrue(any(call[:2] == ["api", "graphql"] for call in calls),
                         '[FAIL] main_fetch_keeps_release_listing')
 
     def separate_git_directory(self):
@@ -498,7 +499,7 @@ def run(args, *rest, **kwargs):
         return original(args, *rest, **kwargs)
     finally:
         # Protected-content queries are instantaneous in this transport-clock fixture.
-        if args[1] != "api" or "/releases/" in args[2]:
+        if args[1] != "api" or args[2] == "graphql" or "/releases/" in args[2]:
             clock += int(os.environ["FAKE_CLOCK_STEP"])
 subprocess.run = run
 ''' + ('os.environ.pop("STRATALINT_LEAN_CACHE_RELEASE_TIMEOUT_SECONDS", None)\n'
@@ -567,7 +568,8 @@ shutil.copytree, lean_cache_release_io.extract_members, pathlib.Path.rename = co
         extracted = next(event for event in events if event["operation"] == "extract")
         self.assertEqual((self.root / ".lake").resolve(), pathlib.Path(extracted["path"]).parent.resolve())
         materials = [event for event in events if event["operation"] == "material"]
-        self.assertEqual(8, len(materials))
+        self.assertEqual({"build/lib/lean/D5/A.olean", "build/lean-inspector/modules/D5.A.zip",
+                          "build/lean-inspector/modules/Trureturing.zip"}, {row["name"] for row in materials})
         for material in materials:
             status = (self.root / ".lake" / material["name"]).stat()
             self.assertEqual((material["device"], material["inode"]), (status.st_dev, status.st_ino))
@@ -936,7 +938,7 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("deadline exhausted", result.stdout)
         self.assertEqual([3, 2, 1], [call["timeout"] for call in self.gh_budgets()])
-        snapshots = [call for call in self.gh_budgets() if call["args"][0] == "api"]
+        snapshots = [call for call in self.gh_budgets() if call["args"][0] == "api" and "/releases/tags/" in call["args"][1]]
         self.assertEqual(1, len(snapshots))
         self.assertIn("502-1", snapshots[0]["args"][1])
         self.assertFalse((self.root / ".lake/build").exists())
@@ -1105,7 +1107,9 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         self.assertEqual([{"name": "lean-build.tgz", "sha256": digest(packed), "bytes": len(packed)}], metadata["parts"])
         with tarfile.open(snapshot / "lean-build.tgz") as archive:
             self.assertEqual(b"locally-produced-olean", archive.extractfile("build/lib/lean/D5/A.olean").read())
-            self.assertEqual(b'{"material":"report-seed"}\n', archive.extractfile(report_path).read())
+            self.assertNotIn(report_path, archive.getnames())
+            self.assertNotIn("build/stratalint/raw-lean-report.json", archive.getnames())
+            self.assertTrue(archive.extractfile("build/lean-inspector/modules/D5.A.zip").read().startswith(b"PK"))
             for path in setup_paths:
                 self.assertNotIn(path, archive.getnames())
                 self.assertEqual("compiler setup", (self.root / ".lake" / path).read_text())
@@ -1116,7 +1120,8 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         restored = self.transport("fetch", GITHUB_SHA="e"*40)
         self.assertEqual(0, restored.returncode, restored.stdout + restored.stderr)
         self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
-        self.assertEqual('{"material":"report-seed"}\n', (self.root / ".lake" / report_path).read_text())
+        self.assertFalse((self.root / ".lake" / report_path).exists())
+        self.assertTrue((self.root / ".lake/build/lean-inspector/modules/D5.A.zip").is_file())
         for path in setup_paths:
             self.assertFalse((self.root / ".lake" / path).exists())
         for path in retained_paths:
@@ -1234,7 +1239,7 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
                 self.assertIn('"status":"failed"', result.stdout)
                 self.assertNotIn('"status":"published"', result.stdout)
                 calls = [json.loads(line) for line in (self.root / "gh.log").read_text().splitlines()]
-                self.assertFalse(any(call[:2] in (["release", "list"], ["release", "delete"]) for call in calls))
+                self.assertFalse(any(call[:2] in (["api", "graphql"], ["release", "list"], ["release", "delete"]) for call in calls))
                 self.assertFalse(any(call[:2] == ["release", "download"] and "lean-build.tgz" in call for call in calls))
 
     def test_draft_or_malformed_exact_metadata_fails_before_create(self):

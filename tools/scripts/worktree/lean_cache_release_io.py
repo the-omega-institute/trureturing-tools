@@ -2,7 +2,83 @@
 
 import contextlib
 import hashlib
+import json
+import re
 import time
+
+INDEXED_SCHEMA = "lean-release-seed-v5"
+INDEXED_ASSET = "lean-members"
+SPARSE_PLAN = ".lake/lean-release-sparse-plan.json"
+
+PRODUCTION_PREFIX = {False: "lean-cache-v2-", True: "lean-cache-v3-", "volumes": "lean-cache-v4-"}
+VERIFICATION_PREFIX = {False: "lean-cache-verify-v1-", True: "lean-cache-verify-v2-", "volumes": "lean-cache-verify-v3-"}
+
+
+def publish_progress(phase, **fields):
+    print("LEAN_CACHE_RELEASE_PROGRESS " + json.dumps({"phase": phase, **fields}, separators=(",", ":")), flush=True)
+
+
+# Lake can reuse Lean and C outputs across arm64 hosts. Linked programs, object
+# files and their Lake freshness sidecars belong to the native toolchain.
+_NATIVE_FILE = re.compile(r'\.(?:o(?:\.export|\.noexport)?|obj|bc|a|lib|so(?:\.\d+)*|dylib|dll|exe)$')
+_MACH_ENDIAN = {
+    b'\xce\xfa\xed\xfe': 'little', b'\xcf\xfa\xed\xfe': 'little',
+    b'\xfe\xed\xfa\xce': 'big', b'\xfe\xed\xfa\xcf': 'big',
+}
+
+
+def native_format(path):
+    with path.open('rb') as stream:
+        header = stream.read(32)
+    if header[:4] == b'\x7fELF' and len(header) >= 20 and header[5] in (1, 2):
+        machine = int.from_bytes(header[18:20], 'little' if header[5] == 1 else 'big')
+        return 'linux', {183: 'arm64', 62: 'x64'}.get(machine, str(machine))
+    if endian := _MACH_ENDIAN.get(header[:4]):
+        cpu = int.from_bytes(header[4:8], endian)
+        return 'darwin', {0x100000c: 'arm64', 0x1000007: 'x64'}.get(cpu, str(cpu))
+    if header[:4] in (b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca', b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'):
+        return 'darwin', None
+    return None
+
+
+def check_native_products(build, source_partition=None, *, staging=False):
+    """Validate a publisher, or invalidate native facets in a private restored build."""
+    from lean_cache import binary_platform
+    system, machine = binary_platform()
+    if system not in ('darwin', 'linux'):
+        return 0
+    host = f'{system}-{machine}'
+    foreign = source_partition is not None and source_partition.rsplit('/', 1)[-1] != host
+    products = []
+
+    def fail(error):
+        raise error
+
+    for directory, _, files in build.walk(on_error=fail):
+        for name in files:
+            if name.endswith(('.hash', '.trace', '.rsp')):
+                continue
+            named_native = _NATIVE_FILE.search(name) is not None
+            if not named_native and directory.name != 'bin':
+                continue
+            path = directory / name
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f'invalid native Lake product: {path.relative_to(build)}')
+            fmt = native_format(path)
+            if not named_native and fmt is None:
+                continue
+            products.append(path)
+            if fmt and (fmt[0] != system or (fmt[1] is not None and fmt[1] != machine)):
+                if not staging:
+                    raise ValueError(f'foreign native Lake product for {host}: {path.relative_to(build)}')
+                foreign = True
+    if not foreign or not staging:
+        return 0
+    for path in products:
+        path.unlink()
+        for suffix in ('.hash', '.trace', '.rsp'):
+            path.with_name(path.name + suffix).unlink(missing_ok=True)
+    return len(products)
 
 
 class OperationBudget:
@@ -32,11 +108,12 @@ def remaining(deadline):
 
 class MultipartArchiveOutput:
     """Stage one gzip stream without retaining a second copy of its parts."""
-    def __init__(self, stage, name, chunk_bytes, deadline):
+    def __init__(self, stage, name, chunk_bytes, deadline, *, on_part=None):
         if chunk_bytes <= 0:
             raise ValueError("archive part size must be positive")
         self.stage, self.name = stage, name
         self.chunk_bytes, self.deadline = chunk_bytes, deadline
+        self.on_part = on_part
         self.output = None
         self.failure = None
         self.parts = []
@@ -63,7 +140,11 @@ class MultipartArchiveOutput:
         finally:
             output.close()
         remaining(self.deadline)
-        self.parts.append({"name": self.path.name, "sha256": self.part_hash.hexdigest(), "bytes": self.part_bytes})
+        part = {"name": self.path.name, "sha256": self.part_hash.hexdigest(), "bytes": self.part_bytes}
+        self.parts.append(part)
+        if self.on_part is not None:
+            self.on_part(part, self.path)
+            self.path.unlink(missing_ok=True)
 
     def tell(self):
         return self.archive_bytes
@@ -106,7 +187,7 @@ class MultipartArchiveOutput:
         self._close_part()
         if not self.archive_bytes:
             raise ValueError("archive must fit in 1 to 100 parts")
-        if len(self.parts) == 1:
+        if self.on_part is None and len(self.parts) == 1:
             self.path.rename(self.stage / self.name)
             self.parts[0]["name"] = self.name
         remaining(self.deadline)

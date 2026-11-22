@@ -204,7 +204,7 @@ def prebuilt_workspace(root, *command):
 def regenerate(root, *command):
     """Explicit report-only rebuild, called inside lean-cache-run's writer guard.
 
-    Remove generated report leaves, traces and the aggregate, retaining native
+    Remove generated report artifacts and traces, retaining native
     program directories and compiler input projections. Mathematical Lean and
     dependency build directories lie outside this report state. Only report ZIP
     facets bypass content-store lookup during regeneration.
@@ -237,10 +237,8 @@ def write_if_changed(path, data):
 
 
 @phase('native-inputs')
-def prepare(root, scope="full"):
+def prepare(root):
     root = Path(root).resolve()
-    if scope not in ("full", "module-records"):
-        raise ValueError('unknown native input preparation scope')
     with phase('native-input-selection'):
         inputs = selection.Selection(root)
         inputs.validate('lean-report')
@@ -291,41 +289,17 @@ def prepare(root, scope="full"):
             utility = [by_path[path]] if path in by_path else []
             records[name] = dict(utilities=utility,
                 claims=sorted({u['claimModule'] for u in utility}), source_path=path)
-            if scope == "full":
-                write_if_changed(state(root) / 'inputs' / (name + '.json'),
-                    materials.canonical_json(records[name]))
         write_if_changed(state(root) / 'report-format',
             (selection.REPORT_FORMAT + '\n').encode('ascii'))
-        if scope == "module-records":
-            # Lake writes only the records of modules whose facets it fetches.
-            # This invocation input is never an artifact reuse condition.
-            write_if_changed(state(root) / 'module-inputs.json', materials.canonical_json(dict(
-                modules=sorted(modules), configs=inputs.expand('config_inputs'),
-                records={name: materials.canonical_json(record).decode('ascii')
-                         for name, record in records.items()})))
-            return
-    # Membership and full config identity affect aggregation only. Each module
-    # traces compatibility, source, utility inputs and Lake's compiler dependencies.
-    with phase('native-input-coordinates'):
-        write_if_changed(state(root) / 'inputs.json', materials.canonical_json({
-            'modules': sorted(modules),
-            'configs': inputs.expand('config_inputs'),
-            'coordinates': None if scope_file else public.coordinates(root)}))
-
-
-def aggregate_inputs(root):
-    """Produce aggregate coordinates only for the package report consumer."""
-    root = Path(root)
-    config = public.read_json((state(root) / 'module-inputs.json').read_bytes())
-    with phase('native-input-coordinates'):
-        write_if_changed(state(root) / 'inputs.json', materials.canonical_json(dict(
-            modules=config['modules'], configs=config['configs'], coordinates=public.coordinates(root))))
+        # Lake writes only the records of modules whose facets it fetches.
+        write_if_changed(state(root) / 'module-inputs.json', materials.canonical_json(dict(
+            modules=sorted(modules), configs=inputs.expand('config_inputs'),
+            records={name: materials.canonical_json(record).decode('ascii')
+                     for name, record in records.items()})))
 
 
 @lru_cache(maxsize=None)
 def source_inventory(root):
-    # Expanded once per native invocation, never mixed into the aggregate
-    # trace: adding an unused producer helper is still a compatible change.
     inputs = selection.Selection(root)
     return set(inputs.dependency_sources())
 
@@ -596,15 +570,13 @@ def produce_batch(requests):
 @phase('native-batch')
 def batch(request_file):
     requests = public.read_json(Path(request_file).read_bytes())
-    produce = [args for kind, args in requests if kind == 'produce']
+    if any(kind != 'produce' for kind, _ in requests):
+        raise ValueError('unknown native batch operation')
+    produce = [args for _, args in requests]
     if produce:
         with phase('native-produce'):
             produce_batch(produce)
-    for kind, args in requests:
-        if kind == 'aggregate':
-            aggregate(*args)
-        elif kind != 'produce':
-            raise ValueError('unknown native batch operation')
+
 
 
 def aggregate_module(name, artifact, report_stream, material_spool, material_offsets):
@@ -646,12 +618,9 @@ def aggregate_module(name, artifact, report_stream, material_spool, material_off
     return origin, declarations
 
 
-def aggregate(root, output, *artifacts, config=None, schema=materials.REPORT_SCHEMA,
-              write_sidecars=public.write_sidecars):
+def aggregate(root, output, *artifacts, config, schema, write_sidecars):
     """Concatenate module artifacts that were validated when produced."""
     root, output = Path(root), Path(output)
-    if config is None:
-        config = public.read_json((state(root) / 'inputs.json').read_bytes())
     if len(artifacts) != len(config['modules']):
         raise ValueError('native aggregate membership mismatch')
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -732,42 +701,17 @@ def validate_module(report, root, name, utility, *, verified_materials=None, tem
     return rows, origin
 
 
-def publish(root, destination, snapshot=None):
-    import reuse
-    repository, output = Path(root), Path(destination)
-    with reuse.publication_guard(repository, output):
-        identity = _publish(root, destination)
-        if snapshot is not None:
-            reuse._seal(repository, output, public.read_json(Path(snapshot).read_bytes()), identity)
-
-
-def _publish(root, destination):
-    inputs = public.coordinates(root)
-    with tempfile.TemporaryDirectory(prefix='.publish.', dir=state(root)) as directory:
-        report = public.unpack(state(root) / 'report.zip', directory)
-        activity_file = os.environ.get('STRATALINT_INSPECTOR_ACTIVITY')
-        mode = None
-        if activity_file:
-            records = [public.read_json(line) for line in Path(activity_file).read_text().splitlines()]
-            mode = 'produced' if records else 'cached'
-            print(f'LEAN_INSPECTOR_WORK extracted_modules={sum(row["count"] for row in records if row["kind"] == "extract")} aggregates={sum(row["count"] for row in records if row["kind"] == "aggregate")}')
-        # Lake traced this aggregate of production-validated rows.
-        identity = public.publish(report, Path(destination), inputs, root, mode=mode, validate=False)
-    print(f'RAW_LEAN_REPORT path={destination} sha256={public.digest(Path(destination))}')
-    return identity
-
-
 def main():
     if sys.argv[1:] == ['batch-size']:
         print(f'LEAN_INSPECTOR_BATCH_MODULES {batch_modules()}')
         return
-    actions = {'prepare': prepare, 'aggregate-inputs': aggregate_inputs,
+    actions = {'prepare': prepare,
                'module': module,
-               'aggregate': aggregate, 'publish': publish, 'batch': batch,
+               'batch': batch,
                'regenerate': regenerate, 'prebuilt-workspace': prebuilt_workspace,
                'check-workspace-producer': check_workspace_producer}
     if len(sys.argv) < 2 or sys.argv[1] not in actions:
-        raise ValueError('expected prepare, module, aggregate, publish, or batch')
+        raise ValueError('expected a native module report operation')
     with phase('native-' + sys.argv[1]):
         actions[sys.argv[1]](*sys.argv[2:])
 

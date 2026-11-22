@@ -91,6 +91,15 @@ def check_scope(repository, scope, roots=None):
     return selection
 
 
+def runtime_targets(names):
+    targets = set()
+    # The registry is needed by scopes with typed audit inputs.
+    if names.intersection({'LeanInformationAuditInterface.Contract.Catalog',
+                           'LeanInformationAuditInterface.Contract.Registration'}):
+        targets.add('+LeanInformationAudit.TemplateEnrollment')
+    return targets
+
+
 def preparation_targets(scope):
     roots = scope['roots']
     # Lake builds imports transitively. Keep external utility roots even when
@@ -100,10 +109,7 @@ def preparation_targets(scope):
     names = {row['module'] for row in dependencies}
     # A bare Lake target can name an entire library with the same name.
     targets = {'+' + name for name in (names - imported) | set(roots)}
-    # The registry is needed by scopes with typed audit inputs.
-    if names.intersection({'LeanInformationAuditInterface.Contract.Catalog',
-                           'LeanInformationAuditInterface.Contract.Registration'}):
-        targets.add('+LeanInformationAudit.TemplateEnrollment')
+    targets.update(runtime_targets(names))
     return sorted(targets)
 
 
@@ -301,9 +307,9 @@ def produce(entry, output, scope, utilities):
         modules=[row['module'] for row in scope['modules']], coordinates=before),
         schema=SCHEMA, write_sidecars=write_sidecars)
     report = public.unpack(aggregate, entry.temporary)
-    def validator(report, expected, repository, **_):
-        validate_bundle(report, repository, scope, utilities=utilities, expected=expected)
-    public.publish(report, output, before, entry.root, validator=validator)
+    def validator(staged):
+        validate_bundle(staged, entry.root, scope, utilities=utilities, expected=before)
+    public.publish(report, output, validator=validator)
     work = [public.read_json(line) for line in (entry.logs / 'module-work.jsonl').read_text().splitlines()]
     extracted = sorted({row['module'] for row in work if row['operation'] == 'extract'})
     compiled = compiled_modules(entry.root, entry.logs)

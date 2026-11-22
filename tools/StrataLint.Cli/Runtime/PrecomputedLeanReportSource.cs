@@ -9,11 +9,8 @@ internal sealed class PrecomputedLeanReportSource(string repositoryRoot) : ILean
 {
     private readonly string reportPath = LeanCompiledArtifactReports.ResolveReportPath(repositoryRoot);
 
-    public LeanAxiomReport Load(RepositorySnapshot snapshot) =>
-        RawLeanReportArtifact.ReadFile(reportPath, snapshot);
-
     public LeanAxiomReport Load(LeanReportScope scope) =>
-        RawLeanReportArtifact.ReadFileForScopeOrFull(reportPath, scope);
+        RawLeanReportArtifact.ReadFileForScope(reportPath, scope, validateMaterials: true);
 
     internal CapturedBundle Capture() => new(repositoryRoot, reportPath);
 
@@ -23,12 +20,6 @@ internal sealed class PrecomputedLeanReportSource(string repositoryRoot) : ILean
         private readonly string directory = Path.Combine(Path.GetTempPath(), "stratalint-report-consumer-" + Guid.NewGuid().ToString("N"));
         private string ReportPath => Path.Combine(directory, Path.GetFileName(sourcePath));
         private string? targets;
-
-        public LeanAxiomReport Load(RepositorySnapshot snapshot)
-        {
-            CaptureFiles();
-            return RawLeanReportArtifact.ReadFile(ReportPath, snapshot);
-        }
 
         public LeanAxiomReport Load(LeanReportScope scope)
         {

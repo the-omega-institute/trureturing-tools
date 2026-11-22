@@ -39,13 +39,11 @@ macOS 内存读数中,5.03 GB RSS 总量对应 25% 内存空闲比例;二者不�
 elaborate 失败时 Lean 可插入 `sorryAx`,因此源码中 `sorry` 计数为 0 不能证明构建成功。
 编译读数(采集时点:2026-09-11):模块 125 行、`sorry` 计数 0,`make lean` EXIT=2,
 定理的 axiom 闭包含 `sorryAx`。
-判绿只认构建退出码;`make lean-report` 会打印 axiom 闭包,出现 `sorryAx` 即未证完。
+判绿只认构建退出码;定向报告记录 axiom 闭包,出现 `sorryAx` 即未证完。
 
 ## 开 PR 前核验变更范围的 Scribe 内容
 
     make emit
-    bash tools/scripts/workflow/scribe-content-checks.sh \
-      .lake/build/stratalint/raw-lean-report.json \
-      tools/StrataLint.Scribe/bin/Release/net10.0/StrataLint.Scribe.dll "$PATHS_FILE"
+    make test BASE="$BASE"
 
-第三参数为本次变更路径清单，支持换行或 NUL 分隔。判绿只认命令退出码。
+判绿只认命令退出码。

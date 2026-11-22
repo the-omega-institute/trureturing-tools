@@ -192,8 +192,8 @@ public sealed class FaultInjectionTests
     {
         var admitted = CreateAdmission();
         var exit = CliApplication.Run(
-            new[] { "check" },
-            new StubCliEnvironment(admitted),
+            new[] { "check-delta" },
+            new StubCliEnvironment(admitted, checkDelta: new ExplicitCommandResult(0, "write output", "")),
             new ThrowingConsole());
 
         Assert.NotEqual(0, exit);

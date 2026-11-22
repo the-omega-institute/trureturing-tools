@@ -49,6 +49,8 @@ def check(*arguments):
 
 
 def standalone():
+    check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/worktree",
+          "-p", "test_lean_compile_layers.py")
     for name in STANDALONE:
         check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly",
               f"tools/tests/{name}/{name}.csproj", "--no-build")
@@ -114,6 +116,7 @@ def contract(shard):
         for name in selected:
             test_project(name)
         if shard == "0":
+            check(sys.executable, "-B", "tools/scripts/worktree/test_lean_release_volumes.py")
             check("make", "-C", "tools", "selftest")
             check("bash", "tools/scripts/workflow/ci-entry-test.sh")
             check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/workflow", "-p", "test_ci_*.py")

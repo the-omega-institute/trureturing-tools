@@ -36,7 +36,7 @@ def declaration():
             'tools/lean-inspector-interface/lakefile.toml',
             'tools/lean-inspector-interface/lake-manifest.json'),
         producer_scopes={
-            'lean-report': paths(MANIFEST, LOADER, INPUT, 'tools/lean-inspector/inspect.sh',
+            'lean-report': paths(MANIFEST, LOADER, INPUT, 'tools/scripts/report/lean-report-scoped.sh',
                 'tools/lean-inspector/native.py', 'tools/lean-inspector/materials.py', 'Engine/**/*.cs'),
             'scribe-content': dict(include=[spec('Blueprint/**/*.scribe.cs', True)], exclude=[])})
 
@@ -60,7 +60,7 @@ class Contract(unittest.TestCase):
                 'Blueprint/Probe.scribe.cs': '// document\n'}.items():
             self.write(path, text)
         for relative in (LOADER, INPUT, 'tools/scripts/worktree/lean-cache-input.sh',
-                'tools/lean-inspector/inspect.sh', 'tools/lean-inspector/native.py',
+                'tools/scripts/report/lean-report-scoped.sh', 'tools/lean-inspector/native.py',
                 'tools/lean-inspector/materials.py', 'tools/scripts/lib/resource-observation-lib.sh'):
             self.write(relative, (ROOT / relative).read_text())
         self.save()

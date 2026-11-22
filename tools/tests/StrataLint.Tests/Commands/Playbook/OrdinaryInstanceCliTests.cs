@@ -24,8 +24,8 @@ public sealed partial class OrdinaryInstanceCliTests
         var repository = new FakeRepositoryGateway(RawChangeSet.Create(paths), raw, Raw(fixture.Baseline));
         var console = new BufferedConsole();
 
-        var exit = CliApplication.Run(["check", "--candidate-lean-report", reportPath],
-            new ProductionCliEnvironment("/repo", repository, new FakeLeanReportSource(null)), console);
+        var environment = new ProductionCliEnvironment("/repo", repository, new FakeLeanReportSource(null));
+        var exit = CliApplication.RenderAdmission(environment.Check(["--candidate-lean-report", reportPath]), console);
 
         Assert.True(exit == 1, console.Output + console.Error);
         Assert.Contains("UTILITY-ORDINARY-INSTANCE-BANNED", console.Output, StringComparison.Ordinal);

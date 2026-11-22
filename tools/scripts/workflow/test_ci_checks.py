@@ -35,7 +35,7 @@ class CheckTests(unittest.TestCase):
                 self.assertIn(["pr-lean", "D5/changed.lean"], calls)
                 self.assertFalse(any(call[:2] == ["make", "lean-report"] for call in calls))
 
-    def test_hosted_setup_uses_actual_targets_programs_and_selected_lean_suites(self):
+    def test_hosted_setup_uses_actual_targets_and_programs(self):
         data, _ = contract.load(ROOT)
         plan = contract.selection(data, ["README.md"], "push")
         for targets, programs, needs in (([], [], False), (["D5.A"], [], True), ([], ["Audit"], True)):
@@ -126,7 +126,8 @@ class CheckTests(unittest.TestCase):
                         return subprocess.CompletedProcess(command, current_exit if command[2] == "check-current" else delta_exit)
                     return subprocess.CompletedProcess(command, 0)
                 scope_file = Path(temp) / "scope"
-                scope_file.write_text(json.dumps({"programs": programs, "targets": targets, "paths": [], "definitions": {}}))
+                scope_file.write_text(json.dumps({"programs": programs, "targets": targets, "paths": [],
+                    "definitions": {}, "cache_suites": ["source-evidence", "compiled-audit"]}))
                 with patch.object(ci_pr_lean, "plan_scope", side_effect=AssertionError("scope planned twice")), \
                         patch.dict(os.environ, GITHUB_EVENT_NAME=event, STRATALINT_LEAN_PRODUCER_DLL=supplied), \
                         patch.object(ci_pr_lean.subprocess, "run", side_effect=run), \
@@ -370,6 +371,126 @@ class CheckTests(unittest.TestCase):
 
 
 class ScopedReportTests(unittest.TestCase):
+    def test_cached_scope_uses_the_planned_report_and_program_roots(self):
+        import ci_pr_lean as lean
+
+        base = "a" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            changed, plan = root / "paths", root / "plan.json"
+            contract.write_paths(changed, ["Meta/tools-release.json"])
+            selected = {"programs": ["Inspector.Feature"], "targets": ["D5.Owner"]}
+            with patch.object(lean.subprocess, "run", return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=json.dumps(selected))) as scribe:
+                plan.write_text(json.dumps(lean.plan_scope(changed, base)))
+                self.assertEqual(scribe.call_args.args[0],
+                    [*lean.SCRIBE, "lean-inputs", "--affected", "--paths-from", str(changed), "--base", base])
+            command = [sys.executable, lean.__file__, str(changed), "--read-plan", str(plan), "--cache-targets"]
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.split(), ["D5.Owner", "Inspector.Feature"])
+            plan.write_text(json.dumps({"programs": [], "targets": []}))
+            self.assertEqual(subprocess.check_output(command), b"")
+            plan.write_text(json.dumps({"programs": [], "targets": ["not a module"]}))
+            self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+
+    def test_saved_cache_plan_expands_selected_libraries_and_resolves_programs(self):
+        import ci_pr_lean as lean
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+
+            def write(path, contents=""):
+                file = root / path
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text(contents)
+
+            write("lakefile.toml", 'name = "project"\n')
+            write("Reg/lakefile.toml", 'name = "reg"\nbuildDir = "../.lake/build/reg"\n')
+            write("tools/lean-inspector-interface/lakefile.toml",
+                'name = "interface"\nbuildDir = "../../.lake/build/interface"\n')
+            write("tools/lean-inspector-reg/lakefile.toml", """
+name = "regInspector"
+buildDir = "../../.lake/build/inspection"
+[[lean_lib]]
+name = "LeanInformationAuditRegTests"
+roots = ["Audit"]
+globs = ["Audit.*", "AuditOnly"]
+[[lean_exe]]
+name = "compiledJudgeTests"
+root = "Audit.Main"
+""")
+            write("tools/lean-inspector/lakefile.lean", """
+lean_exe reportInspector where
+  root := `Producer
+  supportInterpreter := true
+
+lean_exe inputDiscovery where
+  root := `Producer.Discover
+""")
+            for source in ("Audit", "Audit/Main", "Audit/Deep/Case", "AuditOnly", "AuditOther",
+                           "Producer", "Producer/Discover", "Program", "reportInspector"):
+                write(f"tools/lean-inspector/{source}.lean")
+            for source in ("D5/S3/Fourier/IntegerCharacterCoercivity",
+                           "D5/S3/TotalVariation/PrimitiveBridgeCancellation"):
+                write(source + ".lean")
+                write("Reg/" + source + ".lean")
+            write("tools/lean-inspector-interface/LeanInformationAuditInterface/Contract/Registration.lean")
+            write("tools/lean-inspector/LeanInformationAudit/TemplateEnrollment.lean")
+            write("D5/WithRuntime.lean", "import LeanInformationAuditInterface.Contract.Registration\n")
+            write("bin/lean", """#!/usr/bin/env python3
+import json
+from pathlib import Path
+import sys
+assert sys.argv[1:] == ["--deps-json", "--stdin"]
+headers = []
+for path in sys.stdin.read().splitlines():
+    imports = [dict(module=line.split()[1]) for line in Path(path).read_text().splitlines() if line.startswith("import ")]
+    headers.append(dict(errors=[], result=dict(imports=imports)))
+print(json.dumps(dict(imports=headers)))
+""")
+            (root / "bin/lean").chmod(0o755)
+            write("D5/Scoped.lean")
+            write("D5/NamedExample.lean")
+            write("bin/dotnet", """#!/usr/bin/env python3
+import json
+import sys
+assert sys.argv[2:5] == ["lean-utility-input", "--modules", "--targets"]
+roots = sys.argv[5].split()
+print(json.dumps(roots + (["D5.NamedExample"] if "D5.Scoped" in roots else [])))
+""")
+            (root / "bin/dotnet").chmod(0o755)
+            env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"])
+
+            targets_file = root / "targets"
+            command = [sys.executable, "-B", lean.__file__, "changed", "--read-plan", "plan", "--cache-targets"]
+
+            def restored(suites, targets=(), programs=()):
+                write("plan", json.dumps(dict(targets=targets, programs=programs, cache_suites=suites)))
+                with targets_file.open("w") as output:
+                    subprocess.run(command, cwd=root, env=env, check=True, stdout=output)
+                modules = targets_file.read_text().split()
+                self.assertEqual(modules, sorted(set(modules)))
+                return set(modules)
+
+            report_programs = {"Producer", "Producer.Discover"}
+            audit = report_programs | {"Audit", "Audit.Main", "Audit.Deep.Case", "AuditOnly"}
+            evidence = report_programs | {
+                "D5.S3.Fourier.IntegerCharacterCoercivity", "Reg.D5.S3.Fourier.IntegerCharacterCoercivity",
+                "D5.S3.TotalVariation.PrimitiveBridgeCancellation", "Reg.D5.S3.TotalVariation.PrimitiveBridgeCancellation",
+            }
+            self.assertEqual(restored(["compiled-audit"]), audit)
+            self.assertEqual(restored(["source-evidence"]), evidence)
+            self.assertEqual(restored(["source-evidence", "compiled-audit"],
+                ["D5.Scoped"], ["Program"]), evidence | audit | {"D5.Scoped", "D5.NamedExample", "Program"})
+            self.assertEqual(restored([], ["D5.Scoped"]), report_programs | {"D5.Scoped", "D5.NamedExample"})
+            self.assertEqual(restored([], ["D5.WithRuntime"]), report_programs | {
+                "D5.WithRuntime", "LeanInformationAudit.TemplateEnrollment"})
+            self.assertEqual(restored([], programs=["D5.WithRuntime"]), {"D5.WithRuntime"})
+            self.assertEqual(restored([], programs=["Program"]), {"Program"})
+            self.assertEqual(restored([]), set())
+            self.assertEqual(targets_file.read_bytes(), b"")
+
     def test_empty_scope_has_no_build_and_large_scopes_keep_scribe_inputs_together(self):
         from ci_pr_lean import report_batches
         self.assertEqual(list(report_batches({"targets": []})), [])

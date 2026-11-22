@@ -79,30 +79,16 @@ public sealed partial class FileMapPolicyTests(CanonicalFileMapFixture fixture)
     [Fact]
     public void ComputationalProjectionsHaveCanonicalFileMapEntries()
     {
-        var expectedPaths = new HashSet<string>(
-            [
-                GeneratedArtifactInventory.ScribeAttestation.Path,
-                "Generated/truth-graph.v1.json",
-            ],
-            StringComparer.Ordinal);
         var root = TestRepositoryLayout.FindRoot();
         var manifest = FileMapLoader.LoadRepository(root);
-        // 与发射器产物身份的一致性,不判语料内容。故喂一条与下方 manifest.Match 同一字面的
-        // 文档路径即可:六个固定工件与文档集无关,文档分区只需一个同形路径。
         var inventory = GeneratedArtifactInventory.Create(
             ["Blueprint/D5/S0/Carrier/Ring.md"]);
-        var artifacts = inventory
-            .Where(artifact => expectedPaths.Contains(artifact.Path))
-            .ToArray();
+        var attestation = Assert.Single(inventory, artifact => artifact == GeneratedArtifactInventory.ScribeAttestation);
+        var attestationEntry = Assert.Single(manifest.Match(attestation.Path));
+        Assert.Equal(FileMapKind.Generated, attestationEntry.Kind);
+        Assert.Equal(attestation.Producer, attestationEntry.ProducedBy);
+        Assert.Contains(attestation.Producer, attestationEntry.VerifiedBy, StringComparer.Ordinal);
 
-        Assert.Equal(expectedPaths.Count, artifacts.Length);
-        Assert.All(artifacts, artifact =>
-        {
-            var entry = Assert.Single(manifest.Match(artifact.Path));
-            Assert.Equal(FileMapKind.Generated, entry.Kind);
-            Assert.Equal(artifact.Producer, entry.ProducedBy);
-            Assert.Contains(artifact.Producer, entry.VerifiedBy, StringComparer.Ordinal);
-        });
         const string pattern = "Blueprint/D5/S0/**/*.md";
         var entry = Assert.Single(manifest.Match("Blueprint/D5/S0/Carrier/Ring.md"));
 

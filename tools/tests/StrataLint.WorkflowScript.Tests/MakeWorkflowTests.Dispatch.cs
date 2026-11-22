@@ -52,7 +52,7 @@ public sealed partial class MakeWorkflowTests
         foreach (var target in expectedTargets)
         {
             Assert.Matches(new Regex($"(?m)^{Regex.Escape(target)}:", RegexOptions.CultureInvariant), makefile);
-            Assert.InRange(RecipeCount(makefile, target), 0, 1);
+            Assert.InRange(RecipeCount(makefile, target), 0, target == "test" ? 2 : 1);
         }
 
         Assert.Contains("build: lean", makefile, StringComparison.Ordinal);
@@ -60,10 +60,9 @@ public sealed partial class MakeWorkflowTests
         // `scribe-strip` is not a supported target or help entry.
         Assert.DoesNotContain("scribe-strip", makefile, StringComparison.Ordinal);
         Assert.DoesNotContain("strip-scribe-receipts", makefile, StringComparison.Ordinal);
-        // make test 是薄委托;数学门链条的唯一真源在 math-gate.sh 里,断言脚本本体。
-        var mathematicalTestRecipe = Recipe(makefile, "test");
+        var mathematicalTestRecipe = string.Join('\n', RecipeLines(makefile, "test"));
         Assert.DoesNotContain("dotnet test", mathematicalTestRecipe, StringComparison.Ordinal);
-        Assert.Contains("make check-lean-report", mathematicalTestRecipe, StringComparison.Ordinal);
+        Assert.Contains("ci_pr_lean.py", mathematicalTestRecipe, StringComparison.Ordinal);
         Assert.Equal(
             $"\t@/bin/bash {LeanCacheEnsureScriptPath}",
             Recipe(makefile, "lean-cache-ensure"));
@@ -93,20 +92,7 @@ public sealed partial class MakeWorkflowTests
         }
         var leanRecipe = Recipe(makefile, "lean");
         Assert.Equal($"\t@/bin/bash {LeanCacheRunScriptPath} --build $(LEAN_TARGETS)", leanRecipe);
-        Assert.Contains(LeanReportScriptPath, Recipe(makefile, "lean-report"), StringComparison.Ordinal);
-        var inspector = File.ReadAllText(Path.Combine(root, "tools", "lean-inspector", "inspect.sh"));
-        Assert.DoesNotContain("run_phase cache-get", inspector, StringComparison.Ordinal);
-        Assert.DoesNotContain("run_phase report \"$LAKE\"", inspector, StringComparison.Ordinal);
-        Assert.Contains(LeanCacheRunScriptPath, inspector, StringComparison.Ordinal);
-        Assert.Contains("REPORT_COMMAND=()", inspector, StringComparison.Ordinal);
-        Assert.Contains("if [[ \"$REGENERATE_REPORT_ARTIFACTS\" == 1 ]]; then", inspector, StringComparison.Ordinal);
-        Assert.Contains("REPORT_COMMAND=(python3 -B \"$SCRIPT_DIR/native.py\" regenerate \"$REPOSITORY\")", inspector, StringComparison.Ordinal);
-        var reportPhase = Assert.Single(
-            inspector.Split('\n'),
-            static line => line.StartsWith("run_phase report ", StringComparison.Ordinal));
-        Assert.Equal(
-            $"run_phase report \"$REPOSITORY/{LeanCacheRunScriptPath}\" --prebuilt ${{REPORT_COMMAND[@]+\"${{REPORT_COMMAND[@]}}\"}} \"$LAKE\" --log-level=error \"${{workspace[@]}}\" build :report",
-            reportPhase);
+        Assert.Contains("build_inputs.py prepare-cache", Recipe(makefile, "lean-cache-prepare"), StringComparison.Ordinal);
 
         int EnsureDependency(string target)
         {
@@ -145,9 +131,6 @@ public sealed partial class MakeWorkflowTests
             StringComparison.Ordinal);
         Assert.Contains("scribe-release-publish: export TARGET ?=", makefile, StringComparison.Ordinal);
         Assert.Contains("scribe-release-fetch: export DIGEST ?=", makefile, StringComparison.Ordinal);
-        Assert.Equal(
-            $"\t@/bin/bash {ReanchorScriptPath} \"$(BASE)\" \"$$REANCHOR_OLD_REPORT\"",
-            Recipe(makefile, "mathlib-reanchor"));
         var gateRecipe = string.Join('\n', RecipeLines(makefile, "gate"));
         Assert.Contains("tools/scripts/local-harness-gate.sh", gateRecipe, StringComparison.Ordinal);
         var worktreeRecipe = Recipe(makefile, "worktree");
@@ -248,7 +231,7 @@ public sealed partial class MakeWorkflowTests
         foreach (var target in ToolsTargets)
         {
             Assert.Matches(new Regex($"(?m)^{Regex.Escape(target)}:", RegexOptions.CultureInvariant), makefile);
-            Assert.InRange(RecipeCount(makefile, target), 0, 1);
+            Assert.InRange(RecipeCount(makefile, target), 0, target == "test" ? 2 : 1);
         }
 
         Assert.Contains("$(HERE)/scripts/dotnet-build.sh", Recipe(makefile, "dotnet"), StringComparison.Ordinal);
@@ -455,11 +438,9 @@ public sealed partial class MakeWorkflowTests
 
         Assert.Equal(0, rootResult.ExitCode);
         var rootOutput = System.Text.Encoding.UTF8.GetString(rootResult.StandardOutput);
-        Assert.Contains("make test FULL_BUILD=1  Run check-lean-report and check-current", rootOutput, StringComparison.Ordinal);
+        Assert.Contains("make lean-cache-prepare FULL_BUILD=1", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make gate [BASE=origin/dev] [PURPOSE=pull-request|push]  Run all applicable shared CI checks", rootOutput, StringComparison.Ordinal);
-        Assert.Contains("make lean-report FULL_BUILD=1 [REBUILD_REPORT_CACHE=1 | REGENERATE_REPORT_ARTIFACTS=1]  Inspect prebuilt Lean artifacts; regenerate discards generated reports", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make lean-report-scoped LEAN_TARGETS=", rootOutput, StringComparison.Ordinal);
-        Assert.Contains("make dag DIGEST=HEX64 [PREFIX=scribe-resources]  Fetch a published full Scribe pack and render the DAG", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make filemap  Render FILEMAP on demand from Meta/FILEMAP.toml", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make scribe-release  Rebuild and verify local Scribe release assets", rootOutput, StringComparison.Ordinal);
         Assert.Contains("make scribe-release-publish TARGET=COMMIT [PREFIX=scribe-resources]", rootOutput, StringComparison.Ordinal);
@@ -469,8 +450,6 @@ public sealed partial class MakeWorkflowTests
         Assert.DoesNotContain("pr-update", rootOutput, StringComparison.Ordinal);
 
         var makefile = File.ReadAllText(Path.Combine(root, "Makefile"));
-        Assert.Contains("make scribe-release-fetch DIGEST=\"$(DIGEST)\" PREFIX=\"$(PREFIX)\"", Recipe(makefile, "dag"), StringComparison.Ordinal);
-        Assert.Contains("--scribe-pack \"$(SCRIBE_PACK)\" --scribe-pack-digest \"$(DIGEST)\"", Recipe(makefile, "dag"), StringComparison.Ordinal);
         Assert.DoesNotContain("DIGEST", Recipe(makefile, "filemap"), StringComparison.Ordinal);
         Assert.DoesNotContain("scribe-release-fetch", Recipe(makefile, "filemap"), StringComparison.Ordinal);
         Assert.Contains("-- filemap", Recipe(makefile, "filemap"), StringComparison.Ordinal);

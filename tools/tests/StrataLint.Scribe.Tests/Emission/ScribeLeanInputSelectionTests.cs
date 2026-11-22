@@ -5,9 +5,10 @@ namespace StrataLint.Scribe.Tests;
 public sealed class ScribeLeanInputSelectionTests
 {
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void ScopedEmitChecksCurrentSourceOfUnimportedDeclarationReference(bool changed)
+    [InlineData(null, true)]
+    [InlineData("source", true)]
+    [InlineData("materials", false)]
+    public void EmitValidatesScopedEvidenceBeforeWriting(string? defect, bool explicitScope)
     {
         using var root = new TemporaryRoot(sdkConfiguration: true);
         File.WriteAllText(root.Resolve("global.json"), "{}\n");
@@ -33,7 +34,7 @@ public sealed class ScribeLeanInputSelectionTests
             """);
         var snapshot = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(
             RawRepositorySnapshot.Create(sources.Select(pair => RawRepositoryEntry.FromText(pair.Key, pair.Value))))).Snapshot;
-        var reportPath = root.Resolve(".lake/build/stratalint/raw-lean-report.json");
+        var reportPath = root.Resolve(".lake/build/stratalint/scoped-lean-report.json");
         RawLeanReportArtifact.WriteFile(reportPath, snapshot, LeanAxiomReport.Create(new Dictionary<string, LeanFileReport>
         {
             [owner] = new([], []),
@@ -41,17 +42,21 @@ public sealed class ScribeLeanInputSelectionTests
         }));
         File.WriteAllText(reportPath, File.ReadAllText(reportPath).Replace(
             RawLeanReportArtifact.Schema, RawLeanReportArtifact.ScopedSchema, StringComparison.Ordinal));
-        if (changed) File.WriteAllText(root.Resolve(referenced), "prelude\ntheorem result : True ∧ True := ⟨True.intro, True.intro⟩\n");
+        if (defect == "source")
+            File.WriteAllText(root.Resolve(referenced), "prelude\ntheorem result : True ∧ True := ⟨True.intro, True.intro⟩\n");
+        if (defect == "materials")
+            File.Delete(RawLeanReportArtifact.MaterialsPath(reportPath));
         File.WriteAllText(root.Resolve(markdown), "previous emission\n");
         var error = new StringWriter();
 
-        var exit = ScribeCli.Run(["emit", "--paths-from", "-", "--scoped"], root.Path,
-            TextWriter.Null, error, leanReport: null, new StringReader(scribe));
+        var exit = ScribeCli.Run(explicitScope ? ["emit", "--paths-from", "-", "--scoped"] : ["emit", "--paths-from", "-"], root.Path,
+            TextWriter.Null, error, new StringReader(scribe));
 
-        Assert.True((exit == 0) == !changed, error.ToString());
-        if (changed)
+        Assert.True(exit == (defect is null ? 0 : 2), error.ToString());
+        if (defect is not null)
         {
-            Assert.Contains("source hash does not match " + referenced, error.ToString(), StringComparison.Ordinal);
+            Assert.Contains(defect == "source" ? "source hash does not match " + referenced
+                : "Lean statement material archive is missing", error.ToString(), StringComparison.Ordinal);
             Assert.Equal("previous emission\n", File.ReadAllText(root.Resolve(markdown)));
         }
     }
@@ -109,7 +114,7 @@ public sealed class ScribeLeanInputSelectionTests
         var error = new StringWriter();
 
         var exit = ScribeCli.Run(["emit", "--paths-from", "-", "--scoped"], root.Path,
-            TextWriter.Null, error, leanReport: null, new StringReader(paths));
+            TextWriter.Null, error, new StringReader(paths));
 
         Assert.NotEqual(0, exit);
         Assert.Contains("scope is empty", error.ToString(), StringComparison.Ordinal);
@@ -140,7 +145,7 @@ public sealed class ScribeLeanInputSelectionTests
             """);
         var snapshot = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(
             RawRepositorySnapshot.Create([RawRepositoryEntry.FromText(source, sourceText)]))).Snapshot;
-        var reportPath = root.Resolve(".lake/build/stratalint/raw-lean-report.json");
+        var reportPath = root.Resolve(".lake/build/stratalint/scoped-lean-report.json");
         RawLeanReportArtifact.WriteFile(reportPath, snapshot,
             LeanAxiomReport.Create(new Dictionary<string, LeanFileReport>
             {
@@ -151,7 +156,7 @@ public sealed class ScribeLeanInputSelectionTests
         var error = new StringWriter();
 
         var exit = ScribeCli.Run(["emit", "--paths-from", "-", "--scoped"], root.Path,
-            TextWriter.Null, error, leanReport: null, new StringReader(path));
+            TextWriter.Null, error, new StringReader(path));
 
         Assert.True(exit == 0, error.ToString());
         Assert.True(File.Exists(root.Resolve("Blueprint/D5/S0/Test/Selected.md")));

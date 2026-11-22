@@ -20,9 +20,6 @@ internal sealed partial class ProductionCliEnvironment
         }
     }
 
-    public CommandResult Coverage(IReadOnlyList<string> arguments) =>
-        CoverageCommand.Run(repository, leanReportSource, arguments);
-
 
 
     public ExplicitCommandResult GateAuthority(IReadOnlyList<string> arguments) =>

@@ -62,15 +62,6 @@ public sealed record TruthAnchorJoin(
 
 public sealed record TruthGraphJoinsSection(ImmutableArray<TruthAnchorJoin> TruthAnchors);
 
-public sealed record DocumentGraphExportProjection(
-    DocumentGraphSection Documents,
-    TruthGraphJoinsSection Joins)
-{
-    public static DocumentGraphExportProjection Empty { get; } = new(
-        new DocumentGraphSection([], [], [], []),
-        new TruthGraphJoinsSection([]));
-}
-
 public sealed record TruthGraphExportModel(
     string Schema,
     int SchemaVersion,

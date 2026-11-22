@@ -26,12 +26,6 @@ internal static class ProductionTestOnlyTypePolicy
     private static readonly IReadOnlyDictionary<string, string> Allowlist =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            // Validation fixture: the reader verifies writer round trips and strict schema
-            // boundaries. Those decoding and information-preservation checks are orthogonal
-            // to DagEmitter's double-write check, which establishes determinism only.
-            ["Trureturing.Truth.TruthGraphJsonReader"] =
-                "round-trip and strict-schema validation is orthogonal to emitter determinism",
-
             // Declared producer: spec A17 (line 142) records QuestPDF as active and imposes
             // an annual review. The missing production route is not absence of a specified use.
             ["StrataLint.Scribe.QuestPdfWriter"] =

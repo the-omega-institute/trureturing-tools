@@ -14,7 +14,6 @@ public sealed class InspectorNativeRecoveryTests(InspectorCompilerFixture compil
     [InlineData("test_native.NativeRecoveryTests.test_partition_binds_reg_sized_inventory")]
     [InlineData("test_native.NativeRecoveryTests.test_partition_preserves_membership_and_order")]
     [InlineData("test_native.NativeRecoveryTests.test_partition_rejects_cross_chunk_duplicate_and_mixed_owner")]
-    [InlineData("test_native.NativeRecoveryTests.test_release_stage_and_verify_preserve_absent_lake")]
     [InlineData("test_native.NativeRecoveryTests.test_runtime_capacity_bounds_each_raw_and_judged_group")]
     [InlineData("test_native.NativeRecoveryTests.test_split_assessment_failure_preserves_legacy_publication_boundary")]
     [InlineData("test_native.NativeRecoveryTests.test_split_compatibility_keeps_fixed_windows_and_raw_judged_boundaries")]

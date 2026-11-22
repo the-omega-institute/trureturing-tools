@@ -239,16 +239,9 @@ try:
         sha, mtime = stamp.read_text().split()
         clone = pathlib.Path(tree) / '.lake/build/.main-cloned-at'
         oldtime = clone.read_text().split()[1] if clone.is_file() else ''
-        version = 'none'
-        import subprocess
-        got = subprocess.run(['git', '-C', main, 'show', sha + ':lean-report-inputs.json'], capture_output=True, text=True)
-        if got.returncode == 0:
-            version = json.loads(got.stdout).get('report_cache_release_semantic_version', 'none')
-        reuse = pathlib.Path(tree) / '.lake/build/stratalint/raw-lean-report.json.reuse.json'
-        oldversion = json.loads(reuse.read_text()).get('inputs', {}).get('semantic_version') if reuse.is_file() else None
         parse = lambda s: datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
         stale = not oldtime or (parse(mtime) - parse(oldtime)).total_seconds() > float(lag)
-        print(('refresh ' + sha + ' ' + mtime) if (version != 'none' and oldversion != version) or stale else 'skip tree-cloned-recently')
+        print(('refresh ' + sha + ' ' + mtime) if stale else 'skip tree-cloned-recently')
     else:
         die('unknown operation ' + action)
 except (OSError, ValueError, KeyError, IndexError) as error:

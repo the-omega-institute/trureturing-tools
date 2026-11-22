@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import re
 import shlex
 import shutil
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from urllib.parse import quote
 
@@ -28,12 +30,13 @@ except ImportError:
 
 from lean_cache import SHARED_SEED_PLATFORMS, normalized_platform, partition_path, seed_partitions
 from lean_cache_topology import checkout_topology, git_absolute_path, warm_dev_remediation
-from lean_cache_release_io import (OperationBudget, remaining, MultipartArchiveOutput, ArchiveInput, archive_sha,
-                                   copy_chunks, extract_members)
+from lean_cache_release_io import (check_native_products, ArchiveInput, INDEXED_ASSET, INDEXED_SCHEMA, MultipartArchiveOutput,
+                                   PRODUCTION_PREFIX, SPARSE_PLAN, VERIFICATION_PREFIX,
+                                   OperationBudget, archive_sha, copy_chunks, extract_members, publish_progress, remaining)
 
-# Use the report entry's declared format and execution capture, never program hashes.
+# Reuse the registered compiler and module report input format.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "lean-inspector"))
-import reuse as report_reuse
+import publication
 
 ASSET = "lean-build.tgz"
 MANIFEST = "manifest.json"
@@ -41,12 +44,13 @@ REPO = os.environ.get("STRATALINT_CACHE_REPO", "the-omega-institute/trureturing"
 # Issue #6194, run 34119746844: Release assets must be strictly below 2 GiB.
 # Keep dev's 1.5 GiB headroom and two-digit, at-most-100-part inventory.
 CHUNK_BYTES = 1610612736
+VERIFICATION_TARGETS = ("D5.S0.Tower.GoldenGapWord",)
 # Optional operation policy (#5985): a thirty-minute default budget for metadata,
 # local validation and installation, with an explicitly selected finite extension
 # for large multipart Release work. The asset stream itself is outside this
 # budget; its integrity is checked before any cache bytes are installed. This is
 # a policy choice, not a throughput derivation.
-# Fetch includes all snapshot attempts; publish starts only after the current report succeeds.
+# Fetch includes all snapshot attempts; publish starts after the project cache is prepared.
 RELEASE_OPERATION_TIMEOUT_SECONDS = 1800
 RELEASE_OPERATION_TIMEOUT_MAX_SECONDS = 21600
 # Asset downloads have no total-duration deadline. User cancellation still
@@ -163,7 +167,7 @@ def _error_category(status, reason, explicit=None):
         return "cancellation"
     if explicit:
         return type(explicit).__name__ if isinstance(explicit, BaseException) else str(explicit)[:96]
-    if status in ("published", "unpacked", "skipped", "exists", "staging-cleanup", "resolved"):
+    if status in ("published", "prepared", "unpacked", "skipped", "exists", "staging-cleanup", "resolved"):
         return None
     text = str(reason or "").lower()
     if "timeout" in text or "timed out" in text or "deadline" in text:
@@ -238,17 +242,23 @@ def existing_release(tag, deadline):
     return metadata
 
 
-def partition_prefix(partition, verification=False):
-    namespace = "lean-cache-verify-v1-" if verification else "lean-cache-v2-"
+def partition_prefix(partition, verification=False, *, indexed=False):
+    namespace = (VERIFICATION_PREFIX if verification else PRODUCTION_PREFIX)[indexed]
     return namespace + partition.replace("/", "-") + "-"
 
 
-def release_key(root, captured=None):
-    """Project the report receipt's explicit execution onto the seed platform family."""
-    captured = report_reuse.capture(root) if captured is None else captured
-    if not captured['eligible']:
-        raise ValueError("Release key requires registered execution: " + captured['reason'])
-    execution = captured['execution']
+def release_key(root):
+    selection = publication.selection.Selection(root)
+    selection.validate('lean-report')
+    registered = selection.data.get('report_execution')
+    if registered is None:
+        raise ValueError("Release key requires registered execution")
+    environment = {name: os.environ.get(name, '') for name in registered['environment']}
+    if any(environment[name] for name in ('LEAN_PATH', 'LEAN_SRC_PATH', 'LEAN_SYSROOT', 'LEAN_OPTS')):
+        raise ValueError("Release key requires a registered semantic environment")
+    execution = dict(registered,
+                     platform={name: getattr(platform, name)() for name in registered['platform']},
+                     environment=environment)
     system, machine = normalized_platform(execution['platform']['system'], execution['platform']['machine'])
     platform_name = system + "-" + machine
     family = next((group for group in SHARED_SEED_PLATFORMS if platform_name in group), (platform_name,))
@@ -256,11 +266,11 @@ def release_key(root, captured=None):
         tools=sorted(execution['tools']), platform="+".join(sorted(family)),
         environment=execution['environment'])
     digest = hashlib.sha256(json.dumps(projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return dict(report_format=report_reuse.publication.selection.REPORT_FORMAT, execution_sha256=digest)
+    return dict(report_format=publication.selection.REPORT_FORMAT, execution_sha256=digest)
 
 
-def prefix(partition, cache_key, verification=False):
-    return (partition_prefix(partition, verification) + "report-" + cache_key['report_format']
+def prefix(partition, cache_key, verification=False, *, indexed=False):
+    return (partition_prefix(partition, verification, indexed=indexed) + "report-" + cache_key['report_format']
             + "-env-" + cache_key['execution_sha256'][:12] + "-")
 
 
@@ -292,13 +302,18 @@ def validate_source_ref(repo, source_ref, source_commit, api):
 
 def verification_identity(root, source_ref, source_commit, deadline):
     run, attempt = (os.environ.get(field, "") for field in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"))
-    if (os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("GITHUB_EVENT_NAME") != "push"
+    event = os.environ.get("GITHUB_EVENT_NAME")
+    verification_workflow = ".github/workflows/ci-publication-verify.yml"
+    protected_dispatch = (event == "workflow_dispatch" and os.environ.get("GITHUB_REF_PROTECTED") == "true"
+                          and re.fullmatch(r"refs/heads/integration-ci-[A-Za-z0-9._/-]+-tests", source_ref)
+                          and os.environ.get("GITHUB_WORKFLOW_REF") == f"{REPO}/{verification_workflow}@{source_ref}")
+    if (os.environ.get("GITHUB_ACTIONS") != "true" or (event != "push" and not protected_dispatch)
             or not source_ref.startswith("refs/heads/integration-")
             or os.environ.get("GITHUB_REF") != source_ref or os.environ.get("GITHUB_SHA") != source_commit
             or os.environ.get("GITHUB_REPOSITORY") != REPO
             or not re.fullmatch(r"[0-9a-f]{40}", source_commit)
             or not all(re.fullmatch(r"[1-9][0-9]*", value) for value in (run, attempt))):
-        raise ValueError("verification requires a native integration push with explicit matching source and run attribution")
+        raise ValueError("verification requires an integration event with explicit matching source and run attribution")
     head = checked_run(["git", "-C", str(root), "rev-parse", "--verify", "HEAD"], deadline).stdout.strip()
     dirty = checked_run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"], deadline).stdout
     if head != source_commit or dirty:
@@ -308,10 +323,11 @@ def verification_identity(root, source_ref, source_commit, deadline):
     record = request(f"repos/{REPO}/actions/runs/{run}/attempts/{attempt}")
     if (not isinstance(record, dict) or type(record.get("id")) is not int or record["id"] != int(run)
             or type(record.get("run_attempt")) is not int or record["run_attempt"] != int(attempt)
-            or record.get("event") != "push" or record.get("head_sha") != source_commit
+            or record.get("event") != event or record.get("head_sha") != source_commit
+            or (protected_dispatch and record.get("path") != verification_workflow)
             or record.get("head_branch") != branch or not isinstance(record.get("repository"), dict)
             or record["repository"].get("full_name") != REPO):
-        raise ValueError("verification run does not match the native push source and attempt")
+        raise ValueError("verification run does not match the source, event and attempt")
     return {"producer_commit_sha": source_commit, "workflow_run_id": run,
             "workflow_run_attempt": attempt, "source_ref": source_ref}
 
@@ -363,11 +379,12 @@ def valid_publication_id(value):
 
 
 def declared_parts(manifest, maximum_bytes=CHUNK_BYTES):
+    asset = INDEXED_ASSET if manifest.get("schema") == INDEXED_SCHEMA else ASSET
     parts = manifest.get("parts")
     if not isinstance(parts, list) or not 1 <= len(parts) <= 100:
         raise ValueError("invalid archive parts inventory")
     for index, part in enumerate(parts):
-        name = ASSET if len(parts) == 1 else f"{ASSET}.part-{index:02d}"
+        name = asset if len(parts) == 1 else f"{asset}.part-{index:02d}"
         if (not isinstance(part, dict) or set(part) != {"name", "sha256", "bytes"}
                 or part["name"] != name or not isinstance(part["sha256"], str)
                 or not re.fullmatch(r"[0-9a-f]{64}", part["sha256"])
@@ -379,7 +396,7 @@ def declared_parts(manifest, maximum_bytes=CHUNK_BYTES):
     return parts
 
 
-def prune(partition, tag, deadline):
+def prune(partition, tag, deadline, *, indexed=False):
     pruned = 0
     try:
         releases = json.loads(gh(deadline, "release", "list", "--repo", REPO, "--limit", "100",
@@ -389,7 +406,7 @@ def prune(partition, tag, deadline):
                 or not isinstance(item.get("isDraft"), bool) for item in releases):
             raise ValueError("snapshot cleanup metadata is malformed; pruned nothing")
         snapshots = sorted((item for item in releases if item.get("isDraft") is False
-            and item.get("tagName", "").startswith(partition_prefix(partition))),
+            and item.get("tagName", "").startswith(partition_prefix(partition, indexed=indexed))),
             key=lambda item: item["createdAt"], reverse=True)
         # Preserve the existing five-snapshot retention window, now per partition.
         for old in snapshots[5:]:
@@ -540,45 +557,87 @@ def fetch_staging_cleanup(root, *, now):
     return results
 
 
-def publish(root, partition, verification=None, *, build_report=True):
+def validate_project_cache(build):
+    for name in ("lib/lean", "lean-inspector/modules"):
+        directory = build / name
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("project cache is missing " + name)
+
+
+def retired_report_member(member):
+    path = pathlib.PurePosixPath(member.name)
+    if path.parts[:2] == ("build", "stratalint") and len(path.parts) > 2:
+        return path.parts[2].startswith("raw-lean-report.json")
+    return (len(path.parts) == 3 and path.parts[:2] == ("build", "lean-inspector")
+            and (path.name.startswith("report.zip") or path.name == "inputs.json"))
+
+
+def cache_tar_member(member):
+    if retired_report_member(member):
+        return None
+    if member.isfile() and member.name.endswith(".setup.json"):
+        return None
+    return member
+
+
+def publish(root, partition, verification=None, *, build_cache=True, indexed=False, prepare_only=False):
     # Build/content and local archive failures remain failures. Remote transport is optional;
     # explicit verification succeeds only after the uploaded bytes restore.
-    # A caller's LEAN_REPORT override must not move publication outside buildDir.
-    if build_report:
+    if indexed and os.environ.get("LEAN_CACHE_RELEASE_VOLUMES") == "1":
+        indexed = "volumes"
+    physical = indexed == "volumes"
+    if prepare_only and not build_cache:
+        raise ValueError("cache preparation requires a build")
+    plan = None
+    if os.environ.get("LEAN_CACHE_SPARSE_PLAN") or os.path.lexists(root / SPARSE_PLAN):
+        import lean_release_sparse as sparse
+
+        plan = sparse.read_plan(root)
+    if plan and (not physical or (not build_cache and plan.get("restoring_full"))):
+        raise ValueError("a sparse project build requires completed volume Release preparation")
+    if build_cache:
         if os.environ.get("FULL_BUILD") != "1":
             print("cache production requires explicit FULL_BUILD=1", file=sys.stderr)
             return 2
-        build = subprocess.run(["make", "check-lean-report",
-            "LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build",
-            "LEAN_REPORT=.lake/build/stratalint/raw-lean-report.json"], cwd=root)
+        command = ["make", "lean-cache-prepare"]
+        if physical or prepare_only:
+            publish_progress("report_started", sparse=bool(plan))
+        if plan:
+            build = sparse.prepare_cache(sys.modules[__name__], root, command, partition, verification is not None, plan)
+        else:
+            build = subprocess.run(command, cwd=root)
         if build.returncode:
             _observe("publish", "failed", phase="build",
                      error=subprocess.CalledProcessError(build.returncode, "make"))
             return build.returncode
-    report = root / ".lake/build/stratalint/raw-lean-report.json"
+        if physical or prepare_only:
+            publish_progress("report_checked", sparse=bool(plan and os.path.lexists(root / SPARSE_PLAN)))
+        if prepare_only:
+            _observe("publish", "prepared", phase="build")
+            return 0
     content_validated = False
     preparing = False
     try:
         deadline = operation_deadline()
         with contextlib.ExitStack() as lifetime, tempfile.TemporaryDirectory(prefix="lean-release-") as temporary:
             stage = pathlib.Path(temporary)
-            # Validate and pack under one read lock so a cache writer cannot
-            # replace the validated report/build before the snapshot is packed.
+            # Validate the layout and take the snapshot under the same read lock.
             with cache_guard(root, shared=True):
                 if (root / ".lake").is_symlink() or not (root / ".lake/build").is_dir():
                     raise ValueError("no private project build to publish")
-                captured = report_reuse.capture(root)
-                report_receipt = report_reuse.read_receipt(report, captured)
-                if report_receipt['completed'] not in report_reuse.CHECKED_STEPS:
-                    raise ValueError("Release publication requires a checked full report. "
-                                     "Run make check-lean-report FULL_BUILD=1 before publishing.")
-                report_reuse.publication.validate_bundle(report, repository=root)
+                check_native_products(root / ".lake/build", partition)
+                build = root / ".lake/build"
+                if not plan:
+                    validate_project_cache(build)
+                for module in publication.selection.Selection(root).modules():
+                    if not (build / "lean-inspector/modules" / (module + ".zip")).is_file():
+                        raise ValueError("project cache is missing the module report for " + module)
                 if partition != partition_path(root):
                     raise ValueError("publication partition differs from the local tree")
-                cache_key = release_key(root, captured)
+                cache_key = release_key(root)
                 identity = publication_identity(root, deadline, verification)
                 content_validated = True
-                tag = prefix(partition, cache_key, verification is not None) + identity['publication_id']
+                tag = prefix(partition, cache_key, verification is not None, indexed=indexed) + identity['publication_id']
                 existing = existing_release(tag, deadline)
                 if existing is not None:
                     if existing["draft"]:
@@ -591,38 +650,88 @@ def publish(root, partition, verification=None, *, build_report=True):
                     return 0
                 # Level 1 keeps the gzip protocol within the transport window.
                 preparing = True
-                with MultipartArchiveOutput(stage, ASSET, CHUNK_BYTES, deadline) as output:
-                    with tarfile.open(stage / ASSET, "w:gz", compresslevel=1,
-                                      fileobj=output) as archive:
-                        archive.add(root / ".lake/build", arcname="build",
-                                    filter=lambda member: None if member.isfile()
-                                    and member.name.endswith(".setup.json") else member)
-            metadata = {"schema": "lean-release-seed-v4", "partition": partition, "cache_key": cache_key,
-                **identity, **output.metadata()}
+                if physical:
+                    import lean_release_volume_remote as remote
+
+                    contents = remote.stage_publication(sys.modules[__name__], root, stage, partition, cache_key,
+                                                        identity, verification is not None, deadline)
+                elif indexed:
+                    import lean_release_index as indexed_release
+
+                    contents = indexed_release.pack(root, stage, CHUNK_BYTES, deadline)
+                else:
+                    with MultipartArchiveOutput(stage, ASSET, CHUNK_BYTES, deadline) as output:
+                        with tarfile.open(stage / ASSET, "w:gz", compresslevel=1,
+                                          fileobj=output) as archive:
+                            archive.add(root / ".lake/build", arcname="build",
+                                        filter=cache_tar_member)
+                    contents = output.metadata()
+            metadata = {"schema": ("lean-release-seed-v6" if physical else INDEXED_SCHEMA) if indexed else "lean-release-seed-v4",
+                        "partition": partition, "cache_key": cache_key, **identity, **contents}
             (stage / MANIFEST).write_text(json.dumps(metadata, sort_keys=True) + "\n")
             remaining(deadline)
             preparing = False
             # Never clobber an existing snapshot. Failed/racing publishers leave
             # at most a draft, which fetch never considers an applicable seed.
             # The server's default branch anchors only the storage container.
+            if physical:
+                publish_progress("snapshot_draft", tag=tag)
             gh(deadline, "release", "create", tag, "--repo", REPO, "--draft",
-               "--title", "Lean cache " + partition, "--notes", "Successful current Lean build and Inspector report; incremental seed only.")
-            gh(deadline, "release", "upload", tag, *(str(stage / part["name"]) for part in metadata["parts"]),
+               "--title", "Lean cache " + partition, "--notes", "Lean compiler artifacts and module reports for incremental reuse.")
+            entries = metadata.get("parts", []) + ([metadata["index"]] if indexed else [])
+            gh(deadline, "release", "upload", tag, *(str(stage / part["name"]) for part in entries),
                str(stage / MANIFEST), "--repo", REPO)
-            gh(deadline, "release", "edit", tag, "--repo", REPO, "--draft=false")
+            draft = None
+            if indexed:
+                if physical:
+                    publish_progress("snapshot_verify_draft", tag=tag)
+                locator = json.loads(gh(deadline, "release", "view", tag, "--repo", REPO,
+                                        "--json", "databaseId,isDraft,tagName"))
+                release_id = locator.get("databaseId")
+                if (type(release_id) is not int or release_id <= 0 or locator.get("isDraft") is not True
+                        or locator.get("tagName") != tag):
+                    raise ValueError("uploaded Release draft identity is unavailable")
+                draft = json.loads(gh(deadline, "api", f"repos/{REPO}/releases/{release_id}"))
+                draft_check = stage / "draft-confirmed"
+                draft_check.mkdir()
+                snapshot_manifest(partition, tag, draft_check, deadline, expected=metadata,
+                                  verification=verification is not None, metadata=draft,
+                                  cache_key=cache_key, expect_draft=True)
+            else:
+                gh(deadline, "release", "edit", tag, "--repo", REPO, "--draft=false")
             if verification is not None:
+                if physical:
+                    publish_progress("snapshot_verify_restore", tag=tag)
                 # Uploaded transport copies must not share the empty restore
                 # target's disk budget with the independently downloaded bytes.
-                for name in {ASSET, *(part["name"] for part in metadata["parts"])}:
+                for name in {ASSET, *(part["name"] for part in entries)}:
                     (stage / name).unlink(missing_ok=True)
                 downloaded = stage / "downloaded"
                 downloaded.mkdir()
+                if indexed:
+                    lifetime.enter_context(cache_guard(root))
+                    with tempfile.TemporaryDirectory(prefix=".release-scoped-", dir=root / ".lake") as empty:
+                        control = pathlib.Path(empty)
+                        transport = control / "download"
+                        transport.mkdir()
+                        modules, transferred = restore_scoped(root, partition, tag, transport, deadline,
+                            cache_key=cache_key, producer=identity["producer_commit_sha"],
+                            targets=VERIFICATION_TARGETS, verification=True,
+                            destination_root=control, release_metadata=draft, require_complete=True) or (0, 0)
+                        if not modules or not 0 < transferred < metadata["archive_bytes"]:
+                            raise ValueError("indexed verification did not restore a strict subset")
+                        recovered = control / ".lake/build"
+                        for member in recovered.rglob("*"):
+                            if member.is_file() and archive_sha(member, deadline) != archive_sha(
+                                    root / ".lake/build" / member.relative_to(recovered), deadline):
+                                raise ValueError("scoped restore bytes differ from the producer")
                 if all(verification.get(field) for field in
                        ("workflow_run_id", "workflow_run_attempt", "source_ref")):
                     # Only the attributed native job owns a disposable source build.
                     # Failure after retirement may leave it absent; other callers
                     # retain their source. Hold the writer through owned cleanup.
-                    lifetime.enter_context(cache_guard(root))
+                    if not indexed:
+                        lifetime.enter_context(cache_guard(root))
                     lake, build = root / ".lake", root / ".lake/build"
                     if lake.is_symlink() or build.is_symlink() or not build.is_dir():
                         raise ValueError("native verification requires a private source build")
@@ -631,7 +740,7 @@ def publish(root, partition, verification=None, *, build_report=True):
                         remaining(deadline)
                         shutil.rmtree(build)
                         if not restore_snapshot(target, partition, tag, downloaded, deadline, metadata,
-                                                cache_key=cache_key):
+                                                cache_key=cache_key, release_metadata=draft):
                             raise ValueError("native verification did not install the remote build")
                         # Restore has completed under its fresh post-transfer budget.
                         (target / ".lake/build").rename(build)
@@ -640,32 +749,53 @@ def publish(root, partition, verification=None, *, build_report=True):
                     # disposable native workspace.
                     target = stage / "verified-target"
                     target.mkdir()
-                    restore_snapshot(target, partition, tag, downloaded, deadline, metadata, cache_key=cache_key)
-                pruned, prune_error = 0, None
-            else:
+                    restore_snapshot(target, partition, tag, downloaded, deadline, metadata, cache_key=cache_key,
+                                     release_metadata=draft)
+            if indexed:
+                # Draft validation and verification restore are complete. Give
+                # the final promotion and read-back their own bounded budget.
+                deadline = operation_deadline()
+                if physical:
+                    publish_progress("snapshot_promote", tag=tag)
+                gh(deadline, "release", "edit", tag, "--repo", REPO, "--draft=false")
+            pruned, prune_error = 0, None
+            if indexed or verification is None:
+                if physical:
+                    publish_progress("snapshot_readback", tag=tag)
                 current = existing_release(tag, deadline)
                 if current is None or current["draft"]:
                     raise ValueError(f"new snapshot {tag} is not readable as published; pruned nothing")
                 confirmed = stage / "confirmed"
                 confirmed.mkdir()
-                snapshot_manifest(partition, tag, confirmed, deadline, expected=metadata, metadata=current, cache_key=cache_key)
-                pruned, prune_error = prune(partition, tag, deadline)
+                snapshot_manifest(partition, tag, confirmed, deadline, expected=metadata, metadata=current,
+                                  verification=verification is not None, cache_key=cache_key)
+                if physical and verification is not None and (old_tag := os.environ.get("LEAN_CACHE_VOLUME_RETIRE_TAG")):
+                    remote.retire_verification(sys.modules[__name__], partition, cache_key, tag, metadata, old_tag, deadline)
+                if verification is None:
+                    if physical:
+                        publish_progress("snapshot_prune", tag=tag)
+                        pruned, prune_error = remote.prune(sys.modules[__name__], partition, cache_key, tag,
+                                                         identity["publication_id"], deadline)
+                    else:
+                        pruned, prune_error = (prune(partition, tag, deadline, indexed=True) if indexed
+                                               else prune(partition, tag, deadline))
         receipt("publish", "published", tag=tag, pruned=pruned, prune_error=prune_error, **metadata)
     except ImportError as error:
         receipt("publish", "skipped", reason="POSIX cache locking unavailable: " + str(error))
         return 1 if verification is not None else 0
-    except report_reuse.INVALID_SEED + (EOFError, subprocess.SubprocessError, tarfile.TarError) as error:
+    except (OSError, EOFError, ValueError, TypeError, KeyError, subprocess.SubprocessError, tarfile.TarError) as error:
         receipt("publish", "failed", _error=error, reason=str(error))
         return 1 if verification is not None else (0 if content_validated and not preparing else 2)
     return 0
 
 
-def snapshot_manifest(partition, tag, stage, deadline, expected=None, verification=False, metadata=None, *, cache_key):
+def snapshot_manifest(partition, tag, stage, deadline, expected=None, verification=False, metadata=None, *,
+                      cache_key, expect_draft=False):
     """Validate the small manifest and inventory before confirming or restoring a snapshot."""
     if metadata is None:
         metadata = json.loads(gh(deadline, "api", f"repos/{REPO}/releases/tags/{tag}"))
-    if not isinstance(metadata, dict) or metadata.get("draft") is not False or metadata.get("tag_name") != tag:
-        raise ValueError("snapshot is not published")
+    if not isinstance(metadata, dict) or metadata.get("draft") is not expect_draft or metadata.get("tag_name") != tag:
+        raise ValueError("snapshot is not a draft" if expect_draft else "snapshot is not published")
     manifest_name = MANIFEST
     assets = metadata.get("assets", [])
     if (not isinstance(assets, list) or any(not isinstance(asset, dict)
@@ -677,15 +807,18 @@ def snapshot_manifest(partition, tag, stage, deadline, expected=None, verificati
        "--pattern", manifest_name)
     if recorded.get(manifest_name) != "sha256:" + archive_sha(stage / manifest_name, deadline):
         raise ValueError("transferred asset digest mismatch")
-    manifest = report_reuse.publication.read_json((stage / manifest_name).read_bytes())
+    manifest = publication.read_json((stage / manifest_name).read_bytes())
     if not isinstance(manifest, dict):
         raise ValueError("snapshot manifest must be an object")
     commit, publication_id = manifest.get("producer_commit_sha", ""), manifest.get("publication_id", "")
-    if (manifest.get("schema") != "lean-release-seed-v4" or manifest.get("partition") != partition
+    physical = tag.startswith(partition_prefix(partition, verification, indexed="volumes"))
+    indexed = "volumes" if physical else tag.startswith(partition_prefix(partition, verification, indexed=True))
+    schema = ("lean-release-seed-v6" if physical else INDEXED_SCHEMA) if indexed else "lean-release-seed-v4"
+    if (manifest.get("schema") != schema or manifest.get("partition") != partition
             or manifest.get("cache_key") != cache_key
             or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit)
             or not valid_publication_id(publication_id)
-            or tag != prefix(partition, cache_key, verification) + publication_id):
+            or tag != prefix(partition, cache_key, verification, indexed=indexed) + publication_id):
         raise ValueError("snapshot partition or source attribution mismatch")
     if publication_id.startswith("ci-"):
         run, attempt = manifest.get("workflow_run_id"), manifest.get("workflow_run_attempt")
@@ -698,17 +831,199 @@ def snapshot_manifest(partition, tag, stage, deadline, expected=None, verificati
         datetime.datetime.strptime(publication_id.split("-")[2], "%Y%m%dT%H%M%S%fZ")
     if expected is not None and any(manifest.get(key) != value for key, value in expected.items()):
         raise ValueError("snapshot does not match this exact publication")
-    parts = declared_parts(manifest)
-    if sorted(recorded) != sorted([manifest_name, *[part["name"] for part in parts]]):
+    if physical:
+        import lean_release_volume_remote as remote
+
+        scope = remote.namespace(partition, cache_key, verification, publication_id, sys.modules[__name__],
+                                 test_id=manifest.get("volume_test_id"), source_ref=manifest.get("source_ref"))
+        if (manifest.get("volume_scope") != scope or "parts" in manifest
+                or type(manifest.get("archive_bytes")) is not int
+                or not 0 < manifest["archive_bytes"] <= CHUNK_BYTES * 100):
+            raise ValueError("invalid physical volume namespace or snapshot size")
+    parts = [] if physical else declared_parts(manifest)
+    index = manifest.get("index")
+    entries = parts
+    if indexed:
+        import lean_release_index as indexed_release
+
+        if (not indexed_release.valid_digest(manifest.get("archive_sha256"))
+                or not indexed_release.valid_digest(manifest.get("lake_inputs_sha256"))):
+            raise ValueError("invalid indexed archive or workspace digest")
+        if (not isinstance(index, dict) or set(index) != {"name", "sha256", "bytes"}
+                or index["name"] != indexed_release.INDEX or not indexed_release.valid_digest(index["sha256"])
+                or type(index["bytes"]) is not int or not 0 < index["bytes"] <= 32 * 1024 * 1024):
+            raise ValueError("invalid Release index asset")
+        entries = [*parts, index]
+    if sorted(recorded) != sorted([manifest_name, *[part["name"] for part in entries]]):
         raise ValueError("snapshot asset set is incomplete")
     assets_by_name = {asset["name"]: asset for asset in assets}
-    for part in parts:
+    if indexed:
+        manifest_asset = assets_by_name[manifest_name]
+        if type(manifest_asset.get("size")) is not int or manifest_asset["size"] != (stage / MANIFEST).stat().st_size:
+            raise ValueError("transferred manifest size mismatch")
+        ids = [asset.get("id") for asset in assets]
+        if any(type(value) is not int or value <= 0 for value in ids) or len(set(ids)) != len(ids):
+            raise ValueError("invalid indexed Release asset identities")
+    for part in entries:
         asset = assets_by_name[part["name"]]
         if asset.get("digest") != "sha256:" + part["sha256"]:
             raise ValueError("transferred asset digest mismatch")
         if type(asset.get("size")) is not int or asset["size"] != part["bytes"]:
             raise ValueError("transferred asset size mismatch")
     return metadata, manifest, parts
+
+
+def range_blocks(asset, offset, length, deadline):
+    asset_id = asset.get("id")
+    size = asset.get("size")
+    if type(asset_id) is not int or asset_id <= 0 or type(size) is not int:
+        raise ValueError("Release volume asset identity is unavailable")
+    end = offset + length - 1
+    command = ["gh", "api", "--include", "-H", "Accept: application/octet-stream",
+               "-H", f"Range: bytes={offset}-{end}", f"repos/{REPO}/releases/assets/{asset_id}"]
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+        watchdog = threading.Timer(remaining(deadline), process.kill)
+        watchdog.start()
+        try:
+            status = process.stdout.readline(8192).split()
+            if len(status) < 2 or not status[0].startswith(b"HTTP/") or status[1] != b"206":
+                raise ValueError("Release asset did not return a partial response")
+            found = []
+            budget = 32768
+            while budget > 0:
+                line = process.stdout.readline(budget)
+                budget -= len(line)
+                if line in (b"\n", b"\r\n"):
+                    break
+                if not line or not line.endswith(b"\n"):
+                    raise ValueError("incomplete Release range headers")
+                key, _, value = line.partition(b":")
+                if key.lower() == b"content-range":
+                    found.append(value.strip())
+            expected = f"bytes {offset}-{end}/{size}".encode()
+            if budget <= 0 or found != [expected]:
+                raise ValueError("Release asset Content-Range mismatch")
+            left = length
+            while left:
+                remaining(deadline)
+                block = process.stdout.read(min(left, 1024 * 1024))
+                if not block:
+                    raise ValueError("truncated Release range")
+                left -= len(block)
+                yield block
+            if process.stdout.read(1) or process.wait() != 0:
+                raise ValueError("Release range did not complete exactly")
+        finally:
+            watchdog.cancel()
+            if process.poll() is None:
+                process.kill()
+
+
+def download_range(asset, offset, length, output, deadline):
+    with contextlib.closing(range_blocks(asset, offset, length, deadline)) as blocks:
+        for block in blocks:
+            output.write(block)
+
+
+def restore_scoped(root, partition, tag, stage, deadline, *, cache_key, producer, targets, verification,
+                   destination_root=None, release_metadata=None, require_complete=False,
+                   validated_snapshot=None) -> tuple[int, int] | None:
+    """Return installed module and byte counts, or None for an incompatible workspace."""
+    from lean_artifact_inventory import lake_configuration
+    import lean_release_index as indexed_release
+
+    metadata, manifest, parts = validated_snapshot or snapshot_manifest(partition, tag, stage, deadline,
+        expected={"producer_commit_sha": producer} if producer else None,
+        verification=verification, cache_key=cache_key, metadata=release_metadata,
+        expect_draft=release_metadata is not None)
+    physical = manifest["schema"] == "lean-release-seed-v6"
+    if not physical and manifest["schema"] != INDEXED_SCHEMA:
+        raise ValueError("scoped restore requires an indexed Release")
+    if lake_configuration(root) != manifest["lake_inputs_sha256"]:
+        receipt("fetch", "scoped-miss", resolved=tag, reason="Lake workspace configuration changed")
+        return None
+    index = manifest["index"]
+    gh(deadline, "release", "download", tag, "--repo", REPO, "--dir", str(stage), "--pattern", index["name"])
+    index_path = stage / index["name"]
+    if index_path.stat().st_size != index["bytes"] or archive_sha(index_path, deadline) != index["sha256"]:
+        raise ValueError("Release index checksum or size mismatch")
+    lake = (root if destination_root is None else destination_root) / ".lake"
+    if physical:
+        import lean_release_volume_remote as remote
+        import lean_release_volumes as volumes
+
+        tree = volumes.read_tree(index_path, manifest)
+        rows = tree["members"]
+    else:
+        rows = indexed_release.read_index(index_path, manifest["archive_bytes"])
+    rows = indexed_release.scoped_members(root, rows,
+        targets, lake / "build", require_complete=require_complete)
+    if lake.is_symlink() or (lake / "build").is_symlink():
+        raise ValueError("scoped restore requires a private project build")
+    lake.mkdir(exist_ok=True)
+    assets = {asset["name"]: asset for asset in metadata["assets"]}
+    if physical:
+        spans = remote.asset_ranges(sys.modules[__name__], manifest, tree, rows, deadline, assets)
+    else:
+        spans = indexed_release.selected_volume_ranges(parts, assets, rows)
+    with tempfile.TemporaryDirectory(prefix=".release-", dir=lake) as temporary:
+        unpacked = pathlib.Path(temporary)
+        extracted = set()
+        requests, transferred = indexed_release.extract_ranges(
+            range_blocks, spans, rows, unpacked, extracted, deadline)
+        target = lake / "build"
+        supplemental = set()
+        restored_modules, deferred_modules = [], []
+        for row in rows:
+            paths = [pathlib.PurePosixPath(name) for name in row["paths"]]
+            conflicts = [path for path in paths if os.path.lexists(target / path) and
+                         (has_unsafe_parent(target, path) or (target / path).is_symlink()
+                          or not (target / path).is_file()
+                          or archive_sha(target / path, deadline) != archive_sha(unpacked / path, deadline))]
+            if conflicts:
+                deferred_modules.append(row["module"])
+            else:
+                restored_modules.append(row["module"])
+                supplemental.update(path for path in paths if not os.path.lexists(target / path))
+        install_scoped(target, unpacked, supplemental, deadline)
+    receipt("fetch", "scoped", resolved=tag, producer_commit_sha=manifest["producer_commit_sha"],
+            modules=restored_modules, deferred=deferred_modules, requests=requests,
+            index_bytes=index["bytes"], data_bytes=transferred)
+    return len(restored_modules), transferred
+
+
+def artifact_parents(target, path):
+    return [target, *(target / parent for parent in reversed(path.parents) if parent.parts)]
+
+
+def has_unsafe_parent(target, path):
+    return any(parent.is_symlink() or (parent.exists() and not parent.is_dir())
+               for parent in artifact_parents(target, path))
+
+
+def install_scoped(target, unpacked, extracted, deadline):
+    paths = sorted(extracted)
+    missing_directories = set()
+    for path in paths:
+        if os.path.lexists(target / path) or has_unsafe_parent(target, path):
+            raise ValueError("scoped restore conflicts with a local artifact path: " + str(path))
+        missing_directories.update(parent for parent in artifact_parents(target, path) if not parent.exists())
+    try:
+        for path in paths:
+            remaining(deadline)
+            destination = target / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            # A successful link is recoverable even if interrupted immediately.
+            os.link(unpacked / path, destination)
+    except BaseException:
+        for path in paths:
+            destination = target / path
+            if os.path.lexists(destination) and os.path.samestat(destination.lstat(), (unpacked / path).stat()):
+                destination.unlink()
+        for parent in sorted(missing_directories, key=lambda path: len(path.parts), reverse=True):
+            if parent.is_dir() and not parent.is_symlink() and not any(parent.iterdir()):
+                parent.rmdir()
+        raise
 
 
 def clone_local_parts(local_assets, stage, parts, deadline):
@@ -742,17 +1057,29 @@ def clone_local_parts(local_assets, stage, parts, deadline):
             remaining(deadline)
 
 
-def restore_snapshot(root, partition, tag, stage, deadline, verification=None, refresh_stale=False, *,
-                     cache_key, approved_producer=None, require_compatible_seed=False, on_installed=None,
-                     local_assets=None):
+def restore_snapshot(root, partition, tag, stage, deadline, expected=None, refresh_stale=False, *,
+                     cache_key, approved_producer=None, on_installed=None,
+                     local_assets=None, release_metadata=None, verification_tag=True, validated_snapshot=None):
+    verification = expected is not None and verification_tag
     with observed_phase("manifest"):
-        metadata, manifest, parts = snapshot_manifest(partition, tag, stage, deadline,
-            expected=verification if approved_producer is None else {"producer_commit_sha": approved_producer},
-            verification=verification is not None, cache_key=cache_key)
-    assets = metadata["assets"]
+        metadata, manifest, parts = validated_snapshot or snapshot_manifest(partition, tag, stage, deadline,
+            expected=expected if approved_producer is None else {"producer_commit_sha": approved_producer},
+            verification=verification, cache_key=cache_key, metadata=release_metadata,
+            expect_draft=release_metadata is not None)
+    physical = manifest.get("schema") == "lean-release-seed-v6"
+    indexed = physical or manifest.get("schema") == INDEXED_SCHEMA
+    entries = [*parts, manifest["index"]] if indexed else parts
     commit = manifest["producer_commit_sha"]
+    one_volume = False
     with observed_phase("transfer", expected_bytes=manifest["archive_bytes"]):
-        if local_assets is None:
+        if physical:
+            import lean_release_volume_remote as remote
+
+            tree = remote.load_tree(sys.modules[__name__], tag, stage, manifest, deadline)
+            one_volume = remote.single_volume_restore(stage, root, manifest, tree)
+            if not one_volume:
+                parts = remote.download_full(sys.modules[__name__], stage, manifest, tree, deadline)
+        elif local_assets is None:
             # A multi-gigabyte Release asset is a streaming transport. Its
             # duration depends on the link and must not consume the bounded
             # metadata/install operation budget. Integrity and attribution are
@@ -761,85 +1088,101 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
             # fallback candidate retains the unspent computation time.
             with deadline.pause():
                 gh(None, "release", "download", tag, "--repo", REPO, "--dir", str(stage),
-                   *(argument for part in parts for argument in ("--pattern", part["name"])))
+                   *(argument for part in entries for argument in ("--pattern", part["name"])))
         else:
-            clone_local_parts(local_assets, stage, parts, None)
+            clone_local_parts(local_assets, stage, entries, None)
     # Start a fresh bounded local budget after the unbounded network transfer.
     # This keeps hashing, reassembly, tar validation and installation fail-closed
     # without making a slow link look like a corrupt snapshot.
     deadline = operation_deadline()
     with observed_phase("part_validation", validated_bytes=manifest["archive_bytes"]):
-        for part in parts:
+        for part in entries:
             path = stage / part["name"]
             if part["sha256"] != archive_sha(path, deadline) or part["bytes"] != path.stat().st_size:
                 raise ValueError("part checksum or size mismatch: " + part["name"])
-        for asset in assets:
-            if asset.get("digest") != "sha256:" + archive_sha(stage / asset["name"], deadline):
-                raise ValueError("transferred asset digest mismatch")
-    with observed_phase("reassembly"):
-        if len(parts) > 1:
-            with (stage / ASSET).open("wb") as archive:
-                for part in parts:
-                    path = stage / part["name"]
-                    start = archive.tell()
-                    with path.open("rb") as source:
-                        copy_chunks(source, archive, deadline)
-                    archive.flush()
-                    remaining(deadline)
-                    if archive.tell() - start != part["bytes"]:
-                        raise ValueError("part copy size mismatch: " + part["name"])
-                    path.unlink()
-    with observed_phase("archive_validation", validated_bytes=manifest["archive_bytes"]):
-        if (manifest.get("archive_sha256") != archive_sha(stage / ASSET, deadline)
-                or manifest.get("archive_bytes") != (stage / ASSET).stat().st_size):
-            raise ValueError("archive checksum or size mismatch")
+        if not indexed:
+            for asset in metadata["assets"]:
+                if asset.get("digest") != "sha256:" + archive_sha(stage / asset["name"], deadline):
+                    raise ValueError("transferred asset digest mismatch")
+    if not indexed:
+        with observed_phase("reassembly"):
+            if len(parts) > 1:
+                with (stage / ASSET).open("wb") as archive:
+                    for part in parts:
+                        path = stage / part["name"]
+                        start = archive.tell()
+                        with path.open("rb") as source:
+                            copy_chunks(source, archive, deadline)
+                        archive.flush()
+                        remaining(deadline)
+                        if archive.tell() - start != part["bytes"]:
+                            raise ValueError("part copy size mismatch: " + part["name"])
+                        path.unlink()
+        with observed_phase("archive_validation", validated_bytes=manifest["archive_bytes"]):
+            if (manifest.get("archive_sha256") != archive_sha(stage / ASSET, deadline)
+                    or manifest.get("archive_bytes") != (stage / ASSET).stat().st_size):
+                raise ValueError("archive checksum or size mismatch")
     lake = root / ".lake"
     if lake.is_symlink():
         raise ValueError("shared cache target is forbidden")
-    installed, backup, base_recorded = [], None, False
-    target, base = lake / "build", root / report_reuse.BASE_RECORD
+    installed, backup = [], None
+    target = lake / "build"
     try:
         with contextlib.ExitStack() as opened:
-            compressed = opened.enter_context((stage / ASSET).open("rb"))
-            with observed_phase("tar_scan"):
-                archive = opened.enter_context(tarfile.open(
-                    name=str(stage / ASSET), fileobj=ArchiveInput(compressed, deadline)))
-                members = []
-                for member in archive:
-                    remaining(deadline)
-                    members.append(member)
-            paths = {}
-            for member in members:
-                remaining(deadline)
-                path = pathlib.PurePosixPath(member.name)
-                if (path.is_absolute() or ".." in path.parts or not path.parts
-                        or path.parts[0] != "build"
-                        or not (member.isfile() or member.isdir())):
-                    raise ValueError("archive contains an invalid cache member")
-                if path in paths:
-                    raise ValueError("archive contains an invalid cache member: duplicate path")
-                paths[path] = member
-            for path in paths:
-                remaining(deadline)
-                if any(parent in paths and not paths[parent].isdir() for parent in path.parents):
-                    raise ValueError("archive contains an invalid cache member: file ancestor")
-            # Consume gzip's footer before installing the extracted build.
-            while archive.fileobj.read(1024 * 1024):
-                remaining(deadline)
             lake.mkdir(exist_ok=True)
-            # Renames share the destination filesystem; rollback owns its backup
-            # until extraction staging and the seed/base installation complete.
+            # Restore into a same-filesystem staging tree for the existing rollback.
             with tempfile.TemporaryDirectory(prefix=".release-", dir=lake) as temporary:
                 unpacked = pathlib.Path(temporary)
-                with observed_phase("extraction"):
-                    extract_members(archive, unpacked, members, deadline)
                 source = unpacked / "build"
+                if indexed:
+                    import lean_release_index as indexed_release
+
+                    with observed_phase("extraction"):
+                        rows = (tree["members"] if physical else
+                                indexed_release.read_index(stage / indexed_release.INDEX, manifest["archive_bytes"]))
+                        source.mkdir()
+                        if one_volume:
+                            remote.restore_one_volume(sys.modules[__name__], stage, manifest, tree, source, deadline)
+                        else:
+                            indexed_release.restore_full(stage, dict(manifest, parts=parts), rows, source, deadline)
+                else:
+                    compressed = opened.enter_context((stage / ASSET).open("rb"))
+                    with observed_phase("tar_scan"):
+                        archive = opened.enter_context(tarfile.open(
+                            name=str(stage / ASSET), fileobj=ArchiveInput(compressed, deadline)))
+                        members = []
+                        for member in archive:
+                            remaining(deadline)
+                            members.append(member)
+                    paths = {}
+                    for member in members:
+                        remaining(deadline)
+                        path = pathlib.PurePosixPath(member.name)
+                        if (path.is_absolute() or ".." in path.parts or not path.parts
+                                or path.parts[0] != "build"
+                                or not (member.isfile() or member.isdir())):
+                            raise ValueError("archive contains an invalid cache member")
+                        if path in paths:
+                            raise ValueError("archive contains an invalid cache member: duplicate path")
+                        paths[path] = member
+                    for path in paths:
+                        remaining(deadline)
+                        if any(parent in paths and not paths[parent].isdir() for parent in path.parents):
+                            raise ValueError("archive contains an invalid cache member: file ancestor")
+                    # Consume gzip's footer before installing the extracted build.
+                    while archive.fileobj.read(1024 * 1024):
+                        remaining(deadline)
+                    with observed_phase("extraction"):
+                        kept = [member for member in members if cache_tar_member(member) is not None]
+                        extract_members(archive, unpacked, kept, deadline)
                 if not source.is_dir():
                     raise ValueError("archive has no project build")
-                if approved_producer is not None or require_compatible_seed:
-                    checked = report_reuse.seed_format(source / "stratalint/raw-lean-report.json")
-                    if not checked["compatible"]:
-                        raise ValueError("staged report seed is incompatible: " + checked["report_format"])
+                invalidated = check_native_products(source, partition, staging=True)
+                if invalidated:
+                    receipt("native", "invalidated", products=invalidated, partition=partition)
+                compiled = source / "lib/lean"
+                if compiled.is_symlink() or not compiled.is_dir():
+                    raise ValueError("project cache is missing lib/lean")
                 remaining(deadline)
                 with observed_phase("install"):
                     remaining(deadline)
@@ -848,19 +1191,11 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
                         (source / ".release-refreshed-at").write_text(
                             datetime.datetime.now(datetime.timezone.utc).isoformat() + "\n", encoding="utf-8")
                         had_build = target.is_dir()
-                        had_base = base.exists() or base.is_symlink()
                         backup = pathlib.Path(tempfile.mkdtemp(prefix=".release-backup-", dir=lake))
                         if had_build:
                             target.rename(backup / "build")
-                        if had_base:
-                            base.rename(backup / "base.json")
                         source.rename(target)
                         installed.append("build")
-                        base_recorded = report_reuse.record_seed_base(root, commit)
-                        if not base_recorded:
-                            report_reuse.invalidate_seed_base(root)
-                            if approved_producer is not None:
-                                raise ValueError("approved snapshot base could not be recorded")
                         if on_installed is not None:
                             on_installed()
     except BaseException as install_error:
@@ -869,16 +1204,12 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
             try:
                 # Signals can raise after a rename but before Python records its
                 # return. Recover from the saved entries and pre-mutation state.
-                saved_build, saved_base = backup / "build", backup / "base.json"
+                saved_build = backup / "build"
                 if saved_build.is_dir() or not had_build:
                     if target.exists():
                         target.rename(backup / "replacement")
                     if saved_build.is_dir():
                         saved_build.rename(target)
-                if saved_base.exists() or saved_base.is_symlink() or not had_base:
-                    report_reuse.invalidate_seed_base(root)
-                    if saved_base.exists() or saved_base.is_symlink():
-                        saved_base.rename(base)
             except OSError as rollback_error:
                 raise RollbackFailed(backup, install_error, rollback_error) from rollback_error
             # Removing discarded bytes is housekeeping after a successful rollback.
@@ -897,20 +1228,22 @@ def restore_snapshot(root, partition, tag, stage, deadline, verification=None, r
             _observe("fetch", "cleanup-deferred", phase="cleanup", error=error,
                      attempt_only=True)
     receipt("fetch", "unpacked" if installed else "skipped",
-            mode="verification" if verification is not None else "partition", resolved=tag,
+            mode="verification" if verification else "partition", resolved=tag,
             installed=installed,
             producer_commit_sha=commit, publication_id=manifest["publication_id"], partition=partition,
             **{key: manifest[key] for key in ("workflow_run_id", "workflow_run_attempt") if key in manifest},
-            release_target=metadata.get("target_commitish"), base_recorded=base_recorded, **cleanup,
+            release_target=metadata.get("target_commitish"), **cleanup,
             _phase="install", _expected_bytes=manifest.get("archive_bytes"),
             _transferred_bytes=sum(part["bytes"] for part in parts) if local_assets is None else None,
             _validated_bytes=sum(part["bytes"] for part in parts))
     return bool(installed)
 
 
-def fetch_verification(root, partition, identity):
+def fetch_verification(root, partition, identity, *, indexed=False):
     cache_key = release_key(root)
-    tag = prefix(partition, cache_key, True) + "ci-" + identity["workflow_run_id"] + "-" + identity["workflow_run_attempt"]
+    if indexed and os.environ.get("LEAN_CACHE_RELEASE_VOLUMES") == "1":
+        indexed = "volumes"
+    tag = prefix(partition, cache_key, True, indexed=indexed) + "ci-" + identity["workflow_run_id"] + "-" + identity["workflow_run_attempt"]
     try:
         deadline = operation_deadline()
         with cache_guard(root), tempfile.TemporaryDirectory(prefix="lean-fetch-verify-") as temporary:
@@ -926,23 +1259,35 @@ def fetch_verification(root, partition, identity):
         return 1
 
 
-def fetch_candidate(root, partition, tag, producer):
-    """Restore one explicit local publication before a validated long producer builds."""
+def fetch_candidate(root, partition, tag, producer, *, targets=()):
+    """Restore a pinned Release before the long producer builds its own snapshot."""
     if not re.fullmatch(r"[0-9a-f]{40}", producer) or producer == "0" * 40:
         raise ValueError("candidate fetch requires the immutable producer commit")
     deadline = operation_deadline()
+    protected_build = False
     if os.environ.get("GITHUB_ACTIONS") == "true":
         from lean_actions import manual_source_is_valid, preparation_source_is_valid
+        protected_build = manual_source_is_valid()
         head = checked_run(["git", "-C", str(root), "rev-parse", "--verify", "HEAD"], deadline).stdout.strip()
-        if (not (manual_source_is_valid() or preparation_source_is_valid())
+        if (not (protected_build or preparation_source_is_valid())
                 or head != os.environ.get("STRATALINT_CACHE_CHECKED_OUT_SHA")):
             raise ValueError("candidate fetch in CI requires a validated long producer source")
     cache_key = release_key(root)
-    source = next((part for part in seed_partitions(root)
-        if tag.startswith(prefix(part, cache_key, True))), None)
-    suffix = "" if source is None else tag.removeprefix(prefix(source, cache_key, True))
-    if (not valid_publication_id(suffix) or not suffix.startswith("local-" + producer[:12] + "-")):
-        raise ValueError("candidate tag is outside the compatible partition or producer")
+    source, suffix, indexed = next(((part, tag.removeprefix(candidate), indexed)
+        for part in seed_partitions(root) for indexed in (False, True, "volumes")
+        if tag.startswith(candidate := prefix(part, cache_key, True, indexed=indexed))), (None, "", False))
+    verification = source is not None
+    if verification:
+        if not valid_publication_id(suffix) or not suffix.startswith(("local-" + producer[:12] + "-", "ci-")):
+            raise ValueError("candidate tag is outside the compatible partition or producer")
+    elif protected_build and not targets:
+        # A manual producer can rebuild Actions from an exact public production snapshot.
+        source = (snapshot_partition(root, partition, tag, cache_key, indexed=True)
+                  or snapshot_partition(root, partition, tag, cache_key))
+    if source is None:
+        raise ValueError("Release tag is outside the compatible partition or producer")
+    if targets and not indexed:
+        raise ValueError("scoped Release restore requires an indexed snapshot")
     def notify_installed():
         if os.environ.get("GITHUB_ACTIONS") == "true":
             for variable, content in (("GITHUB_ENV", "STRATALINT_RELEASE_CACHE_SEEDED=1\n"),
@@ -953,9 +1298,16 @@ def fetch_candidate(root, partition, tag, producer):
     try:
         with cache_guard(root), tempfile.TemporaryDirectory(prefix="lean-fetch-candidate-") as temporary:
             fetch_staging_cleanup(root, now=time.time())
+            if targets:
+                if os.environ.get("GITHUB_ACTIONS") == "true" or checkout_topology(root)[0]:
+                    raise ValueError("scoped Release restore requires a local main checkout")
+                restore_scoped(root, source, tag, pathlib.Path(temporary), deadline,
+                               cache_key=cache_key, producer=producer, targets=targets, verification=True)
+                return 0
             installed = restore_snapshot(root, source, tag, pathlib.Path(temporary), deadline,
-                {"producer_commit_sha": producer}, refresh_stale=True, cache_key=cache_key,
-                require_compatible_seed=True, on_installed=notify_installed)
+                {"producer_commit_sha": producer}, refresh_stale=True,
+                cache_key=cache_key, verification_tag=verification,
+                on_installed=notify_installed)
             if not installed:
                 raise ValueError("candidate snapshot was not installed")
         return 0
@@ -969,7 +1321,7 @@ def fetch_candidate(root, partition, tag, producer):
 
 
 def fetch(root, partition, writer_owned=False, refresh_stale=False, approved_tag=None, approved_producer=None,
-          local_assets=None):
+          local_assets=None, *, indexed=False, targets=()):
     if os.environ.get("GITHUB_ACTIONS") == "true":
         receipt("fetch", "skipped", reason="CI does not consume Release seeds")
         return 0
@@ -988,44 +1340,87 @@ def fetch(root, partition, writer_owned=False, refresh_stale=False, approved_tag
     try:
         deadline = operation_deadline()
         with contextlib.nullcontext() if writer_owned else cache_guard(root):
-            return fetch_locked(root, partition, deadline, refresh_stale, approved_tag, approved_producer, local_assets)
+            return fetch_locked(root, partition, deadline, refresh_stale, approved_tag, approved_producer,
+                                local_assets, indexed=indexed, targets=targets)
     except (OSError, ImportError, ValueError) as error:
         receipt("fetch", "miss", _error=error, reason=str(error), partition=partition)
         return 1
 
 
-def snapshot_partition(root, partition, tag, cache_key):
+def snapshot_partition(root, partition, tag, cache_key, *, indexed=False, verification=False):
     compatible = [partition] + [other for other in seed_partitions(root) if other != partition]
-    return next((candidate for candidate in compatible
-        if tag.startswith(prefix(candidate, cache_key))
-        and valid_publication_id(tag[len(prefix(candidate, cache_key)):])), None)
+    formats = ("volumes", True) if indexed is True else (indexed,)
+    return next((candidate for candidate in compatible for fmt in formats
+        if tag.startswith(address := prefix(candidate, cache_key, verification, indexed=fmt))
+        and valid_publication_id(tag[len(address):])), None)
 
 
-def snapshot_candidates(root, partition, deadline, cache_key):
-    """One listing and filter for both freshness decisions and recovery fetches."""
-    releases = json.loads(gh(deadline, "release", "list", "--repo", REPO, "--limit", "100",
-        "--json", "tagName,createdAt,isDraft"))
-    for release in sorted(releases, key=lambda item: item["createdAt"], reverse=True):
-        tag = release.get("tagName", "")
-        source = snapshot_partition(root, partition, tag, cache_key)
-        if release.get("isDraft") is False and source is not None:
+def release_tags(deadline):
+    """Enumerate GitHub Releases in creation order, including drafts."""
+    owner, name = REPO.split("/", 1)
+    query = """query($owner: String!, $name: String!, $after: String) {
+      repository(owner: $owner, name: $name) {
+        releases(first: 100, after: $after, orderBy: {field: CREATED_AT, direction: DESC}) {
+          nodes { tagName isDraft }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }"""
+    cursor_args = []
+    while True:
+        page = json.loads(gh(deadline, "api", "graphql", "-f", "query=" + query,
+                             "-f", "owner=" + owner, "-f", "name=" + name, *cursor_args,
+                             "--jq", ".data.repository.releases"))
+        yield from page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page["pageInfo"]["endCursor"]
+        if not isinstance(cursor, str) or not cursor or cursor_args == ["-f", "after=" + cursor]:
+            raise ValueError("invalid GitHub Release pagination cursor")
+        cursor_args = ["-f", "after=" + cursor]
+
+
+def snapshot_candidates(root, partition, deadline, cache_key, *, indexed=False, fallback=False, rolling_mode=None):
+    """Walk published Releases newest first, preferring indexed snapshots across all pages."""
+    legacy = []
+    for release in release_tags(deadline):
+        if release["isDraft"] is not False:
+            continue
+        tag = release["tagName"]
+        verification = rolling_mode == "verification"
+        source = snapshot_partition(root, partition, tag, cache_key, indexed=indexed, verification=verification)
+        if source is not None:
             yield source, tag
+        elif indexed and fallback:
+            source = snapshot_partition(root, partition, tag, cache_key, verification=verification)
+            if source is not None:
+                if rolling_mode:
+                    yield source, tag
+                else:
+                    legacy.append((source, tag))
+    yield from legacy
 
 
 def fetch_locked(root, partition, deadline, refresh_stale=False, approved_tag=None, approved_producer=None,
-                 local_assets=None):
+                 local_assets=None, *, indexed=False, targets=()):
     if local_assets is not None and (not approved_tag or not approved_producer or not refresh_stale):
         raise ValueError("local assets require an approved production refresh")
     fetch_staging_cleanup(root, now=time.time())
     reason = "no published snapshot in this partition"
     final_error = None
+    skipped_configuration = False
     cache_key = release_key(root)
     try:
         if approved_tag is not None:
-            source = snapshot_partition(root, partition, approved_tag, cache_key)
+            source = snapshot_partition(root, partition, approved_tag, cache_key, indexed=indexed)
+            if source is None and indexed and not targets:
+                source = snapshot_partition(root, partition, approved_tag, cache_key)
             if source is None:
                 raise ValueError("approved snapshot is outside the compatible partitions")
             candidates = [(source, approved_tag)]
+        elif indexed:
+            candidates = snapshot_candidates(root, partition, deadline, cache_key,
+                                             indexed=True, fallback=not targets)
         else:
             candidates = snapshot_candidates(root, partition, deadline, cache_key)
         attempts = 0
@@ -1037,9 +1432,17 @@ def fetch_locked(root, partition, deadline, refresh_stale=False, approved_tag=No
             try:
                 temporary = tempfile.TemporaryDirectory(prefix="lean-fetch-")
                 try:
-                    restore_snapshot(root, source, tag, pathlib.Path(temporary.name), deadline,
-                        refresh_stale=refresh_stale, cache_key=cache_key, approved_producer=approved_producer,
-                        local_assets=local_assets)
+                    if targets:
+                        restored = restore_scoped(root, source, tag, pathlib.Path(temporary.name), deadline,
+                                                  cache_key=cache_key, producer=approved_producer, targets=targets,
+                                                  verification=False)
+                        if restored is None:
+                            skipped_configuration = True
+                            continue
+                    else:
+                        restore_snapshot(root, source, tag, pathlib.Path(temporary.name), deadline,
+                            refresh_stale=refresh_stale, cache_key=cache_key, approved_producer=approved_producer,
+                            local_assets=local_assets)
                 finally:
                     try:
                         temporary.cleanup()
@@ -1056,6 +1459,8 @@ def fetch_locked(root, partition, deadline, refresh_stale=False, approved_tag=No
                 receipt("fetch", "miss", _error=error, reason=reason, resolved=tag, partition=partition)
                 if approved_tag is not None or isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
                     break
+        if skipped_configuration and final_error is None:
+            return 0
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         reason, final_error = str(error), error
     receipt("fetch", "miss", _error=final_error, reason=reason, partition=partition)
@@ -1065,7 +1470,9 @@ def fetch_locked(root, partition, deadline, refresh_stale=False, approved_tag=No
 def latest_snapshot(root, partition, deadline):
     """Read the newest compatible published manifest without downloading its archive."""
     cache_key = release_key(root)
-    for source, tag in snapshot_candidates(root, partition, deadline, cache_key):
+    prefer_index = os.environ.get("LEAN_CACHE_INDEXED", "1") == "1"
+    for source, tag in snapshot_candidates(root, partition, deadline, cache_key,
+                                           indexed=prefer_index, fallback=prefer_index):
         with tempfile.TemporaryDirectory(prefix="lean-fetch-manifest-") as temporary:
             _, manifest, _ = snapshot_manifest(source, tag, pathlib.Path(temporary), deadline,
                                                cache_key=cache_key)
@@ -1073,15 +1480,202 @@ def latest_snapshot(root, partition, deadline):
     return None
 
 
+def publisher_run(run, attempt, workflow, request):
+    record = request(f"repos/{REPO}/actions/runs/{run}/attempts/{attempt}")
+    if (record["id"] != int(run) or record["run_attempt"] != int(attempt)
+            or record["repository"]["full_name"] != REPO or record["path"] != workflow):
+        raise ValueError("rolling base requires the protected publisher workflow and run identity")
+    return record
+
+
+def rolling_source(args, deadline, request):
+    env = os.environ
+    verification = args.mode == "verification"
+    ref = args.source_ref
+    workflow_ref = env.get("GITHUB_REF", "")
+    manual_dev = not verification and env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    workflow = (".github/workflows/ci-publication-verify.yml" if verification
+                else ".github/workflows/lean-cache-publish.yml")
+    events = ("push", "workflow_dispatch") if verification else ("push", "schedule", "workflow_dispatch")
+    if (args.mode not in ("verification", "production") or REPO != "the-omega-institute/trureturing"
+            or env.get("GITHUB_ACTIONS") != "true" or env.get("GITHUB_REPOSITORY") != REPO
+            or env.get("GITHUB_REF_PROTECTED") != "true"
+            or env.get("GITHUB_WORKFLOW_REF") != f"{REPO}/{workflow}@{workflow_ref}"
+            or (ref != workflow_ref and not manual_dev)
+            or env.get("GITHUB_EVENT_NAME") not in events
+            or not (re.fullmatch(r"refs/heads/integration-ci-[A-Za-z0-9._/-]+-tests", ref)
+                    if verification else ref == "refs/heads/dev")):
+        raise ValueError("rolling base requires the matching protected Release publisher")
+    run, attempt = env.get("GITHUB_RUN_ID", ""), env.get("GITHUB_RUN_ATTEMPT", "")
+    if not all(re.fullmatch(r"[1-9][0-9]*", value) for value in (run, attempt)):
+        raise ValueError("rolling base requires a valid publisher run and attempt")
+    event = env["GITHUB_EVENT_NAME"]
+    record = publisher_run(run, attempt, workflow, request)
+    run_sha = record["head_sha"]
+    if (record["event"] != event or "refs/heads/" + record["head_branch"] != workflow_ref
+            or run_sha != env.get("GITHUB_SHA") or (not manual_dev and run_sha != args.source_commit)):
+        raise ValueError("publisher event commit differs from the checked-out source")
+    if manual_dev:
+        if (not re.fullmatch(r"refs/heads/(?:dev|integration-[A-Za-z0-9._/-]+)", workflow_ref)
+                or any(env.get(name) != "loning" for name in ("GITHUB_ACTOR", "GITHUB_TRIGGERING_ACTOR"))
+                or any(record[name]["login"] != "loning" for name in ("actor", "triggering_actor"))):
+            raise ValueError("manual dev Release requires the authorized actor and protected workflow ref")
+        inputs = json.loads(pathlib.Path(env["GITHUB_EVENT_PATH"]).read_bytes())["inputs"]
+        if (inputs.get("operation"), inputs.get("source_ref"), inputs.get("source_sha")) != (
+                "release", ref, args.source_commit):
+            raise ValueError("manual Release event does not select the requested dev source")
+        if workflow_ref != ref or run_sha != args.source_commit:
+            validate_source_ref(REPO, workflow_ref, run_sha, request)
+    git = ["git", "-C", str(args.repository)]
+    head = checked_run([*git, "rev-parse", "--verify", "HEAD"], deadline).stdout.strip()
+    dirty = checked_run([*git, "status", "--porcelain", "--untracked-files=normal"], deadline).stdout
+    if head != args.source_commit or dirty:
+        raise ValueError("rolling base requires a clean checkout at the specified source SHA")
+    validate_source_ref(REPO, ref, head, request)
+    return workflow, events
+
+
+def rolling_producer(manifest, args, workflow, events, request):
+    producer = manifest["producer_commit_sha"]
+    verification = args.mode == "verification"
+    if manifest.get("source_ref") != (args.source_ref if verification else None):
+        return False
+    if manifest["publication_id"].startswith("ci-"):
+        run = manifest["workflow_run_id"]
+        attempt = manifest["workflow_run_attempt"]
+        prior = publisher_run(run, attempt, workflow, request)
+        if prior["event"] not in events:
+            return False
+        prior_ref = "refs/heads/" + prior["head_branch"]
+        if not verification and prior["event"] == "workflow_dispatch":
+            if (not re.fullmatch(r"refs/heads/(?:dev|integration-[A-Za-z0-9._/-]+)", prior_ref)
+                    or any(prior[name]["login"] != "loning" for name in ("actor", "triggering_actor"))):
+                return False
+            # GitHub does not expose historical dispatch inputs in the run response.
+            # Bind its manifest to the authorized workflow and a protected dev ancestor.
+            validate_source_ref(REPO, prior_ref, prior["head_sha"], request)
+        elif prior_ref != args.source_ref:
+            return False
+        elif prior["head_sha"] != producer:
+            raise ValueError("published manifest producer differs from its workflow run")
+    elif verification:
+        return False
+    comparison = request(f"repos/{REPO}/compare/{producer}...{args.source_commit}")
+    status = comparison["status"]
+    if status in ("behind", "diverged"):
+        return False
+    if status not in ("ahead", "identical") or comparison["merge_base_commit"]["sha"] != producer:
+        raise ValueError("invalid rolling base ancestry comparison")
+    return True
+
+
+def rolling_result(args, tag="", producer="", digest="", indexed=False):
+    fields = dict(found="true" if tag else "false", tag=tag, producer=producer,
+                  manifest_sha256=digest, indexed="true" if indexed else "false")
+    if output := os.environ.get("GITHUB_OUTPUT"):
+        with open(output, "a", encoding="utf-8") as stream:
+            for name, value in fields.items():
+                print(f"{name}={value}", file=stream)
+    receipt(args.command, "hit" if tag else "miss", **fields)
+    return 0
+
+
+def rolling_base(args):
+    select = args.command == "select-base"
+    if (args.writer_owned or args.approved_tag or args.approved_producer or args.local_assets
+            or args.refresh_stale or args.no_build or args.indexed or (args.previous_commit_only and not select)
+            or (select and (args.tag or args.producer or args.manifest_sha256 or args.target))):
+        raise ValueError("invalid option for the protected Release base reader")
+    if not select and (not args.tag or not re.fullmatch(r"[0-9a-f]{40}", args.producer)
+                       or (args.manifest_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.manifest_sha256))):
+        raise ValueError("install-base requires an exact Release tag and producer commit")
+    deadline = operation_deadline()
+    def request(path):
+        return json.loads(gh(deadline, "api", path))
+    workflow, events = rolling_source(args, deadline, request)
+    root = args.repository
+    partition = partition_path(root)
+    key = release_key(root)
+    verification = args.mode == "verification"
+    preferred_scope = None
+    if select and os.environ.get("LEAN_CACHE_RELEASE_SPARSE_ONLY") == "1":
+        import lean_release_volume_remote as remote
+
+        preferred_scope = remote.namespace(partition, key, verification, "ci-publisher", sys.modules[__name__],
+            test_id=os.environ.get("LEAN_CACHE_VOLUME_TEST_ID") or None, source_ref=args.source_ref)
+    if select:
+        candidates = snapshot_candidates(root, partition, deadline, key, indexed=True,
+                                         fallback=True, rolling_mode=args.mode)
+    else:
+        source = next((part for indexed in (True, False) if (part := snapshot_partition(
+            root, partition, args.tag, key, indexed=indexed, verification=verification))), None)
+        candidates = [(source, args.tag)] if source else []
+    for source, tag in candidates:
+        if preferred_scope and (source != partition or not tag.startswith(prefix(partition, key, verification, indexed="volumes"))):
+            continue
+        with tempfile.TemporaryDirectory(prefix="lean-rolling-base-") as temporary:
+            stage = pathlib.Path(temporary)
+            metadata = existing_release(tag, deadline)
+            if metadata is None or metadata["draft"]:
+                continue
+            snapshot = snapshot_manifest(source, tag, stage, deadline, cache_key=key,
+                                         verification=verification, metadata=metadata)
+            _, manifest, _ = snapshot
+            if preferred_scope and (manifest["schema"] != remote.SCHEMA or manifest["volume_scope"] != preferred_scope):
+                continue
+            producer = manifest["producer_commit_sha"]
+            if args.previous_commit_only and producer == args.source_commit:
+                continue
+            digest = archive_sha(stage / MANIFEST, deadline)
+            if not select and (producer != args.producer or (args.manifest_sha256 and digest != args.manifest_sha256)):
+                raise ValueError("rolling base differs from the selected producer or manifest digest")
+            if not rolling_producer(manifest, args, workflow, events, request):
+                continue
+            indexed = manifest["schema"] in (INDEXED_SCHEMA, "lean-release-seed-v6")
+            if indexed:
+                from lean_artifact_inventory import lake_configuration
+                if manifest["lake_inputs_sha256"] != lake_configuration(root):
+                    continue
+            if not select:
+                with cache_guard(root):
+                    if (not args.target and manifest["schema"] == "lean-release-seed-v6" and source == partition
+                            and os.environ.get("LEAN_CACHE_RELEASE_SPARSE") == "1"):
+                        import lean_release_sparse as sparse
+
+                        if sparse.install(sys.modules[__name__], root, stage, tag, manifest, digest,
+                                          args.source_commit, args.source_ref,
+                                          verification, deadline):
+                            return rolling_result(args, tag, producer, digest, indexed)
+                    if args.target and indexed:
+                        result = restore_scoped(root, source, tag, stage, deadline, cache_key=key,
+                            producer=producer, targets=args.target, verification=verification, validated_snapshot=snapshot)
+                        if not result or not result[0]:
+                            continue
+                    elif not restore_snapshot(root, source, tag, stage, deadline,
+                            expected={"producer_commit_sha": producer}, verification_tag=verification,
+                            cache_key=key, validated_snapshot=snapshot):
+                        raise ValueError("rolling base needs an empty private project build")
+            return rolling_result(args, tag, producer, digest, indexed)
+    return rolling_result(args)
+
+
 def _main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("address", "publish", "fetch"))
+    parser.add_argument("command", choices=("address", "publish", "fetch", "select-base", "install-base"))
     parser.add_argument("--repository", type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[3])
     parser.add_argument("--mode", choices=("production", "verification", "candidate"), default="production")
     parser.add_argument("--source-ref", default="")
     parser.add_argument("--source-commit", default="")
-    parser.add_argument("--tag", default="", help="exact local candidate Release to restore")
-    parser.add_argument("--no-build", action="store_true", help="publish an existing checked full report/build")
+    parser.add_argument("--tag", default="", help="exact candidate or rolling base Release")
+    parser.add_argument("--producer", default="", help="immutable commit of the selected rolling base")
+    parser.add_argument("--manifest-sha256", default="", help="digest returned by select-base")
+    parser.add_argument("--previous-commit-only", action="store_true",
+                        help="select a rolling base from a strict ancestor of the target commit")
+    parser.add_argument("--target", action="append", default=[], help="restore the current import closure for this Lean module")
+    parser.add_argument("--indexed", action="store_true", help="use indexed Release snapshot transport")
+    build_mode = parser.add_mutually_exclusive_group()
+    build_mode.add_argument("--no-build", action="store_true", help="publish an existing project cache")
+    build_mode.add_argument("--prepare-only", action="store_true", help="prepare the project cache and stop before packing")
     # Internal handoff from LeanArchiveFetch after its typed guard assertion.
     parser.add_argument("--writer-owned", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--approved-tag", help=argparse.SUPPRESS)
@@ -1091,6 +1685,8 @@ def _main():
     parser.add_argument("--refresh-stale", action="store_true",
                         help="replace an expired private project build after validating the complete snapshot")
     args = parser.parse_args()
+    if args.command == "fetch" and args.mode == "production" and os.environ.get("LEAN_CACHE_INDEXED", "1") == "1":
+        args.indexed = True
     global CURRENT_OPERATION, CURRENT_MODE, LOG_LAST
     CURRENT_OPERATION, CURRENT_MODE = args.command, args.mode
     LOG_LAST = {}
@@ -1098,6 +1694,15 @@ def _main():
         LOG.emit("operation_started", operation=CURRENT_OPERATION, action=CURRENT_OPERATION, mode=CURRENT_MODE)
     try:
         args.repository = args.repository.resolve()
+        if args.prepare_only and args.command != "publish":
+            raise ValueError("--prepare-only requires publish")
+        if args.command in ("select-base", "install-base"):
+            return rolling_base(args)
+        if args.producer or args.manifest_sha256 or args.previous_commit_only:
+            raise ValueError("rolling base options require select-base or install-base")
+        if args.target and (args.command != "fetch" or args.mode == "verification"
+                            or (args.mode == "production" and not args.indexed)):
+            raise ValueError("--target requires an indexed production or exact indexed candidate fetch")
         if args.no_build and args.command != "publish":
             raise ValueError("--no-build requires publish")
         if args.tag and (args.mode != "candidate" or args.command != "fetch"):
@@ -1124,22 +1729,26 @@ def _main():
                 raise ValueError("candidate mode requires an explicit local publication or exact fetch")
             partition = partition_path(args.repository)
             if args.command == "fetch":
-                return fetch_candidate(args.repository, partition, args.tag, args.source_commit)
+                return fetch_candidate(args.repository, partition, args.tag, args.source_commit, targets=args.target)
             verification = candidate_identity(args.repository, args.source_commit, operation_deadline())
         partition = partition_path(args.repository)
         if args.command == "address":
             cache_key = release_key(args.repository)
+            physical = args.indexed and os.environ.get("LEAN_CACHE_RELEASE_VOLUMES") == "1"
             payload = {"partition": partition, "cache_key": cache_key,
-                       "release_prefix": prefix(partition, cache_key), "asset": ASSET}
+                       "release_prefix": prefix(partition, cache_key, indexed="volumes" if physical else args.indexed),
+                       "asset": INDEXED_ASSET if args.indexed else ASSET}
             _observe("address", "resolved", phase="address")
             print(json.dumps(payload))
             return 0
         if args.command == "fetch":
             if verification is not None:
-                return fetch_verification(args.repository, partition, verification)
+                return fetch_verification(args.repository, partition, verification, indexed=args.indexed)
             return fetch(args.repository, partition, args.writer_owned, args.refresh_stale,
-                         args.approved_tag, args.approved_producer, args.local_assets)
-        return publish(args.repository, partition, verification, build_report=not args.no_build)
+                         args.approved_tag, args.approved_producer, args.local_assets,
+                         indexed=args.indexed, targets=args.target)
+        return publish(args.repository, partition, verification, build_cache=not args.no_build, indexed=args.indexed,
+                       prepare_only=args.prepare_only)
     except RollbackFailed as error:
         receipt(args.command, "rollback-failed", _error=error, reason=str(error), backup=error.backup)
         return 2

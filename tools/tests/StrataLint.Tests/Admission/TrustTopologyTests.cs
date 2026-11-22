@@ -20,7 +20,6 @@ public sealed class TrustTopologyTests
         "tools/StrataLint.Engine/Admission/BootstrapGate.cs";
     private const string BlueprintSourcePath = "Blueprint/D5/S0/Carrier/Ring.scribe.cs";
     private const string BlueprintProjectionPath = "Blueprint/D5/S0/Carrier/Ring.md";
-    private const string UnprotectedTruthGraphPath = "Generated/truth-graph.v1.json";
     private const string ProtectedScribeEmissionsPath =
         "tools/Generated/scribe-emissions.v1.json";
     private const string ProtectedAnchorCatalogPath =
@@ -69,15 +68,6 @@ public sealed class TrustTopologyTests
 
         Assert.Equal(expected, BootstrapProtectionPolicy.IsProtected(path));
         Assert.Equal(expected, BootstrapGate.IsProtected(path));
-    }
-
-    [Fact]
-    public void TopLevelTruthGraphChangeDoesNotProduceSl022Diagnostics()
-    {
-        var clear = Assert.IsType<BootstrapOutcome.Clear>(
-            BootstrapGate.Evaluate(RawChangeSet.Create([UnprotectedTruthGraphPath])));
-
-        Assert.NotNull(clear.Capability);
     }
 
     [Fact]

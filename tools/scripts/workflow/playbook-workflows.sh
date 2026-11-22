@@ -3,8 +3,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 PROJECT="tools/StrataLint.Cli/StrataLint.Cli.csproj"
-REPORT=".lake/build/stratalint/raw-lean-report.json"
-FROZEN_LEDGER="Golden/Frozen/state"
 COMMAND="${1:-}"
 BASE="${2:-origin/dev}"
 GID="${3:-}"
@@ -12,38 +10,6 @@ GID="${3:-}"
 run_cli() {
   dotnet run --project "$PROJECT" --configuration Release -- "$@"
 }
-
-align_delivery_ledger() {
-  local closed_modules module closed_query_output targets=''
-  local align_args=(ledger-align)
-
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "PLAYBOOK_INVALID jq is required to read Closed module selectors" >&2
-    return 2
-  fi
-  if ! closed_query_output="$(run_cli ledger-align --list-closed --candidate-lean-report "$REPORT")"; then
-    echo "PLAYBOOK_INVALID current Closed module query failed" >&2
-    return 2
-  fi
-  if ! closed_modules="$(jq -r '.[]' <<< "$closed_query_output" 2>&1)"; then
-    echo "PLAYBOOK_INVALID failed to read Closed modules: $closed_modules" >&2
-    return 2
-  fi
-
-  while IFS= read -r module; do
-    if [[ -n "$module" && ! -f "$FROZEN_LEDGER/$module.json" ]]; then
-      align_args+=(--add "$module")
-      targets+="${targets:+ }${module%.lean}"
-    fi
-  done <<< "$closed_modules"
-  if [[ -n "$targets" ]]; then
-    targets="${targets//\//.}"
-    step lean-report-prepare make lean-report-prepare "LEAN_TARGETS=$targets"
-    step lean-report-scoped make lean-report-scoped "LEAN_TARGETS=$targets"
-    run_cli "${align_args[@]}" --candidate-lean-report .lake/build/stratalint/scoped-lean-report.json
-  fi
-}
-
 
 begin_step() {
   local label="$1"
@@ -157,13 +123,6 @@ deposit_module() {
 
 
 case "$COMMAND" in
-  deliver-check)
-    make check-lean-report
-    make emit
-    # Freeze last among all mutating derivations so the proposition snapshot is current.
-    align_delivery_ledger
-    make gate BASE="$BASE"
-    ;;
   deposit|deposit-uncovered)
     if [[ "$#" -ne 3 || -n "${ATOM_ID+x}" ]]; then
       echo "usage: playbook-workflows.sh $COMMAND BASE GID" >&2
@@ -174,7 +133,7 @@ case "$COMMAND" in
     printf 'PLAYBOOK_DEPOSIT_FROZEN gid=%s\n' "$GID" >&2
     ;;
   *)
-    echo "usage: playbook-workflows.sh deliver-check [BASE] | deposit BASE GID" >&2
+    echo "usage: playbook-workflows.sh deposit|deposit-uncovered BASE GID" >&2
     exit 2
     ;;
 esac

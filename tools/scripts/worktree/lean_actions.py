@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 
 from cache_material import sha
+from lean_artifact_inventory import retired_report_path
 from lean_cache import binary_platform, partition_path, resolved_mathlib
 
 LAYERS = ("dependency", "project")
@@ -353,6 +354,18 @@ def stamp_restored_dependency(root, keys):
         "os": keys["os"], "arch": keys["arch"]})
 
 
+def discard_retired_reports(build):
+    if build.parent.is_symlink() or build.is_symlink():
+        return
+    for name in ("stratalint", "lean-inspector"):
+        directory = build / name
+        if directory.is_symlink() or not directory.is_dir():
+            continue
+        for path in directory.iterdir():
+            if retired_report_path(path.relative_to(build)) and (path.is_symlink() or path.is_file()):
+                path.unlink()
+
+
 def restore_native(root, keys, layer, key, outcome):
     spec = keys[layer]
     requested = {"requested_key": spec.get("restore_key", spec["key"])} if layer == "project" else {}
@@ -380,6 +393,8 @@ def restore_native(root, keys, layer, key, outcome):
                     write_small_record(record, {"snapshot_key": spec["key"], "matched_key": key, "inputs_sha256": digest})
             except (OSError, ValueError, TypeError, KeyError):
                 pass
+        else:
+            discard_retired_reports(target)
         receipt(layer, "restored", key=key, partition=keys["partition"], transport="actions-native", **requested)
         return True
     except (OSError, ValueError, TypeError) as error:
@@ -460,6 +475,15 @@ def resume_spec(root):
         "inputs": dependency_inputs(root), "mathlib": keys["mathlib_revision"],
         "os": keys["os"], "arch": keys["arch"],
     }
+    release_tag = os.environ.get("STRATALINT_RELEASE_SEED_TAG", "")
+    release_producer = os.environ.get("STRATALINT_RELEASE_SEED_PRODUCER", "")
+    if release_tag or release_producer:
+        if (not manual_source_is_valid() or not re.fullmatch(r"[A-Za-z0-9._-]+", release_tag)
+                or not re.fullmatch(r"[0-9a-f]{40}", release_producer) or release_producer == "0" * 40):
+            raise ValueError("Release continuation requires a protected dispatch and both Release pins")
+        binding["release_seed"] = {"tag": release_tag, "producer": release_producer,
+                                   "target": os.environ["STRATALINT_CACHE_SOURCE_COMMIT"],
+                                   "run": os.environ["GITHUB_RUN_ID"]}
     identity = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     prefix = f"lean-producer-resume-v1-{keys['mathlib_revision']}-{keys['os']}-{keys['arch']}-{identity}-"
     paths = native_archive_paths(root, LAYERS)
@@ -502,6 +526,7 @@ def resume_restore(root, spec, key, outcome):
         for path in (root / ".lake/packages", root / ".lake/build"):
             if path.is_symlink() or not path.is_dir():
                 raise ValueError("resume native material is unavailable")
+        discard_retired_reports(root / ".lake/build")
         stamp_restored_dependency(root, actions_keys(root))
         write_small_record(resume_record(root), {
             "schema_version": 1, "identity": spec["identity"],
