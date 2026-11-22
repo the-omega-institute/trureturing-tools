@@ -1,5 +1,4 @@
 using System.Collections.Immutable;
-using Trureturing.Truth;
 
 namespace StrataLint.Engine;
 
@@ -18,8 +17,6 @@ internal static class GeneratedArtifactInventory
         new("Generated/DAG.md", "DagEmitter", "A-DAG");
     internal static GeneratedArtifactIdentity TruthGraph { get; } =
         new("Generated/truth-graph.v1.json", "DagEmitter", "A-TRUTH");
-    internal static GeneratedArtifactIdentity TruthExport { get; } =
-        new("Generated/truth-export.v1.json", TruthExportModel.ProducerName, "A-TRUTHEXPORT");
     internal static GeneratedArtifactIdentity FileMap { get; } =
         new("Generated/FILEMAP.md", "FileMapEmitter", "A-FILEMAP");
     internal static GeneratedArtifactIdentity ScribeAttestation { get; } =
@@ -31,7 +28,7 @@ internal static class GeneratedArtifactInventory
         ArgumentNullException.ThrowIfNull(documentPaths);
         var artifacts = documentPaths
             .Select(static path => new GeneratedArtifactIdentity(path, DocumentProducer))
-            .Concat([Values, Dag, TruthGraph, TruthExport, FileMap, ScribeAttestation])
+            .Concat([Values, Dag, TruthGraph, FileMap, ScribeAttestation])
             .OrderBy(static artifact => artifact.Path, StringComparer.Ordinal)
             .ToImmutableArray();
         if (artifacts.Select(static artifact => artifact.Path)

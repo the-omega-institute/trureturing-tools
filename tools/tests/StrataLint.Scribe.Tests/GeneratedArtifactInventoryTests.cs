@@ -1,5 +1,4 @@
 using StrataLint.Engine;
-using Trureturing.Truth;
 
 namespace StrataLint.Scribe.Tests;
 
@@ -12,11 +11,10 @@ public sealed class GeneratedArtifactInventoryTests
         Assert.Equal(nameof(ValuesEmitter), GeneratedArtifactInventory.Values.Producer);
         Assert.Equal(nameof(DagEmitter), GeneratedArtifactInventory.Dag.Producer);
         Assert.Equal(nameof(DagEmitter), GeneratedArtifactInventory.TruthGraph.Producer);
-        Assert.Equal(TruthExportModel.ProducerName, GeneratedArtifactInventory.TruthExport.Producer);
         Assert.Equal(nameof(FileMapEmitter), GeneratedArtifactInventory.FileMap.Producer);
         Assert.Equal(nameof(ScribeEmitter), GeneratedArtifactInventory.ScribeAttestation.Producer);
         Assert.Equal(
-            ["A-DAG", "A-FILEMAP", "A-SCRIBE", "A-TRUTH", "A-TRUTHEXPORT", "A-VALUES"],
+            ["A-DAG", "A-FILEMAP", "A-SCRIBE", "A-TRUTH", "A-VALUES"],
             GeneratedArtifactInventory.Create([]).Select(item => item.ArtifactId).Order(StringComparer.Ordinal));
     }
 
