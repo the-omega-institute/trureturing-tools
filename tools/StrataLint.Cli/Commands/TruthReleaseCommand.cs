@@ -33,8 +33,7 @@ internal static class TruthReleaseCommand
                     (path, hash) => contentHashes.Add(path, hash))));
             var report = RawLeanReportArtifact.ReadFile(
                 options.CandidateLeanReport, snapshot, out var rawLeanReportBytes, validateMaterials: false);
-            if (!TryPrepareFrozenTruth(snapshot, report, out var prepared, out var rejection))
-                return new(2, string.Empty, $"TRUTH_RELEASE_REJECTED {rejection}\n");
+            var prepared = PrepareFrozenTruth(snapshot, report);
 
             var truth = prepared.Truth;
             var sourceTree = Bare(identity.TreeOid);
@@ -71,7 +70,10 @@ internal static class TruthReleaseCommand
                         ProducerRepository,
                         options.ProducerPackageCommit,
                         ReadOnly: true),
-                    options.ProducedAt));
+                    options.ProducedAt)
+                {
+                    ManifestSchema = TruthReleaseManifestReader.ScheduledSchema,
+                });
             if (options.DagOutput is not null)
             {
                 using var dagOutput = new FileStream(options.DagOutput, FileMode.CreateNew, FileAccess.Write);
@@ -99,27 +101,11 @@ internal static class TruthReleaseCommand
         }
     }
 
-    private static bool TryPrepareFrozenTruth(
-        RepositorySnapshot snapshot,
-        LeanAxiomReport report,
-        out FrozenTruth prepared,
-        out string rejection)
+    private static FrozenTruth PrepareFrozenTruth(RepositorySnapshot snapshot, LeanAxiomReport report)
     {
-        prepared = null!;
-        rejection = string.Empty;
         var truth = new TruthContext(snapshot, DagLedgerCommandPreparation.ValidateLean(snapshot, report), report);
         var states = LeanTruthStates.Resolve(snapshot, truth.Lean);
         var frozen = FrozenStateCatalog.Load(snapshot);
-        foreach (var (path, record) in frozen.Records)
-            if (!snapshot.Files.ContainsKey(path) || !states.TryGetValue(path, out var state) || state is not TruthState.Closed
-                || !report.Files.TryGetValue(path, out var module)
-                || record.StatementId != FrozenContentAddress.ComputeModuleStatementId(path, module)
-                || !record.Declarations.SequenceEqual(FrozenStateRecord.Project(module)))
-            {
-                rejection = $"frozen state does not match current report: {path.Value}";
-                return false;
-            }
-
         var catalog = FrozenContentAddress.Build(snapshot, truth.Lean, states,
             LeanImportAdjacency.BuildFromSources(snapshot)) switch
         {
@@ -127,8 +113,7 @@ internal static class TruthReleaseCommand
             FrozenMaterialOutcome.Rejected rejected => throw new FormatException(rejected.Message),
             _ => throw new InvalidOperationException("unknown frozen material outcome"),
         };
-        prepared = new FrozenTruth(truth, states, frozen, catalog);
-        return true;
+        return new FrozenTruth(truth, states, frozen, catalog);
     }
 
     private sealed record FrozenTruth(

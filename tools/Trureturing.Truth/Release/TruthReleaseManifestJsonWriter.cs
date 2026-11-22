@@ -28,7 +28,7 @@ public static class TruthReleaseManifestJsonWriter
 
         var element = JsonSerializer.SerializeToElement(new
         {
-            schema = TruthReleaseManifestReader.Schema,
+            schema = manifest.Schema,
             source = new
             {
                 source_repo = manifest.Source.SourceRepo,

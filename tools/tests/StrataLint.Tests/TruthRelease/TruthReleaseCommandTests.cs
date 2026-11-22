@@ -56,7 +56,7 @@ public sealed partial class TruthReleaseCommandTests
         using (var manifest = JsonDocument.Parse(File.ReadAllBytes(
             Path.Combine(output.Path, TruthReleaseBundleWriter.ManifestFileName))))
         {
-            Assert.Equal("truth-release", manifest.RootElement.GetProperty("schema").GetString());
+            Assert.Equal("truth-release-scheduled", manifest.RootElement.GetProperty("schema").GetString());
         }
         using (var sourceSnapshot = JsonDocument.Parse(File.ReadAllBytes(
             Path.Combine(output.Path, TruthReleaseBundleWriter.SourceSnapshotFileName))))
@@ -82,17 +82,22 @@ public sealed partial class TruthReleaseCommandTests
     }
 
     [Fact]
-    public void FrozenStateThatDisagreesWithTheReportFailsClosedWithoutWritingABundle()
+    public void PublicationUsesRecordedMembershipWithoutRepeatingFrozenAdmission()
     {
         using var fixture = CreateFixture(mismatchedFrozenState: true);
         using var output = new TemporaryDirectory();
 
         var (exitCode, console) = Run(fixture, output.Path, GreenTrustArguments());
 
-        Assert.Equal(2, exitCode);
-        Assert.Contains("TRUTH_RELEASE_REJECTED frozen state does not match current report",
-            console.Error, StringComparison.Ordinal);
-        Assert.Empty(Directory.EnumerateFileSystemEntries(output.Path));
+        Assert.True(exitCode == 0, console.Error);
+        var publication = TruthReleasePublicationReader.Read(File.ReadAllBytes(
+            Path.Combine(output.Path, TruthReleaseBundleWriter.PublicationFileName)));
+        var export = TruthReleasePublicationVerification.Verify(output.Path, publication).ReadTruthExport();
+        var dependency = Assert.Single(export.Nodes, node => node.RepoPath == PathFor("Dependency"));
+        Assert.Equal("frozen", dependency.FreezeStatus);
+        var declaration = Assert.Single(dependency.Declarations);
+        Assert.Equal(Declaration("dependency").NameKey, declaration.DeclarationNameKey);
+        Assert.NotEqual("sha256:" + new string('0', 64), declaration.StatementId);
     }
 
     [Fact]
