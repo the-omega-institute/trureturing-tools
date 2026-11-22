@@ -29,7 +29,7 @@ internal sealed class LeanCacheChunkFixture : IDisposable
         releases = Path.Combine(temporary.Path, "releases");
         script = Path.Combine(repository, "tools/scripts/worktree/lean-cache-publish.sh");
         owner = Path.Combine(Path.GetDirectoryName(script)!, "lean_cache_release.py");
-        foreach (var directory in new[] { repository, bin, releases, Path.GetDirectoryName(script)!, Path.Combine(repository, ".lake/build/lib/lean") })
+        foreach (var directory in new[] { repository, bin, releases, Path.GetDirectoryName(script)!, Path.Combine(repository, ".lake/build") })
             ScriptHarnessScratch.EnsureDirectory(directory);
         foreach (var name in new[] { "lean-cache-publish.sh", "lean_cache_release.py", "lean_cache_release_io.py", "lean_cache_topology.py", "lean_cache.py", "cache_material.py" })
             ScriptHarnessScratch.CopyScriptInto(
@@ -40,7 +40,6 @@ internal sealed class LeanCacheChunkFixture : IDisposable
             packages = new[] { new { name = "mathlib", rev = Revision, inputRev = "requested-tag" } },
         }));
         Write(Path.Combine(repository, "lean-toolchain"), "leanprover/lean4:v4.33.0\n");
-        Write(Path.Combine(repository, ".lake/build/lib/lean/Trureturing.olean"), "compiler artifact");
         Write(Path.Combine(repository, "Trureturing.lean"), "def fixture := 1\n");
         var reportSetup = TestProcessRunner.Run("python3", ["-B",
             Path.Combine(TestRepositoryLayout.FindRoot(), "tools/tests/StrataLint.ScriptTests/Fixtures/lean_seed_support.py"),
