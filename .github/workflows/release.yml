@@ -1,6 +1,10 @@
 name: Publish a tested tools preview
 
 on:
+  workflow_run:
+    workflows: ["Test tools"]
+    branches: [dev]
+    types: [completed]
   workflow_dispatch:
     inputs:
       source:
@@ -13,7 +17,12 @@ permissions:
 
 jobs:
   verify:
-    if: github.ref == 'refs/heads/dev'
+    if: >-
+      github.ref == 'refs/heads/dev' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.id == github.event.repository.id))
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -55,6 +64,7 @@ jobs:
 
   preview:
     needs: verify
+    concurrency: publish-tools-preview-${{ needs.verify.outputs.tag }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
