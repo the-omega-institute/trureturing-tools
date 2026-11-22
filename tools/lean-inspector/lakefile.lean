@@ -142,7 +142,7 @@ script reportScope args do
       let name := queue[index]!
       index := index + 1
       if visited.contains name.toName then continue
-      let some mod := (← getWorkspace).findModule? name.toName
+      let some mod := (← getWorkspace).findTargetModule? name.toName
         | error s!"scoped report module is not in the Lake workspace: {name}"
       let closure ← (← mod.transImports.fetch).await
       for dependency in #[mod] ++ closure do

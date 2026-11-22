@@ -1,6 +1,23 @@
+import json
+
 from test_native_support import ROOT
 
 class NativeInterfaceConsumerTests:
+    def test_report_scope_includes_the_executable_root_and_its_imports(self):
+        self.reg_package()
+        request = self.root / 'scope-request.json'
+        output = self.root / 'scope-result.json'
+        request.write_text(json.dumps(dict(roots=['Inspector', 'D5.A'], modules=['D5.A', 'D5.B'],
+                                           utilities=[], utility_inputs=[])))
+        self.run_lake('-d', str(self.root / 'tools/lean-inspector-reg'), 'script', 'run',
+                      'leanInspector/reportScope', str(request), str(output))
+        graph = json.loads(output.read_text())
+        self.assertEqual([m['module'] for m in graph['modules']], ['D5.A', 'D5.B'])
+        dependencies = {m['module']: m for m in graph['dependencies']}
+        self.assertEqual('tools/lean-inspector/Inspector.lean', dependencies['Inspector']['source_path'])
+        self.assertIn('LeanInformationAudit.RawArtifacts', dependencies['Inspector']['imports'])
+        self.assertIn('LeanInformationAudit.RawArtifacts', dependencies)
+
     def test_shared_inspector_and_audit_build_reuses_native_programs(self):
         self.reg_package()
         self.build()
