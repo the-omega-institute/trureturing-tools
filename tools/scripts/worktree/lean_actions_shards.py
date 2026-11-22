@@ -259,9 +259,9 @@ def prepare(root, identity, state, previous, anchor, targets=(), available=froze
         resume_spec(root)
     with cache_guard(root, shared=True):
         if state == "complete":
-            check_native_products(root / PROJECT_BUILD, f"{identity['os']}-{identity['arch']}")
             report = root / PROJECT_BUILD / REPORT_PATH
             report_reuse.read_receipt(report, report_reuse.capture(root))
+            check_native_products(root / PROJECT_BUILD)
         modules = workspace_modules(root)
         graph = project_imports(root, modules)
         inventory = build_inventory(root, modules)
@@ -463,8 +463,7 @@ def install(root, record, targets=None, *, require_complete=False, preparation=N
         extract_seconds = time.monotonic() - extract_started
         install_started = time.monotonic()
         if unpacked.is_dir() and not (require_complete and missing):
-            identity = record["binding"]
-            check_native_products(unpacked, f"{identity['os']}-{identity['arch']}")
+            check_native_products(unpacked)
         if require_complete and missing:
             available.clear()
         elif continuation:

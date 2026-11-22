@@ -36,13 +36,14 @@ def native_format(path):
     return None
 
 
-def check_native_products(build, source_partition, *, staging=False):
+def check_native_products(build, source_partition=None, *, staging=False):
     """Validate a publisher, or invalidate native facets in a private restored build."""
     from lean_cache import binary_platform
     system, machine = binary_platform()
     if system not in ('darwin', 'linux'):
         return 0
-    foreign = source_partition.rsplit('/', 1)[-1] != f'{system}-{machine}'
+    host = f'{system}-{machine}'
+    foreign = source_partition is not None and source_partition.rsplit('/', 1)[-1] != host
     products = []
 
     def fail(error):
@@ -64,7 +65,7 @@ def check_native_products(build, source_partition, *, staging=False):
             products.append(path)
             if fmt and (fmt[0] != system or (fmt[1] is not None and fmt[1] != machine)):
                 if not staging:
-                    raise ValueError(f'foreign native Lake product in {source_partition}: {path.relative_to(build)}')
+                    raise ValueError(f'foreign native Lake product for {host}: {path.relative_to(build)}')
                 foreign = True
     if not foreign or not staging:
         return 0
