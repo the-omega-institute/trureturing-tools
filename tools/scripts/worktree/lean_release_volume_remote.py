@@ -190,15 +190,20 @@ def ranges(tree, rows):
         yield pending
 
 
-def download(host, manifest, tree, rows, output, deadline, assets):
-    calls = total = 0
+def asset_ranges(host, manifest, tree, rows, deadline, assets):
     for digest, start, size in ranges(tree, rows):
         if digest not in assets:
             tag = volume_prefix(manifest["volume_scope"]) + digest
             assets[digest] = asset_for(host, tag, digest, tree["volumes"][digest], deadline)
             if assets[digest] is None:
                 raise ValueError("missing physical volume: " + tag)
-        host.download_range(assets[digest], start, size, output, deadline)
+        yield assets[digest], start, size
+
+
+def download(host, manifest, tree, rows, output, deadline, assets):
+    calls = total = 0
+    for asset, start, size in asset_ranges(host, manifest, tree, rows, deadline, assets):
+        host.download_range(asset, start, size, output, deadline)
         calls += 1
         total += size
     return calls, total

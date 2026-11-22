@@ -145,23 +145,13 @@ def install(host, root, stage, tag, manifest, digest, target, source_ref, verifi
     # assets. Reserve every omitted module's paths so it cannot also supply Lean data.
     reserved = {PurePosixPath(path) for row in tree["members"]
                 if row["module"] is not None and row["module"] not in needed for path in row["paths"]}
-    assets = {}
-    requests = transferred = 0
     lake.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".sparse-seed-", dir=lake) as temporary:
         temp = Path(temporary)
         unpacked = temp / "build"
         unpacked.mkdir()
-        for group in index.adjacent_members(selected, max_bytes=index.BATCH_BYTES):
-            with tempfile.TemporaryFile(dir=temp) as frames:
-                count, size = remote.download(host, manifest, tree, group, frames, deadline, assets)
-                requests += count
-                transferred += size
-                frames.seek(0)
-                for row in group:
-                    index.extract_frame(frames, row, unpacked, reserved, deadline)
-                    if row["module"] is not None:
-                        index.check_compiler_outputs(unpacked, row)
+        spans = remote.asset_ranges(host, manifest, tree, selected, deadline, {})
+        requests, transferred = index.extract_ranges(host.range_blocks, spans, selected, unpacked, reserved, deadline)
         reason = native_fallback(unpacked, reserved, tree, plan)
         if reason is not None:
             host.receipt("sparse-seed", "full-fallback", tag=tag, native_product=reason)
