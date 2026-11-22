@@ -323,6 +323,7 @@ public sealed class LeanCacheChunkScriptTests
         Assert.Contains("\"status\":\"failed\"", result.Text, StringComparison.Ordinal);
         Assert.True(fixture.Metadata(fixture.Tag)["draft"]!.GetValue<bool>());
         Assert.Single(fixture.Assets(fixture.Tag));
+        fixture.ClearPrivateBuild();
         AssertMiss(fixture.Fetch(), "no published snapshot in this partition");
         Assert.Null(fixture.Unpacked);
         Assert.Null(fixture.UnpackedReport);
