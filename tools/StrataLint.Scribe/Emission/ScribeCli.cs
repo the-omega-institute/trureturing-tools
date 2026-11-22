@@ -11,11 +11,8 @@ public static class ScribeCli
     public static ImmutableArray<string> ImplementedCommands { get; } =
     [
         "content-check",
-        "describe-report",
         .. EmissionCommands.Order(StringComparer.Ordinal),
         "lean-inputs",
-        "markdown-check",
-        "projections",
         "resources",
         "resources release",
         "resources verify-release",
@@ -26,22 +23,14 @@ public static class ScribeCli
         IReadOnlyList<string> arguments,
         string workingDirectory,
         TextWriter output,
-        TextWriter error) => Run(arguments, workingDirectory, output, error, leanReport: null);
+        TextWriter error) => Run(arguments, workingDirectory, output, error, input: null);
 
     internal static int Run(
         IReadOnlyList<string> arguments,
         string workingDirectory,
         TextWriter output,
         TextWriter error,
-        TextReader input) => Run(arguments, workingDirectory, output, error, leanReport: null, input);
-
-    internal static int Run(
-        IReadOnlyList<string> arguments,
-        string workingDirectory,
-        TextWriter output,
-        TextWriter error,
-        LeanAxiomReport? leanReport,
-        TextReader? input = null)
+        TextReader? input)
     {
         ArgumentNullException.ThrowIfNull(arguments);
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
@@ -56,9 +45,14 @@ public static class ScribeCli
             if (arguments is ["lean-inputs", "--affected", "--paths-from", var changed])
                 return PullRequestLeanChecks.Plan(FindRepositoryRoot(workingDirectory), ReadPaths(changed, input), output);
             if (arguments is ["content-check", "--scoped", "--report", var artifact, "--targets-from", var targets,
-                "--paths-from", var changedPaths])
+                "--paths-from", var changedPaths] && !string.IsNullOrWhiteSpace(artifact)
+                && !string.IsNullOrWhiteSpace(targets) && !string.IsNullOrWhiteSpace(changedPaths))
                 return PullRequestLeanChecks.Check(FindRepositoryRoot(workingDirectory), artifact,
                     ReadPaths(targets, input), ReadPaths(changedPaths, input), output, error);
+            if (arguments is ["content-check", "--scoped", "--targets-from", var emptyTargets,
+                "--paths-from", var paths] && !string.IsNullOrWhiteSpace(emptyTargets) && !string.IsNullOrWhiteSpace(paths))
+                return PullRequestLeanChecks.Check(FindRepositoryRoot(workingDirectory), null,
+                    ReadPaths(emptyTargets, input), ReadPaths(paths, input), output, error);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
             or ArgumentException or FormatException or InvalidOperationException or InvalidDataException)
@@ -113,125 +107,6 @@ public static class ScribeCli
             }
         }
 
-        if (command is "content-check" or "markdown-check")
-        {
-            if (arguments.Count == 3 && arguments[1] == "--report")
-            {
-                error.WriteLine($"MissingPathsManifest: {command} requires --paths-from <file|->");
-                return 2;
-            }
-            if (arguments.Count != 5 || arguments[1] != "--report"
-                || string.IsNullOrWhiteSpace(arguments[2]) || arguments[3] != "--paths-from"
-                || string.IsNullOrWhiteSpace(arguments[4]))
-            {
-                error.WriteLine(Usage);
-                return 2;
-            }
-            try
-            {
-                var root = FindRepositoryRoot(workingDirectory);
-                var report = leanReport ?? LeanCompiledArtifactReports.ReadRepositoryFiles(root, arguments[2]);
-                if (command == "content-check")
-                {
-                    var exit = Run(["projections", "--check", "--report", arguments[2]],
-                        workingDirectory, output, error, report);
-                    if (exit != 0) return exit;
-                }
-                return ScribeContentChecks.Run(root, ReadPaths(arguments[4], input), report,
-                    command == "content-check", output, error);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
-                or ArgumentException or FormatException or InvalidOperationException)
-            {
-                error.WriteLine(exception.Message);
-                return 2;
-            }
-        }
-
-        if (command == "projections")
-        {
-            if (arguments.Count != 4
-                || !string.Equals(arguments[1], "--check", StringComparison.Ordinal)
-                || !string.Equals(arguments[2], "--report", StringComparison.Ordinal)
-                || string.IsNullOrWhiteSpace(arguments[3]))
-            {
-                error.WriteLine(Usage);
-                return 2;
-            }
-
-            try
-            {
-                var repositoryRoot = FindRepositoryRoot(workingDirectory);
-                var report = leanReport ?? LeanCompiledArtifactReports.ReadRepositoryFiles(
-                    repositoryRoot,
-                    arguments[3]);
-                var findings = StatementProjectionReconciliation.Check(
-                    repositoryRoot,
-                    DeclarationCatalog.Create(report));
-                foreach (var finding in findings)
-                {
-                    error.WriteLine(finding);
-                }
-                return findings.IsEmpty ? 0 : 1;
-            }
-            catch (Exception exception) when (
-                exception is IOException
-                    or UnauthorizedAccessException
-                    or ArgumentException
-                    or FormatException
-                    or InvalidOperationException)
-            {
-                error.WriteLine(exception.Message);
-                return 2;
-            }
-        }
-
-        if (command == "describe-report")
-        {
-            var options = arguments.Skip(5).ToArray();
-            var json = options.Contains("--json", StringComparer.Ordinal);
-            var describeCheck = options.Contains("--check", StringComparer.Ordinal);
-            if (arguments.Count is < 5 or > 7 || arguments[1] != "--scribe-pack"
-                || string.IsNullOrWhiteSpace(arguments[2]) || arguments[3] != "--scribe-pack-digest"
-                || !System.Text.RegularExpressions.Regex.IsMatch(arguments[4], "^[0-9a-f]{64}$")
-                || options.Distinct(StringComparer.Ordinal).Count() != options.Length
-                || options.Any(static option => option is not ("--json" or "--check")))
-            {
-                error.WriteLine(Usage);
-                return 2;
-            }
-
-            try
-            {
-                var repositoryRoot = FindRepositoryRoot(workingDirectory);
-                var reportMaterial = leanReport
-                    ?? LeanCompiledArtifactReports.ReadRepositoryFiles(repositoryRoot);
-                var pack = ScribeResourcePack.Open(arguments[2]);
-                if (pack.Manifest.TotalSha256 != arguments[4])
-                    throw new FormatException("ScribePackDigestMismatch: the pack digest does not match");
-                var definitions = pack.ReadAll();
-                var report = DescribeReport.Build(
-                    repositoryRoot,
-                    definitions.Select(static definition => definition.Document),
-                    reportMaterial,
-                    validateContentGovernance: describeCheck, validateSourceFiles: false);
-                output.Write(json
-                    ? DescribeReportWriter.WriteJson(report)
-                    : DescribeReportWriter.WriteText(report));
-                return report.RedFindings.IsEmpty ? 0 : 1;
-            }
-            catch (Exception exception) when (
-                exception is IOException
-                    or UnauthorizedAccessException
-                    or ArgumentException
-                    or FormatException
-                    or InvalidOperationException)
-            {
-                error.WriteLine(exception.Message);
-                return 2;
-            }
-        }
-
         if (command == "emit" && arguments.Count is >= 3 and <= 5
             && arguments[1] == "--paths-from"
             && !string.IsNullOrWhiteSpace(arguments[2])
@@ -242,9 +117,9 @@ public static class ScribeCli
             {
                 var repositoryRoot = FindRepositoryRoot(workingDirectory);
                 var paths = ReadPaths(arguments[2], input);
-                var scopedInputs = arguments.Contains("--scoped")
+                ImmutableArray<string>? scopedInputs = arguments.Contains("--scoped")
                     ? ScribeLeanInputs.Select(repositoryRoot, paths)
-                    : ImmutableArray<string>.Empty;
+                    : null;
                 if (paths.IsEmpty)
                 {
                     output.WriteLine("emitted: 0 changed blueprint(s)");
@@ -256,15 +131,13 @@ public static class ScribeCli
                     arguments.Contains("--check"),
                     output,
                     error,
-                    () => leanReport ?? (arguments.Contains("--scoped")
-                        ? LeanCompiledArtifactReports.ReadScopedRepositoryFiles(repositoryRoot,
-                            scopedInputs
-                                .Select(static module => module.Replace('.', '/') + ".lean"))
-                        : LeanCompiledArtifactReports.ReadRepositoryFiles(repositoryRoot)));
+                    () => LeanCompiledArtifactReports.ReadScopedRepositoryFiles(repositoryRoot,
+                        (scopedInputs ?? ScribeLeanInputs.Select(repositoryRoot, paths))
+                            .Select(static module => module.Replace('.', '/') + ".lean")));
             }
             catch (Exception exception) when (
                 exception is IOException or UnauthorizedAccessException or ArgumentException
-                    or FormatException or InvalidOperationException)
+                    or FormatException or InvalidOperationException or InvalidDataException)
             {
                 error.WriteLine(exception.Message);
                 return 2;
@@ -314,11 +187,8 @@ public static class ScribeCli
 
     private const string Usage =
         "usage: dotnet run --project tools/StrataLint.Scribe -- "
-        + "emit-values|filemap [--check] | lean-inputs [--affected] --paths-from <file|-> [--base <revision>] | emit --paths-from <file|-> [--scoped] [--check] | describe-report --scribe-pack <file> --scribe-pack-digest <hex64> [--json] [--check] "
-        + "| content-check --report <file> --paths-from <file|-> "
-        + "| content-check --scoped --report <file> --targets-from <file> --paths-from <file> "
-        + "| projections --check --report <file> "
-        + "| markdown-check --report <file> --paths-from <file|-> "
+        + "emit-values|filemap [--check] | lean-inputs [--affected] --paths-from <file|-> [--base <revision>] | emit --paths-from <file|-> [--scoped] [--check] "
+        + "| content-check --scoped [--report <file>] --targets-from <file> --paths-from <file> "
         + "| resources pack --out <file> | resources verify --pack <file> "
         + "| resources release --out <directory> "
         + "| resources verify-release --dir <directory> [--total-sha256 <digest>] "

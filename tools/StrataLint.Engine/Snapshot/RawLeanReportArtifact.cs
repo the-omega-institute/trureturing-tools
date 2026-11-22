@@ -13,7 +13,6 @@ internal static partial class RawLeanReportArtifact
 {
     internal const string Schema = "stratalint-raw-lean-report-v3";
     internal const string ScopedSchema = "stratalint-scoped-lean-report-v1";
-    internal const string DefaultRelativePath = ".lake/build/stratalint/raw-lean-report.json";
     internal static readonly AsyncLocal<Action?> Reading = new();
 
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
@@ -65,50 +64,6 @@ internal static partial class RawLeanReportArtifact
             MaterialsPath(fullPath),
             validateMaterials,
             scope);
-    }
-
-    internal static LeanAxiomReport ReadFileForScopeOrFull(
-        string path,
-        LeanReportScope scope,
-        Func<RepositorySnapshot>? fullSource = null)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        ArgumentNullException.ThrowIfNull(scope);
-        var fullPath = Path.GetFullPath(path);
-        var bytes = File.ReadAllBytes(fullPath);
-        bool isFull;
-        try
-        {
-            using var document = JsonDocument.Parse(bytes);
-            isFull = RequiredString(document.RootElement, "schema") == Schema;
-        }
-        catch (JsonException exception)
-        {
-            throw new FormatException("Raw Lean report is not valid JSON.", exception);
-        }
-        if (!isFull) return Read(bytes, scope.SourceSnapshot, MaterialsPath(fullPath), validateMaterials: true, scope);
-        var fullSnapshot = fullSource?.Invoke() ?? scope.SourceSnapshot;
-        // The scoped consumer keeps using its original hydrated inputs after fallback.
-        // A full report must therefore bind those same bytes as well as the full source.
-        foreach (var (sourcePath, source) in scope.SourceSnapshot.Files)
-        {
-            if (!source.ContentWasRead) continue;
-            if (!fullSnapshot.Files.TryGetValue(sourcePath, out var fullSourceFile)
-                || !fullSourceFile.ContentWasRead)
-                throw new FormatException(
-                    $"Full Lean report input consistency check failed for {sourcePath.Value}: full snapshot bytes are unavailable.");
-            if (!source.RawBytes.AsSpan().SequenceEqual(fullSourceFile.RawBytes.AsSpan()))
-                throw new FormatException(
-                    $"Full Lean report input consistency check failed for {sourcePath.Value}: bytes differ from the scoped snapshot.");
-        }
-        var full = Read(bytes, fullSnapshot,
-            MaterialsPath(fullPath), validateMaterials: true, scope: null);
-        var selected = full.Files.Where(item => scope.Paths.Contains(item.Key))
-            .ToDictionary(static item => item.Key.Value, static item => item.Value, StringComparer.Ordinal);
-        foreach (var (sourcePath, report) in selected)
-            ValidateScopedImports(scope.SourceSnapshot.Files[RepoPath.CreateKnown(sourcePath)], report.Imports);
-        ValidateScopedStatementIdentities(selected);
-        return LeanAxiomReport.CreateScoped(selected);
     }
 
     internal static LeanAxiomReport ReadForScope(
@@ -428,10 +383,6 @@ internal static partial class RawLeanReportArtifact
 
     internal static string ContentAddress(ReadOnlySpan<byte> canonicalBytes) =>
         "sha256:" + Convert.ToHexStringLower(SHA256.HashData(canonicalBytes));
-
-    internal static string DefaultPath(string repositoryRoot) => Path.Combine(
-        Path.GetFullPath(repositoryRoot),
-        DefaultRelativePath.Replace('/', Path.DirectorySeparatorChar));
 
     internal static Func<string, string> OpenStatementMaterialSource(
         string reportPath,

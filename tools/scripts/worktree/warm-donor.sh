@@ -64,16 +64,6 @@ if (( pull_rc != 0 )); then
   exit "$pull_rc"
 fi
 
-if [[ -f "$ROOT/.lake/build/stratalint/raw-lean-report.json" ]]; then
-  python3 -B "$ROOT/tools/lean-inspector/reuse.py" refresh-stale-seed --repository "$ROOT"
-  refresh_rc=$?
-  if (( refresh_rc != 0 )); then
-    receipt failed refresh "stale seed refresh failed"
-    finish_maintenance_log "$refresh_rc"
-    exit "$refresh_rc"
-  fi
-fi
-
 # An inherited LEAN_TARGETS would silently turn publication into a partial build.
 STRATALINT_WARM_DONOR=1 make -C "$ROOT" lean FULL_BUILD=1 LEAN_TARGETS=
 lean_rc=$?

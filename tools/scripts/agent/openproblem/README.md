@@ -130,4 +130,4 @@ Each entry's `--selftest` uses synthetic Git/GitHub/make responses in temporary 
 ## 负载门、镜像核对与实施模板
 - `op-resume-seat.sh` 的负载门含**上游健康**条件:`CODEX_HEALTH_URL`(默认 codex 提供方 `/responses`)返回 502/503/000 时不放行;判席位死因看 `worker.stdout.log` 尾部,不看退出码。
 - 镜像核对模板第 3 项:「公式中每个符号须为绑定变量 / 本模块已镜像的 Lean 公开名 / Mathlib 或原子对象,禁临时缩写」;第 7 项:公开 def 也须镜像或 `private`;第 11 项:L 平面注带 DOI 或 arXiv;第 12 项:import 最小化(禁 umbrella `import Mathlib`)。
-- 实施基底模板:header/helper 以 `tools/scripts/agent/header-check.sh` 工具校验;emit 前先 `make lean-report`;Stage B 改镜像后必做渲染检查(`grep -E '&&|\|\||==|!='` 发射 md 为空;`make gate BASE=<40-hex-commit-sha>` 中点名本模块的 `markdown red` 行即停)。
+- 实施基底模板:header/helper 以 `tools/scripts/agent/header-check.sh` 工具校验;emit 使用变更范围的 Lean 输入;Stage B 改镜像后必做渲染检查(`grep -E '&&|\|\||==|!='` 发射 md 为空;`make gate BASE=<40-hex-commit-sha>` 中点名本模块的 `markdown red` 行即停)。

@@ -16,7 +16,6 @@ public sealed class ScribeDefinitionSelectionTests
             root.Path,
             new StringWriter(),
             error,
-            LeanAxiomReport.Create(new Dictionary<string, LeanFileReport>()),
             new StringReader(string.Empty));
 
         Assert.Equal(0, exit);
@@ -68,13 +67,8 @@ public sealed class ScribeDefinitionSelectionTests
             }
             """);
         var error = new StringWriter();
-        var exit = ScribeCli.Run(
-            ["emit", "--paths-from", "-"],
-            root.Path,
-            TextWriter.Null,
-            error,
-            LeanAxiomReport.Create(new Dictionary<string, LeanFileReport>()),
-            new StringReader(path));
+        var exit = ScribeEmitter.EmitPaths(root.Path, [path], false, TextWriter.Null, error,
+            LeanAxiomReport.Create(new Dictionary<string, LeanFileReport>()));
 
         Assert.Equal(0, exit);
         Assert.Empty(error.ToString());
@@ -167,9 +161,7 @@ public sealed class ScribeDefinitionSelectionTests
         int exit;
         if (scoped)
         {
-            exit = ScribeCli.Run(
-                check ? ["emit", "--paths-from", "-", "--check"] : ["emit", "--paths-from", "-"],
-                root.Path, TextWriter.Null, error, report, new StringReader(path));
+            exit = ScribeEmitter.EmitPaths(root.Path, [path], check, TextWriter.Null, error, report);
         }
         else
         {
@@ -237,7 +229,7 @@ public sealed class ScribeDefinitionSelectionTests
 
         var exit = ScribeCli.Run(
             ["emit", "--paths-from", "-", "--check"],
-            root.Path, output, error, leanReport: null, new StringReader(path));
+            root.Path, output, error, new StringReader(path));
 
         Assert.Equal(0, exit);
         Assert.Empty(error.ToString());
@@ -256,8 +248,7 @@ public sealed class ScribeDefinitionSelectionTests
             ["emit", "--paths-from", "missing.paths"],
             root.Path,
             TextWriter.Null,
-            error,
-            LeanAxiomReport.Create(new Dictionary<string, LeanFileReport>()));
+            error);
 
         Assert.Equal(2, exit);
         Assert.NotEmpty(error.ToString());
@@ -324,7 +315,7 @@ public sealed class ScribeDefinitionSelectionTests
             check: false,
             TextWriter.Null,
             error,
-            LeanAxiomReport.Create(new Dictionary<string, LeanFileReport>()));
+            () => throw new InvalidOperationException("empty selection must not load a report"));
 
         Assert.Equal(0, exit);
         Assert.Empty(error.ToString());

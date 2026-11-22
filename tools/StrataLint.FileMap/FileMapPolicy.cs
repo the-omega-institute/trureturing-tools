@@ -61,7 +61,7 @@ internal static partial class FileMapPolicy
             ["LibraryNoteCatalog"] = LibraryNoteCatalogPath,
             ["LeanReportSelection"] = "tools/scripts/report/lean-report-selection.py",
             ["lean-build"] = "tools/scripts/worktree/lean-cache-run.sh",
-            ["lean-inspector"] = "tools/lean-inspector/inspect.sh",
+            ["lean-inspector"] = "tools/scripts/report/lean-report-scoped.sh",
             ["ToolsRelease"] = "tools/StrataLint.Engine/Snapshot/ToolsRelease.cs",
             ["NativeArchivePaths"] = "tools/scripts/worktree/lean_actions.py",
             ["ProblemCandidateCatalog"] = ProblemCandidateCatalogPath,
@@ -84,7 +84,7 @@ internal static partial class FileMapPolicy
     private static readonly ImmutableHashSet<string> ProgramActorWords =
         [
             "GitHub-Actions", "Lean", "Scribe", "StrataLint", "agent", "architecture-tests",
-            "automation", "BannedApiAnalyzers", "CoverageAnalyzer", "developer", "dotnet",
+            "automation", "BannedApiAnalyzers", "developer", "dotnet",
             "git", "make-gate", "repository-policy", "dotnet-build", "dotnet-test",
             "lean-build", "lean-inspector", "reader",
         ];

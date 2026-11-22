@@ -34,7 +34,7 @@ class NativeRegSupport:
         if prepared.returncode:
             self.assertFalse(success, prepared.stdout + prepared.stderr)
             return prepared
-        return self.run_lake('-d', workspace, 'build', ':report', success=success)
+        return self.run_lake('-d', workspace, 'build', ':moduleReports', success=success)
 
 
 class NativeRegTests(NativeRegSupport):
@@ -47,7 +47,7 @@ class NativeRegTests(NativeRegSupport):
         self.assertIn('REG-MANIFEST-GIT-AGREEMENT', result.stdout + result.stderr)
         self.assertFalse((self.root / 'Reg/.lake').exists())
         self.assertFalse((self.root / '.lake/packages/mathlib').exists())
-        result = self.guarded_command(['make', 'lean-report', 'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build'], cwd=self.root, env=self.env, timeout=120)
+        result = self.guarded_command(['make', 'lean-cache-prepare'], cwd=self.root, env=self.env, timeout=120)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('REG-MANIFEST-GIT-AGREEMENT', result.stdout + result.stderr)
         self.assertFalse((self.root / 'Reg/.lake').exists())
@@ -95,10 +95,8 @@ class NativeRegConsumerTests(NativeRegSupport):
         self.write('Reg/Support/Entry.lean', 'import D5.A\nimport LeanInformationAuditInterface.Contract.Core\n'
                    'def registrationValue := value\n')
         self.prepare_report_modules('Reg.Support.Entry', workspace='tools/lean-inspector-reg')
-        result = self.guarded_command(['make', 'lean-report', 'LEAN_REPORT_CACHE_MISS_POLICY=reuse-or-build'], cwd=self.root, env=self.env, timeout=120)
+        result = self.guarded_command(['make', 'lean-cache-prepare'], cwd=self.root, env=self.env, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        published = json.loads((self.root / '.lake/build/stratalint/raw-lean-report.json').read_text())
-        self.assertIn('Reg.Support.Entry', [r['module'] for r in published['modules']])
         rows = self.report()[0]
         row = next(r for r in rows if r['module'] == 'Reg.Support.Entry')
         self.assertEqual(row['source_path'], 'Reg/Support/Entry.lean')

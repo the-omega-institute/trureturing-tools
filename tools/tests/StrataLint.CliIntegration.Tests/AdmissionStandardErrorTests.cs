@@ -15,24 +15,35 @@ public sealed class AdmissionStandardErrorTests
         """;
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void SuccessfulDeltaAcceptsStandardErrorRegardlessOfInjectedPhaseTime(bool emitTiming)
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void ScopedChecksAcceptTimingOnStandardError(bool delta, bool emitTiming)
     {
         using var temporary = new TemporaryDirectory();
         const string document = "Library/notes/Fixture.md";
         var fixture = new RuleFixture();
         fixture.Files[document] = "fixture\n";
+        const string registration = """
+            {"schema":"report-producer-scope-v2","registration":"lean-report-inputs.json",
+             "scope":"scribe-content","projects":[]}
+            """;
+        const string inputs = """
+            {"inspector_sources":{"include":[],"exclude":[]},"producer_scopes":{
+             "lean-report":{"include":[],"exclude":[]},"scribe-content":{"include":[],"exclude":[]}}}
+            """;
+        fixture.Files["Meta/ReportProducers/scribe-content.json"] = registration;
+        fixture.Files["lean-report-inputs.json"] = inputs;
         static RawRepositorySnapshot Snapshot(Dictionary<string, string> files) =>
             RawRepositorySnapshot.Create(files.Select(static pair => RawRepositoryEntry.FromText(pair.Key, pair.Value)));
         var current = Snapshot(fixture.Files);
-        var reportPath = Path.Combine(temporary.Path, "candidate.json");
-        var decoded = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(current));
-        RawLeanReportArtifact.WriteFile(reportPath, decoded.Snapshot, LeanAxiomReport.Create(fixture.Reports));
+        var changedPaths = Path.Combine(temporary.Path, "paths");
+        File.WriteAllText(changedPaths, document + "\0");
         var gateway = new FakeRepositoryGateway(
             RawChangeSet.Create([document]), current, Snapshot(fixture.Baseline));
         var environment = new ProductionCliEnvironment(
-            "/fixture", gateway, new FakeLeanReportSource(null),
+            temporary.Path, gateway, new FakeLeanReportSource(null),
             scribeEmissionVerifier: null, new FirstPhaseTimeProvider(emitTiming));
         using var output = new StringWriter(CultureInfo.InvariantCulture);
         using var error = new StringWriter(CultureInfo.InvariantCulture);
@@ -43,9 +54,10 @@ public sealed class AdmissionStandardErrorTests
         {
             Console.SetOut(output);
             Console.SetError(error);
-            exitCode = CliApplication.Run(
-                ["check-delta", "--protected-base", new string('a', 40), "--candidate-lean-report", reportPath],
-                environment, new SystemCliConsole());
+            string[] arguments = delta
+                ? ["check-delta", "--protected-base", new string('a', 40), "--changed-paths-from", changedPaths]
+                : ["check-current", "--changed-paths-from", changedPaths];
+            exitCode = CliApplication.Run(arguments, environment, new SystemCliConsole());
         }
         finally
         {
@@ -55,8 +67,10 @@ public sealed class AdmissionStandardErrorTests
 
         Assert.True(exitCode == 0, output.ToString() + error);
         using var verdict = JsonDocument.Parse(output.ToString());
-        Assert.Contains("SL-003", verdict.RootElement.GetProperty("executed")
-            .EnumerateArray().Select(static value => value.GetString()));
+        var executed = verdict.RootElement.GetProperty("executed").EnumerateArray()
+            .Select(static value => value.GetString()).ToArray();
+        Assert.NotEmpty(executed);
+        if (delta) Assert.Contains("SL-003", executed);
         var standardError = Encoding.UTF8.GetBytes(error.ToString());
         if (emitTiming)
         {

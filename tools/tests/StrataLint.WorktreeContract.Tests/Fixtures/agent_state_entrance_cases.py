@@ -34,9 +34,6 @@ class AgentEntranceTests(unittest.TestCase):
         cases.run(self.main, "remote", "add", "origin", self.root / "remote.git")
         shutil.copy2(cases.ROOT / "lean-report-inputs.json", self.main)
         (self.main / "Makefile").write_text(
-            "check-lean-report:\n"
-            "\t@echo 'report $(FULL_BUILD) $(origin FULL_BUILD)'\n"
-            "\t@test \"$$REPORT_EXIT\" != 1\n"
             "gate:\n"
             "\t@echo 'gate $(BASE)'\n"
             "\t@false\n")
@@ -51,7 +48,6 @@ class AgentEntranceTests(unittest.TestCase):
         for tag, options, status in (
             ("scoped", {}, 94),
             ("full", {"FULL_BUILD": "1", "LAND_LOG_DIR": "build/custom logs"}, 94),
-            ("report-failure", {"FULL_BUILD": "1", "REPORT_EXIT": "1"}, 97),
             ("outside", {"LAND_LOG_DIR": str(self.root / "outside")}, 94),
         ):
             with self.subTest(tag=tag):
@@ -67,16 +63,8 @@ class AgentEntranceTests(unittest.TestCase):
                     self.assertIn("landing_input_outside_tree", result.stderr)
                     self.assertFalse(logs.exists())
                     continue
-                report = logs / (tag + "-leanreport.log")
                 gate = logs / (tag + "-gate.log")
-                if tag == "scoped":
-                    self.assertFalse(report.exists())
-                else:
-                    self.assertIn("report 1 command line", report.read_text())
-                if tag == "report-failure":
-                    self.assertFalse(gate.exists())
-                else:
-                    self.assertIn("gate " + base, gate.read_text())
+                self.assertIn("gate " + base, gate.read_text())
 
     def test_with_reminder_reaches_caller_while_child_waits_for_release(self):
         tree = self.root / "waiting"

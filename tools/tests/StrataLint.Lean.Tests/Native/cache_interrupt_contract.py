@@ -42,12 +42,9 @@ def archive_child(repository, root, mode):
 
     def operation():
         target = root / ".lake/build"
-        base = root / release.report_reuse.BASE_RECORD
         if mode != "install-empty":
             target.mkdir()
             (target / "previous").write_text("original build")
-            base.parent.mkdir(parents=True, exist_ok=True)
-            base.write_text("original base")
         if mode == "transport":
             def manifest(_partition, _tag, stage, *_args, **_kwargs):
                 (root / "transport-stage").write_text(str(stage))
@@ -71,6 +68,9 @@ def archive_child(repository, root, mode):
         source = root / "replacement/build"
         source.mkdir(parents=True)
         (source / "replacement").write_text("new build")
+        (source / "lib/lean").mkdir(parents=True)
+        (source / "lean-inspector/modules").mkdir(parents=True)
+        (source / "lib/lean/New.olean").touch()
         with tarfile.open(stage / release.ASSET, "w:gz") as archive:
             archive.add(source, arcname="build")
         packed = (stage / release.ASSET).read_bytes()
@@ -79,7 +79,6 @@ def archive_child(repository, root, mode):
                         archive_sha256=part["sha256"])
         release.snapshot_manifest = lambda *args, **kwargs: ({"assets": []}, manifest, [part])
         release.gh = lambda *args: ""
-        release.report_reuse.record_seed_base = lambda *args: False
 
         def pause():
             publish_ready(root)
@@ -92,7 +91,7 @@ def archive_child(repository, root, mode):
             nonlocal armed
             result = original_rename(source, destination)
             # Pause after the native mutation, before the caller can record it.
-            boundary = ("move-build" if source == target else "move-base" if source == base
+            boundary = ("move-build" if source == target
                         else "install-empty" if mode == "install-empty" and destination == target
                         else "install-build" if destination == target else None)
             if armed and mode == boundary:
@@ -229,15 +228,12 @@ class InterruptionTests(unittest.TestCase):
             if mode == "transport":
                 self.assertFalse(Path((self.root / "transport-stage").read_text()).exists())
                 self.assertEqual("original build", (self.root / ".lake/build/previous").read_text())
-                self.assertEqual("original base", (self.root / ".lake/lean-report-seed-base.json").read_text())
                 self.assertEqual([], list((self.root / ".lake").glob(".release-*")))
             else:
                 if mode == "install-empty":
                     self.assertFalse((self.root / ".lake/build").exists())
-                    self.assertFalse((self.root / ".lake/lean-report-seed-base.json").exists())
                 else:
                     self.assertEqual("original build", (self.root / ".lake/build/previous").read_text())
-                    self.assertEqual("original base", (self.root / ".lake/lean-report-seed-base.json").read_text())
                 self.assertFalse((self.root / ".lake/build/replacement").exists())
                 self.assertEqual([], list((self.root / ".lake").glob(".release-*")))
         finally:
@@ -263,12 +259,6 @@ class InterruptionTests(unittest.TestCase):
 
     def test_int_after_old_build_move(self):
         self.interrupt("move-build", signal.SIGINT, group_signal=True)
-
-    def test_term_after_old_base_move(self):
-        self.interrupt("move-base", signal.SIGTERM, group_signal=True)
-
-    def test_int_after_old_base_move(self):
-        self.interrupt("move-base", signal.SIGINT, group_signal=True)
 
     def test_term_after_new_build_move(self):
         self.interrupt("install-build", signal.SIGTERM, group_signal=True)

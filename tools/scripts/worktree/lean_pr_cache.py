@@ -268,9 +268,12 @@ def pack(root, identity, directory, *, anchor=None, previous_index=None):
         material = dict(referenced=0, bundled=len(needed),
                         bundled_bytes=sum(path.stat().st_size for path in payloads.iterdir()))
         layers = ("dependency",)
+    def cache_member(member):
+        return None if retired_report_path(pathlib.PurePosixPath(member.name)) else member
+
     with tarfile.open(directory / "native.tar.gz", "w:gz", compresslevel=1) as archive:
         for path in native_paths(root, layers=layers):
-            archive.add(root / path, arcname=str(path))
+            archive.add(root / path, arcname=str(path), filter=cache_member)
     actions.write_small_record(directory / "preparation.json", dict(source=identity, runtime=runtime,
         partition=actions.partition_path(root), elan_key=actions.elan_key(root)))
     actions.output(dict(artifact_name=artifact_name(identity, sharded=anchor is not None),
@@ -491,6 +494,14 @@ def validate_preparation(root, value, context, artifact, *, sharded=False, requi
     return identity, runtime
 
 
+def retired_report_path(path):
+    if path.parts[:3] == (".lake", "build", "stratalint") and len(path.parts) > 3:
+        return path.parts[3].startswith("raw-lean-report.json")
+    if path.parts[:3] != (".lake", "build", "lean-inspector") or len(path.parts) < 4:
+        return False
+    return path.parts[3].startswith("report.zip") or path.parts[3] == "inputs.json"
+
+
 def unpack(root, archive_path, directory, *, dependency_only=False):
     names = set()
     files = []
@@ -506,6 +517,8 @@ def unpack(root, archive_path, directory, *, dependency_only=False):
                 member.name == prefix or member.name.startswith(prefix + "/") for prefix in allowed_roots),
                 "native archive member outside cache roots")
             names.add(member.name)
+            if retired_report_path(path):
+                continue
             if not member.isdir():
                 files.append(pathlib.Path(member.name))
             yield member

@@ -13,15 +13,12 @@ public sealed partial class MakeWorkflowTests
         "tools/scripts/workflow/scribe-content-checks.sh";
     private const string WorktreeInitScriptPath = "tools/scripts/worktree-init.sh";
     private const string CleanLanesScriptPath = "tools/scripts/clean-lanes.sh";
-    private const string LeanReportScriptPath =
-        "tools/scripts/report/lean-report.sh";
     private const string LeanCacheEnsureScriptPath =
         "tools/scripts/worktree/lean-cache-ensure.sh";
     private const string LeanCacheRunScriptPath =
         "tools/scripts/worktree/lean-cache-run.sh";
     private const string WarmDonorScriptPath =
         "tools/scripts/worktree/warm-donor.sh";
-    private const string ReanchorScriptPath = "tools/scripts/mathlib-reanchor.sh";
     private const string ReportConsumerScriptPath =
         "tools/scripts/report/report-consumer.sh";
     private const string ReportSupervisorScriptPath =
@@ -44,21 +41,16 @@ public sealed partial class MakeWorkflowTests
         "lean-cache-from-github-without-mathlib",
         "warm-donor",
         "lean",
-        "lean-report",
         "lean-report-scoped",
         "lean-report-prepare",
-        "check-lean-report",
+        "lean-cache-prepare",
         "build",
         "emit",
-        "dag",
         "filemap",
         "filemap-conform",
         "scribe-release",
         "scribe-release-publish",
         "scribe-release-fetch",
-        "mathlib-reanchor",
-        "truth-export",
-        "deliver-check",
         "deposit",
         "deposit-uncovered",
         "worktree",
@@ -120,18 +112,10 @@ public sealed partial class MakeWorkflowTests
     {
         var root = TestRepositoryLayout.FindRoot();
         var supervisorName = Path.GetFileName(ReportSupervisorScriptPath);
-        var producer = File.ReadAllText(Path.Combine(root, LeanReportScriptPath));
-        var inspector = File.ReadAllText(Path.Combine(root, "tools/lean-inspector/inspect.sh"));
         var consumer = File.ReadAllText(Path.Combine(root, ReportConsumerScriptPath));
 
-        // Pair argument forwarding and failure propagation are exercised by LeanReportPairScriptTests.
-        // Inspector owns the producer slot for both public entries and direct callers.
-        Assert.Contains("tools/lean-inspector/inspect.sh", producer, StringComparison.Ordinal);
-        Assert.Contains(supervisorName, inspector, StringComparison.Ordinal);
-        Assert.Contains("--lean-slot", inspector, StringComparison.Ordinal);
         Assert.Contains(supervisorName, consumer, StringComparison.Ordinal);
         Assert.Contains(LeanReportInputScriptPath, consumer, StringComparison.Ordinal);
-        Assert.DoesNotContain("mktemp", producer, StringComparison.Ordinal);
         Assert.Contains("mktemp", consumer, StringComparison.Ordinal);
         Assert.Contains("STRATALINT_LEAN_REPORT", consumer, StringComparison.Ordinal);
         Assert.Contains(".materials.zip", consumer, StringComparison.Ordinal);

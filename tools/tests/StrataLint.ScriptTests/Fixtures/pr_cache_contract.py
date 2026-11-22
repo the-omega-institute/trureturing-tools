@@ -569,6 +569,39 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
         self.assertFalse((self.root / ".lake").exists())
         self.assertFalse((self.root / "build/lean-cache/pr-adopted.json").exists())
 
+    def test_native_preparation_excludes_cached_aggregate_files_and_keeps_module_reports(self):
+        inspector = self.root / ".lake/build/lean-inspector"
+        (inspector / "modules").mkdir(parents=True)
+        (inspector / "modules/D5.Sample.zip").write_bytes(b"module")
+        (inspector / "report.zip.trace").write_bytes(b"retired trace")
+        (inspector / "inputs.json").write_bytes(b"retired inputs")
+        self.preparation()
+        with tarfile.open(self.bundle / "native.tar.gz") as archive:
+            names = archive.getnames()
+            self.assertNotIn(".lake/build/stratalint/raw-lean-report.json", names)
+            self.assertNotIn(".lake/build/lean-inspector/report.zip.trace", names)
+            self.assertNotIn(".lake/build/lean-inspector/inputs.json", names)
+            self.assertIn(".lake/build/lean-inspector/modules/D5.Sample.zip", names)
+            self.assertIn(".lake/build/lib/Module.olean", names)
+
+    def test_old_preparation_adopts_native_members_and_discards_retired_reports(self):
+        self.preparation()
+        archive_path = self.bundle / "native.tar.gz"
+        original = archive_path.read_bytes()
+        with tarfile.open(fileobj=io.BytesIO(original)) as source, tarfile.open(archive_path, "w:gz") as output:
+            for member in source:
+                output.addfile(member, source.extractfile(member) if member.isfile() else None)
+            for name in ("lean-inspector/report.zip", "stratalint/raw-lean-report.json"):
+                member = tarfile.TarInfo(".lake/build/" + name)
+                member.size = 3
+                output.addfile(member, io.BytesIO(b"old"))
+        self.zip_preparation()
+        result, _ = self.adopt()
+        self.assertEqual("adopted", result["status"])
+        self.assertEqual(b"native", (self.root / ".lake/build/lib/Module.olean").read_bytes())
+        self.assertFalse((self.root / ".lake/build/lean-inspector/report.zip").exists())
+        self.assertFalse((self.root / ".lake/build/stratalint/raw-lean-report.json").exists())
+
     def test_adoption_reclaims_download_zip_before_native_unpack(self):
         self.preparation()
         with mock.patch.object(producer, "unpack", wraps=producer.unpack) as unpack:
@@ -585,8 +618,7 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
         source.parent.mkdir()
         source.write_text("def fixture := 1\n")
         compiler_paths = shards.required_compiler_paths(name, module)
-        report_paths = {shards.REPORT_PATH + suffix for suffix in shards.report_reuse.publication.SUFFIXES}
-        report_paths.add(str(shards.REPORT_RECEIPT))
+        report_paths = {"lean-inspector/modules/" + name + ".zip"}
         for relative in compiler_paths | report_paths:
             path = self.root / shards.PROJECT_BUILD / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -600,9 +632,7 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
         self.bundle = self.root / "preparation"
         with mock.patch.object(shards, "workspace_modules", return_value={name: module}), \
                 mock.patch.object(shards, "project_imports", return_value={name: set()}), \
-                mock.patch.object(shards.report_reuse, "read_receipt"), \
-                mock.patch.object(shards.report_reuse, "capture"), \
-                mock.patch.object(shards.report_reuse.publication.selection, "Selection") as selection:
+                mock.patch.object(shards.publication.selection, "Selection") as selection:
             selection.return_value.modules.return_value = {name: {}}
             result = self.run_with(lambda: producer.pack(self.root, self.identity, self.bundle,
                                    anchor=self.identity["base"]), env=env)
@@ -649,8 +679,9 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
         key = shards.group_identity(group)
         compiler_path = "lib/lean/D5/Fixture.olean"
         build = self.root / "producer-build"
+        inspector = "lean-inspector/producer/bin/reportInspector"
         material = {}
-        for entry, relative in [(key, compiler_path), (shards.REPORT, shards.REPORT_PATH)]:
+        for entry, relative in [(key, compiler_path), (shards.EXTRAS, inspector)]:
             path = build / relative
             path.parent.mkdir(parents=True)
             path.write_text(entry)
@@ -663,7 +694,7 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
             binding = shards.binding(self.root, "complete")
         index = dict(binding=binding, state="complete", layout={key: group},
             owner=dict(commit=self.identity["merge"], ref=self.identity["target_ref"], run="28", attempt="1"),
-            entries=material, required={key: [compiler_path], shards.REPORT: [shards.REPORT_PATH]},
+            entries=material, required={key: [compiler_path], shards.EXTRAS: [inspector]},
             fingerprints={entry: "a" * 64 for entry in material}, sources={"D5.Fixture": "b" * 64})
         (self.bundle / "project.json").write_text(json.dumps(index))
         self.artifact["name"] = producer.artifact_name(self.identity, sharded=True)
@@ -683,7 +714,7 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
             result = shards.install(self.root, record, require_complete=True, preparation=directory)
             return subprocess.CompletedProcess(command, 0 if result["complete"] else 3)
 
-        reference = self.root / shards.transport_payload(material[shards.REPORT])
+        reference = self.root / shards.transport_payload(material[shards.EXTRAS])
         unavailable = reference.with_suffix(".unavailable")
         reference.rename(unavailable)
         with mock.patch.object(producer.subprocess, "run", side_effect=restore):
@@ -710,7 +741,7 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
         self.assertEqual("adopted", result["status"])
         self.assertIn("sharded=true", (self.root / "outputs").read_text())
         self.assertEqual(key, (self.root / ".lake/build" / compiler_path).read_text())
-        self.assertEqual(shards.REPORT, (self.root / ".lake/build" / shards.REPORT_PATH).read_text())
+        self.assertEqual(shards.EXTRAS, (self.root / ".lake/build" / inspector).read_text())
         self.assertTrue((self.root / ".lake/packages/mathlib/scripts/bench/size/run").is_file())
 
     def test_merge_activates_at_actual_event_checkout_without_second_publisher(self):

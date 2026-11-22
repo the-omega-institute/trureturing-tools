@@ -160,14 +160,6 @@ def install(host, root, stage, tag, manifest, digest, target, source_ref, verifi
         if reason is not None:
             host.receipt("sparse-seed", "full-fallback", tag=tag, native_product=reason)
             return False
-        report = unpacked / "stratalint/raw-lean-report.json"
-        receipt = host.report_reuse.read_receipt(report)
-        if receipt["completed"] not in host.report_reuse.CHECKED_STEPS:
-            return False
-        identity = host.report_reuse.seed_identity(report)
-        if not identity:
-            raise ValueError("checked sparse seed has an invalid report bundle identity")
-        plan["base_report_sha256"] = identity
         plan["base_partition"] = manifest["partition"]
         plan["base_scope"] = manifest["volume_scope"]
         plan["base_cache_key"] = manifest["cache_key"]
@@ -271,7 +263,7 @@ def full_fallback(host, root, partition, key, verification, plan, deadline):
             shutil.rmtree(build)
         if not host.restore_snapshot(root, partition, plan["base_tag"], stage, deadline,
                                      expected={"producer_commit_sha": plan["base_commit"]}, refresh_stale=True,
-                                     verification_tag=verification, cache_key=key, require_compatible_seed=True,
+                                     verification_tag=verification, cache_key=key,
                                      validated_snapshot=snapshot):
             raise ValueError("full retry did not restore the pinned predecessor")
         marker.unlink()
@@ -282,7 +274,7 @@ def full_fallback(host, root, partition, key, verification, plan, deadline):
     host.receipt("sparse-seed", "full-fallback", tag=plan["base_tag"], target=plan["target_commit"])
 
 
-def check_report(host, root, command, partition, verification, plan):
+def prepare_cache(host, root, command, partition, verification, plan):
     def retry_full():
         full_fallback(host, root, partition, host.release_key(root), verification, plan, host.operation_deadline())
         return subprocess.run(command, cwd=root, env=dict(os.environ, PARTIAL_INDEXED_PROJECT="true"))
@@ -290,7 +282,7 @@ def check_report(host, root, command, partition, verification, plan):
     if plan.get("restoring_full"):
         return retry_full()
     compiler.compile_roots(root, workspace_modules(root), plan["rebuild_modules"])
-    with tempfile.TemporaryDirectory(prefix="lean-sparse-report-") as directory:
+    with tempfile.TemporaryDirectory(prefix="lean-sparse-cache-") as directory:
         fallback = Path(directory) / "fallback.json"
         env = dict(os.environ, LEAN_CACHE_SPARSE_PLAN=str(plan_path(root)),
                    LEAN_CACHE_SPARSE_FALLBACK_FILE=str(fallback))
@@ -301,5 +293,5 @@ def check_report(host, root, command, partition, verification, plan):
         if (reason.get("target_commit") != plan["target_commit"]
                 or reason.get("base_manifest_sha256") != plan["base_manifest_sha256"]
                 or not isinstance(reason.get("reason"), str) or not reason["reason"]):
-            raise ValueError("unbound sparse report fallback")
+            raise ValueError("unbound sparse cache fallback")
     return retry_full()

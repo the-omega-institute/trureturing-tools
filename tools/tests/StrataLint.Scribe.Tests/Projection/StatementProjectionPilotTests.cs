@@ -373,71 +373,30 @@ public sealed class StatementProjectionPilotTests
     }
 
     [Fact]
-    public void ProjectionsCheckReturnsZeroForMatchingPinnedFixtures()
+    public void ProjectionReconciliationAcceptsMatchingPinnedFixtures()
     {
         using var repository = TemporaryRepository.WithReport(
             type: "statement-v1(uparams=[],type=es(l0))");
-        var output = new StringWriter();
-        var error = new StringWriter();
 
-        var exit = ScribeCli.Run(
-            ["projections", "--check", "--report", "live-report.json"],
-            repository.Path,
-            output,
-            error,
-            repository.Report());
-
-        Assert.Equal(0, exit);
-        Assert.Empty(error.ToString());
+        Assert.Empty(StatementProjectionReconciliation.Check(repository.Path,
+            DeclarationCatalog.Create(repository.Report())));
     }
 
     [Fact]
-    public void ProjectionsCheckPrintsEveryPinnedFixtureMismatchAndReturnsOne()
+    public void ProjectionReconciliationReportsEveryPinnedFixtureMismatch()
     {
         using var repository = TemporaryRepository.WithReport(
             type: "statement-v1(uparams=[],type=es(l1))");
         repository.AddPinnedDeclaration(
             "D5.Test.missing",
             "statement-v1(uparams=[],type=es(l2))");
-        var error = new StringWriter();
 
-        var exit = ScribeCli.Run(
-            ["projections", "--check", "--report", "live-report.json"],
-            repository.Path,
-            TextWriter.Null,
-            error,
-            repository.Report());
-
-        Assert.Equal(1, exit);
         Assert.Equal(
             [
                 "pinned statement projection differs from live report: D5.Test.declaration (D5/Test.lean)",
                 "pinned statement projection is missing from live report: D5.Test.missing (D5/Test.lean)",
             ],
-            error.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
-    }
-
-    [Theory]
-    [InlineData("projections")]
-    [InlineData("projections", "--check")]
-    [InlineData("projections", "--report", "live-report.json")]
-    [InlineData("projections", "--check", "--report")]
-    [InlineData("projections", "--check", "--report", "live-report.json", "extra")]
-    public void ProjectionsCheckRejectsOpenArgumentShapesWithExitTwo(params string[] arguments)
-    {
-        var error = new StringWriter();
-
-        var exit = ScribeCli.Run(
-            arguments,
-            TemporaryFileSystem.Directory.GetCurrentDirectory(),
-            TextWriter.Null,
-            error);
-
-        Assert.Equal(2, exit);
-        Assert.Contains(
-            "projections --check --report <file>",
-            error.ToString(),
-            StringComparison.Ordinal);
+            StatementProjectionReconciliation.Check(repository.Path, DeclarationCatalog.Create(repository.Report())).AsEnumerable());
     }
 
     [Fact]
@@ -546,15 +505,9 @@ public sealed class StatementProjectionPilotTests
         {
             var repository = new TemporaryRepository();
             TemporaryFileSystem.Directory.CreateDirectory(System.IO.Path.Combine(repository.Path, "Golden", "Projection"));
-            TemporaryFileSystem.Directory.CreateDirectory(System.IO.Path.Combine(repository.Path, ".lake", "build", "stratalint"));
-            TemporaryFileSystem.Directory.CreateDirectory(System.IO.Path.Combine(repository.Path, "Blueprint"));
-            TemporaryFileSystem.File.WriteAllText(System.IO.Path.Combine(repository.Path, "global.json"), "{}\n");
             TemporaryFileSystem.File.WriteAllText(
                 System.IO.Path.Combine(repository.Path, "Golden", "Projection", "statement-projection-expansion-v1.json"),
                 """{"schema":"statement-projection-expansion-fixture-v1","declarations":[]}""");
-            TemporaryFileSystem.File.WriteAllText(
-                System.IO.Path.Combine(repository.Path, ".lake", "build", "stratalint", "raw-lean-report.json"),
-                """{"modules":[{"declarations":[{"name":"D5.Test.declaration","type":"statement-v1(uparams=[],type=es(l0))"}]}]}""");
             repository.AddPinnedDeclaration("D5.Test.declaration", type);
             return repository;
         }

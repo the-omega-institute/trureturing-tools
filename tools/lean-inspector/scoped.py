@@ -307,9 +307,9 @@ def produce(entry, output, scope, utilities):
         modules=[row['module'] for row in scope['modules']], coordinates=before),
         schema=SCHEMA, write_sidecars=write_sidecars)
     report = public.unpack(aggregate, entry.temporary)
-    def validator(report, expected, repository, **_):
-        validate_bundle(report, repository, scope, utilities=utilities, expected=expected)
-    public.publish(report, output, before, entry.root, validator=validator)
+    def validator(staged):
+        validate_bundle(staged, entry.root, scope, utilities=utilities, expected=before)
+    public.publish(report, output, validator=validator)
     work = [public.read_json(line) for line in (entry.logs / 'module-work.jsonl').read_text().splitlines()]
     extracted = sorted({row['module'] for row in work if row['operation'] == 'extract'})
     compiled = compiled_modules(entry.root, entry.logs)

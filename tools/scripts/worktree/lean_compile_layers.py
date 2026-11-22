@@ -21,7 +21,7 @@ from lean_artifact_inventory import (
     lean_artifact_paths, project_imports, required_compiler_paths, workspace_modules, library_globs, matches_module_glob,
 )
 from lean_cache import binary_platform
-from lean_cache_release import cache_guard, install_scoped, report_reuse
+from lean_cache_release import cache_guard, install_scoped, publication
 from lean_cache_release_io import copy_chunks
 from lean_release_index import MemberInput, check_compiler_outputs, safe_path
 
@@ -109,7 +109,7 @@ def production_targets(root, modules):
         ["lake", "-d", str(REG_INSPECTOR), "--json", "query", "@leanInspector/LeanInformationAudit:modules"],
         cwd=root, text=True,
     )
-    targets = set(report_reuse.publication.selection.Selection(root).modules())
+    targets = set(publication.selection.Selection(root).modules())
     targets.update(json.loads(output))
     for directory in (Path("."), Path("Reg"), REG_INSPECTOR, Path("tools/lean-inspector-interface")):
         config = tomllib.loads((root / directory / "lakefile.toml").read_text())
@@ -221,7 +221,7 @@ def recover(root, modules, source, identity):
                     if entry.name == MANIFEST:
                         if entry.size > 1024 + len(allowed) * 512:
                             raise ValueError("oversized compile layer manifest")
-                        manifest = report_reuse.publication.read_json(data.read())
+                        manifest = publication.read_json(data.read())
                         continue
                     if path not in allowed or entry.name in hashes:
                         raise ValueError(f"unexpected compile layer output: {path}")

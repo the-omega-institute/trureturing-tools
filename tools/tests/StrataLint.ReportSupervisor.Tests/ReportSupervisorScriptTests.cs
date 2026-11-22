@@ -6,27 +6,24 @@ namespace StrataLint.ReportSupervisor.Tests;
 public sealed class ReportSupervisorScriptTests
 {
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
-    public void MissingScopedBundleRepairPreservesExplicitTargets(bool scoped, bool sidecarMissing)
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MissingScopedBundleRepairPreservesExplicitTargets(bool sidecarMissing)
     {
         using var fixture = new ReportSupervisorFixture();
         var report = Path.Combine(fixture.Root, "missing.json");
         if (sidecarMissing) File.WriteAllText(report, "{}");
         var consumer = Path.Combine(fixture.RepositoryRoot, "tools/scripts/report/report-consumer.sh");
-        string[] targets = scoped ? ["--targets", "D5.A D5.B"] : [];
         var result = fixture.RunExternalProcess("bash",
-            [consumer, "--role", "scribe-consumer", "--report", report, .. targets, "--", "/usr/bin/true"],
+            [consumer, "--role", "scribe-consumer", "--report", report, "--targets", "D5.A D5.B", "--", "/usr/bin/true"],
             maximumOutputBytes: 1024 * 1024);
         Assert.Equal(2, result.ExitCode);
-        Assert.Contains(scoped ? "make lean-report-scoped LEAN_TARGETS=\"D5.A D5.B\"" : "run make lean-report first",
+        Assert.Contains("make lean-report-scoped LEAN_TARGETS=\"D5.A D5.B\"",
             Encoding.UTF8.GetString(result.StandardError), StringComparison.Ordinal);
     }
 
     [Fact]
-    public void MissingReportConsumptionFailsClosedWithProducerInstruction()
+    public void MissingScopeFailsClosed()
     {
         using var fixture = new ReportSupervisorFixture();
         var consumer = Path.Combine(
@@ -41,7 +38,7 @@ public sealed class ReportSupervisorScriptTests
 
         Assert.Equal(2, result.ExitCode);
         Assert.Contains(
-            "make lean-report",
+            "scoped targets are required",
             Encoding.UTF8.GetString(result.StandardError),
             StringComparison.Ordinal);
     }

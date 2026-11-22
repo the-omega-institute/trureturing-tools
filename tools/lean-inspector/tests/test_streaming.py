@@ -15,6 +15,7 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import materials
 import publication
+import scoped
 import native
 
 
@@ -465,7 +466,6 @@ class PublicationTests(unittest.TestCase):
                         publication.validate_rows(report, publication.member(report, '.materials.zip'))
 
     def test_binding_structure_accepts_retained_hashes_without_source_reads(self):
-        import zipfile
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             paths = lambda *names: dict(include=[dict(pattern=n, optional=False) for n in names], exclude=[])
@@ -483,27 +483,9 @@ class PublicationTests(unittest.TestCase):
             rows = [dict(module='X', source_path='X.lean', source_sha256='sha256:' + publication.digest(source),
                 imports=[], declarations=[], information_templates=evidence)]
             inputs = publication.selection.Selection(root)
-            report = root / 'report.json'
-            report.write_bytes(materials.canonical_json(dict(schema=materials.REPORT_SCHEMA, modules=rows)))
-            with zipfile.ZipFile(publication.member(report, '.materials.zip'), 'w'):
-                pass
-            compatibility = inputs.compatibility()
-            helper = Path(publication.__file__).resolve().parent.parent / 'scripts/report/lean-report-input.sh'
-            pair, repository = subprocess.check_output([str(helper), 'coordinates', compatibility,
-                compatibility, 'c' * 64, 'd' * 64], text=True).split()
-            coordinates = dict(repository=repository, producer=compatibility,
-                sources='c' * 64, config='d' * 64, input=pair)
-            origins = {'X': dict(module='X', report_sha256=publication.digest(report),
-
-                input_projection=dict(schema='stratalint-judge-input-projection-v1', module='X', inputs=[]), producer_sources_sha256='e' * 64,
-                inspector_executable_sha256='f' * 64)}
-            publication.write_sidecars(report, coordinates, origins)
             validators = [lambda: native.row_binding(rows, root, 'X', utility),
                           lambda: native.row_binding(rows, root, 'X', utility, template_inputs=inputs),
-                          lambda: publication.validate_template_sources(rows, root, inputs=inputs),
-                          lambda: publication.validate_sources(rows, root),
-                          lambda: publication.verify_inputs(report, root),
-                          lambda: publication.validate_bundle(report, coordinates, root)]
+                          lambda: publication.validate_template_sources(rows, root, inputs=inputs)]
             for validate in validators:
                 validate()
             policy.write_text('def driver := 2\n')
@@ -548,63 +530,51 @@ class PublicationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'material address mismatch'):
                     publication.validate_rows(report, archive, verified)
 
-    def test_source_membership_and_paths_remain_required_without_byte_revalidation(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / 'X.lean'
-            source.write_text('def x : Nat := 1\n')
-            claim = root / 'Claim.lean'
-            claim.write_text('def claim : Prop := False\n')
-            paths = lambda *names: dict(include=[dict(pattern=n, optional=False) for n in names], exclude=[])
-            (root / 'lean-report-inputs.json').write_text(json.dumps(dict(schema_version=1,
-                report_modules=paths('X.lean'), inspector_sources=paths(), config_inputs=paths(),
-                producer_scopes={'lean-report': paths('lean-report-inputs.json',
-                    'tools/scripts/report/lean-report-selection.py'), 'scribe-content': paths()})))
-            row = dict(module='X', source_path='X.lean', source_sha256='sha256:' + publication.digest(source),
-                utility_refutation=dict(claim_source_path='Claim.lean', claim_source_sha256='sha256:' + publication.digest(claim)))
-            publication.validate_sources([row], root)
-            with self.assertRaisesRegex(ValueError, 'membership'):
-                publication.validate_sources([], root)
-            row['source_path'] = 'Claim.lean'
-            with self.assertRaisesRegex(ValueError, 'source binding'):
-                publication.validate_sources([row], root)
-            row['source_path'] = 'X.lean'
-            claim.write_text('def claim : Prop := True\n')
-            publication.validate_sources([row], root)
-            row.pop('utility_refutation')
-            source.write_text('def x : Nat := 2\n')
-            publication.validate_sources([row], root)
-
     def test_rejected_complete_bundle_never_replaces_published_bytes(self):
-        import subprocess
-        import zipfile
         for damage in ['material', 'missing', 'duplicate', 'unreferenced', 'nonobject-provenance',
                        'provenance', 'attestation', 'declaration-identity', 'noncanonical',
                        'report-symlink', 'materials-symlink', 'missing-sidecar', 'missing-origin',
                        'origin-projection', 'origin-report', 'origin-executable', 'legacy-provenance',
-                       'bad-sha256', 'illegal-mode']:
-            with self.subTest(damage=damage), tempfile.TemporaryDirectory() as directory:
-                directory = Path(directory)
+                       'bad-sha256', 'legacy-report']:
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
                 spool = directory / 'spool'
                 spool.mkdir()
                 (spool / '0.statement').write_text('statement-v1(λ😀)')
+                source = directory / 'X.lean'
+                source.write_text('opaque x : Nat := 1\n')
+                (directory / 'lean-toolchain').write_text('fixture\n')
+                def paths(*names):
+                    return dict(include=[dict(pattern=name, optional=False) for name in names], exclude=[])
+                (directory / 'lean-report-inputs.json').write_text(json.dumps(dict(schema_version=1,
+                    report_modules=paths('X.lean'), inspector_sources=paths(), config_inputs=paths('lean-toolchain'),
+                    producer_scopes={'lean-report': paths('lean-report-inputs.json',
+                        'tools/scripts/report/lean-report-selection.py'), 'scribe-content': paths()},
+                    report_execution=dict(toolchain='lean-toolchain', tools=['lake', 'lean'],
+                        platform=['system', 'machine'],
+                        environment=['LEAN_PATH', 'LEAN_SRC_PATH', 'LEAN_SYSROOT', 'ELAN_TOOLCHAIN', 'LEAN_OPTS']))))
+                binding = dict(module='X', source_path='X.lean', imports=[])
+                scope = dict(roots=['X'], modules=[binding], dependencies=[binding])
                 declaration = dict(axioms=[], include_in_statement=False, kind='opaque',
                     material_file='0.statement', name='x', name_key='ns(n0,1:x)')
-                raw = dict(schema=materials.SPOOL_SCHEMA, modules=[dict(module='X', source_path='X.lean',
-                    source_sha256='sha256:' + 'a' * 64, imports=[], declarations=[declaration])])
-                source = directory / 'spool.json'
-                source.write_text(json.dumps(raw))
+                raw = dict(schema=materials.SPOOL_SCHEMA, modules=[dict(binding,
+                    source_sha256='sha256:' + publication.digest(source), declarations=[declaration])])
+                spool_report = directory / 'spool.json'
+                spool_report.write_text(json.dumps(raw))
                 report = directory / 'report.json'
-                materials.compact(source, spool, report)
-                helper = Path(publication.__file__).resolve().parent.parent / 'scripts/report/lean-report-input.sh'
-                pair, repository = subprocess.check_output([str(helper), 'coordinates', 'b'*64, 'b'*64, 'c'*64, 'd'*64], text=True).split()
-                coordinates = dict(repository=repository, producer='b'*64, sources='c'*64, config='d'*64, input=pair)
-                origins = {'X': dict(module='X', report_sha256=publication.digest(report),
-
-                    input_projection=dict(schema='stratalint-judge-input-projection-v1', module='X', inputs=[]), producer_sources_sha256='e'*64, inspector_executable_sha256='f'*64)}
-                publication.write_sidecars(report, coordinates, origins)
+                materials.compact(spool_report, spool, report)
+                origin_digest = publication.digest(report)
+                module_report = materials.read_json(report.read_bytes())
+                report.write_bytes(materials.canonical_json(dict(module_report, schema=scoped.SCHEMA)))
+                inputs = scoped.capture(directory, scope)
+                origins = {'X': dict(module='X', report_sha256=origin_digest,
+                    input_projection=dict(schema='stratalint-judge-input-projection-v1', module='X', inputs=[]),
+                    producer_sources_sha256='e' * 64, inspector_executable_sha256='f' * 64)}
+                scoped.write_sidecars(report, inputs, origins)
+                def validate(staged):
+                    scoped.validate_bundle(staged, directory, scope, expected=inputs)
                 live = directory / 'live.json'
-                publication.publish(report, live, coordinates)
+                publication.publish(report, live, validator=validate)
                 before = {suffix: publication.member(live, suffix).read_bytes() for suffix in publication.SUFFIXES}
                 if damage in ['material', 'missing', 'duplicate', 'unreferenced']:
                     path = publication.member(report, '.materials.zip')
@@ -620,7 +590,7 @@ class PublicationTests(unittest.TestCase):
                     publication.member(report, '.provenance.json').write_text('[]')
                 elif damage == 'provenance':
                     value = json.loads(publication.member(report, '.provenance.json').read_text())
-                    value['producer_sha256'] = 'f'*64
+                    value['inputs']['files']['X.lean'] = 'f' * 64
                     publication.member(report, '.provenance.json').write_text(json.dumps(value))
                 elif damage in ['missing-origin', 'origin-projection', 'origin-report', 'origin-executable', 'legacy-provenance']:
                     path = publication.member(report, '.provenance.json')
@@ -638,26 +608,24 @@ class PublicationTests(unittest.TestCase):
                     value = json.loads(report.read_text())
                     value['modules'][0]['declarations'][0]['statement_id'] = 'sha256:' + 'f'*64
                     report.write_bytes(materials.canonical_json(value))
-                    publication.write_sidecars(report, coordinates, origins)
+                    scoped.write_sidecars(report, inputs, origins)
                 elif damage == 'noncanonical':
                     report.write_text(json.dumps(json.loads(report.read_text())))
-                    publication.write_sidecars(report, coordinates, origins)
+                    scoped.write_sidecars(report, inputs, origins)
                 elif damage == 'missing-sidecar':
                     publication.member(report, '.provenance.json').unlink()
                 elif damage == 'bad-sha256':
                     publication.member(report, '.sha256').write_text('0' * 64 + '  report.json\n')
-                elif damage == 'illegal-mode':
-                    path = publication.member(report, '.provenance.json')
-                    value = json.loads(path.read_text())
-                    value['mode'] = 'illegal'
-                    path.write_text(json.dumps(value))
+                elif damage == 'legacy-report':
+                    report.write_bytes(materials.canonical_json(module_report))
+                    scoped.write_sidecars(report, inputs, origins)
                 else:
                     path = report if damage == 'report-symlink' else publication.member(report, '.materials.zip')
                     regular = path.with_name(path.name + '.regular')
                     path.rename(regular)
                     path.symlink_to(regular.name)
                 with self.assertRaises((ValueError, TypeError)):
-                    publication.publish(report, live, coordinates, mode='cached')
+                    publication.publish(report, live, validator=validate)
                 self.assertEqual(before, {suffix: publication.member(live, suffix).read_bytes() for suffix in publication.SUFFIXES})
 
 
@@ -813,51 +781,6 @@ raise SystemExit(37)
         self.assertTrue(all(row['request_capture'] is None for row in latest))
         self.assertFalse(latest[-1]['success'])
 
-    def test_report_entry_retains_failed_request_in_selected_log_directory(self):
-        repository = Path(native.__file__).resolve().parents[2]
-
-        def write(name, text):
-            path = self.root / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
-            path.chmod(0o755)
-            return path
-
-        for name in ['inspect.sh', 'native.py', 'reuse.py', 'materials.py', 'publication.py']:
-            path = 'tools/lean-inspector/' + name
-            write(path, (repository / path).read_text())
-        write('tools/scripts/lib/resource-observation-lib.sh', 'resource_observe() { :; }\n')
-        write('tools/scripts/worktree/lean-cache-ensure.sh', '#!/bin/sh\nexit 0\n')
-        write('tools/scripts/worktree/lean-cache-run.sh', '#!/bin/sh\n[ "$1" = --prebuilt ] || exit 67\nshift\nexec "$@"\n')
-        request = write('batch.json', json.dumps([['produce', row] for row in self.requests]))
-        # Lake is the boundary stub; the shell entry, Python batch producer and
-        # failing executable are real, including all their failure cleanup.
-        lake = write('bin/lake', f'#!{sys.executable}\nimport os, sys\n' +
-            'os.execv(sys.executable, [sys.executable, "-B", ' +
-            repr(str(self.root / 'tools/lean-inspector/native.py')) + ', "batch", ' +
-            repr(str(request)) + '])\n')
-        producer = write('candidate.dll', 'fixture candidate producer')
-        report = write('public/report.json', 'previous report')
-        self.phases.write_text('{"phase":"stale"}\n')
-        environment = dict(os.environ, FULL_BUILD="1", STRATALINT_INSPECTOR_SUPERVISED='1',
-            STRATALINT_LEAN_BUILD_TARGETS='[]', STRATALINT_LEAN_PRODUCER_DLL=str(producer),
-            LAKE_BIN=str(lake))
-        result = subprocess.run(['bash', str(self.root / 'tools/lean-inspector/inspect.sh'),
-            '--repository', str(self.root), '--output', str(report), '--log-dir', str(self.logs)],
-            cwd=self.logs, env=environment, capture_output=True, text=True, timeout=30)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('LEAN_INSPECTOR_FAILED phase=report exit=1', result.stderr)
-        self.assertIn('raw.reader_failed:exit=37', result.stderr)
-        self.assertEqual(report.read_text(), 'previous report')
-        phases = [json.loads(line) for line in self.phases.read_text().splitlines()]
-        self.assertNotIn('stale', [row['phase'] for row in phases])
-        start = next(row for row in phases if row['phase'] == 'native-inspect' and row['boundary'] == 'start')
-        capture = Path(start['request_capture'])
-        self.assertEqual(capture.parent, self.logs)
-        self.assertEqual(json.loads(capture.read_text()), json.loads(self.seen.read_text())['capture'])
-        self.assertEqual(list(native.state(self.root).glob('.inspection.*')), [])
-
-
 class EntryPointTests(unittest.TestCase):
     def test_prebuilt_utility_producer_is_required_and_its_failure_stops_preparation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -881,99 +804,25 @@ class EntryPointTests(unittest.TestCase):
             dotnet.chmod(0o755)
             environment = dict(PATH=str(scripts) + os.pathsep + os.environ['PATH'],
                                STRATALINT_LEAN_PRODUCER_DLL=str(binary))
-            with patch.dict(os.environ, environment), patch.object(publication, 'coordinates', return_value={}):
+            with patch.dict(os.environ, environment):
                 native.prepare(root)
             self.assertEqual(json.loads((root / 'utility-command.json').read_text()),
                              [str(binary), 'lean-utility-input'])
-            prepared = root / '.lake/build/lean-inspector/inputs/Trureturing.json'
+            prepared = root / '.lake/build/lean-inspector/module-inputs.json'
             previous = prepared.read_bytes()
-            aggregate = root / '.lake/build/lean-inspector/inputs.json'
-            previous_aggregate = aggregate.read_bytes()
-            with patch.dict(os.environ, environment), patch.object(publication, 'coordinates') as coordinates:
-                native.prepare(root, 'module-records')
-            coordinates.assert_not_called()
-            deferred = json.loads((root / '.lake/build/lean-inspector/module-inputs.json').read_text())
-            self.assertEqual(deferred['records']['Trureturing'].encode('ascii'), previous)
-            self.assertEqual(prepared.read_bytes(), previous)
-            with patch.object(publication, 'coordinates', return_value={}):
-                native.aggregate_inputs(root)
-            self.assertEqual(aggregate.read_bytes(), previous_aggregate)
+            self.assertIn('Trureturing', json.loads(previous)['records'])
+            self.assertFalse((prepared.parent / 'inputs.json').exists())
             for invalid in ('relative.dll', str(root / 'absent.dll')):
                 with self.subTest(producer=invalid), patch.dict(os.environ,
                         dict(environment, STRATALINT_LEAN_PRODUCER_DLL=invalid)):
                     with self.assertRaisesRegex(ValueError, 'existing absolute path'):
                         native.prepare(root)
                 self.assertEqual(prepared.read_bytes(), previous)
-            for scope in ('full', 'module-records'):
-                with patch.dict(os.environ, dict(environment, UTILITY_EXIT='37')):
-                    with self.assertRaises(subprocess.CalledProcessError) as failure:
-                        native.prepare(root, scope)
-                self.assertEqual(failure.exception.returncode, 37)
+            with patch.dict(os.environ, dict(environment, UTILITY_EXIT='37')):
+                with self.assertRaises(subprocess.CalledProcessError) as failure:
+                    native.prepare(root)
+            self.assertEqual(failure.exception.returncode, 37)
             self.assertEqual(prepared.read_bytes(), previous)
-
-    def test_failed_phase_preserves_public_bundle_and_propagates_exit(self):
-        from test_reuse import ReuseTests
-        cases = [('inputs', 2, []), ('report', 39, ['report']), ('publish', 40, ['report', 'publish'])]
-        for phase, status, calls in cases:
-            fixture = ReuseTests()
-            fixture.setUp()
-            self.addCleanup(fixture.doCleanups)
-            with self.subTest(phase=phase):
-                root = fixture.root
-                def write(name, text):
-                    path = root / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(text)
-                    path.chmod(0o755)
-                repository = Path(publication.__file__).resolve().parents[2]
-                for name in ['tools/lean-inspector/inspect.sh', 'tools/lean-inspector/reuse.py',
-                             'tools/lean-inspector/materials.py',
-                             'tools/lean-inspector/build_work.py', 'tools/lean-inspector/publication.py',
-                             'tools/scripts/report/lean-report-selection.py']:
-                    write(name, (repository / name).read_text())
-                # Use the shared no-Application bundle fixture for both generations.
-                # No success receipt is installed for the previous bundle.
-                fixture.bundle()
-                report = fixture.report
-                before = {suffix: publication.member(report, suffix).read_bytes() for suffix in publication.SUFFIXES}
-                fixture.write('D5/A.lean', 'def a := 2\n')
-                fixture.report = root / 'produced' / publication.RAW
-                fixture.report.parent.mkdir()
-                fixture.bundle()
-                self.assertNotEqual(report.read_bytes(), fixture.report.read_bytes())
-                with zipfile.ZipFile(root / 'produced-report.zip', 'w') as archive:
-                    for suffix in publication.SUFFIXES:
-                        member = publication.member(fixture.report, suffix)
-                        archive.write(member, member.name)
-                write('candidate producer.dll', 'fixture candidate producer')
-                write('tools/scripts/worktree/lean-cache-ensure.sh', '#!/bin/sh\n'
-                    + 'printf "ensure %s\\n" "${STRATALINT_LEAN_PRODUCER_DLL##*/}" >> "$CALLS"\nexit '
-                    + str(38 if phase == 'ensure' else 0) + '\n')
-                write('bin/lake', '#!/bin/sh\n'
-                    + 'if [ "${1:-}" = --version ]; then printf "fixture lake 1\\n"; exit 0; fi\n'
-                    + 'printf "%s\\n" report >> "$CALLS"\n'
-                    + ('exit 39\n' if phase == 'report' else
-                       'mkdir -p .lake/build/lean-inspector\n'
-                       + 'cp produced-report.zip .lake/build/lean-inspector/report.zip\n'))
-                write('tools/scripts/worktree/lean-cache-run.sh', '#!/bin/sh\n[ "$1" = --prebuilt ] || exit 67\nshift\nexec "$@"\n')
-                write('tools/scripts/lib/resource-observation-lib.sh', 'resource_observe() { :; }\n')
-                write('tools/lean-inspector/native.py',
-                    'import os, sys\nfrom pathlib import Path\n'
-                    + 'if sys.argv[1] == "batch-size": raise SystemExit(0)\n'
-                    + 'with Path(os.environ["CALLS"]).open("a") as out: out.write("publish\\n")\nraise SystemExit(40)\n')
-                if phase == 'inputs':
-                    (root / 'lean-report-inputs.json').unlink()
-                record = root / 'calls'
-                env = dict(os.environ, FULL_BUILD="1", PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'],
-                    CALLS=str(record), LAKE_BIN=str(root / 'bin/lake'), STRATALINT_INSPECTOR_SUPERVISED='1',
-                    STRATALINT_LEAN_PRODUCER_DLL=str(root / 'candidate producer.dll'))
-                result = subprocess.run(['bash', str(root / 'tools/lean-inspector/inspect.sh'),
-                    '--repository', str(root), '--output', str(report)], env=env, capture_output=True, text=True, timeout=30)
-                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
-                self.assertIn(f'LEAN_INSPECTOR_FAILED phase={phase} exit={status}', result.stderr)
-                self.assertEqual(record.read_text().splitlines() if record.exists() else [], calls)
-                self.assertEqual(before, {suffix: publication.member(report, suffix).read_bytes() for suffix in publication.SUFFIXES})
-
 
 if __name__ == '__main__':
     unittest.main()

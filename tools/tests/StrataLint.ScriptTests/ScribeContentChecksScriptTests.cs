@@ -54,19 +54,22 @@ public sealed class ScribeContentChecksScriptTests
         private readonly string report;
         private readonly string scribe;
         private readonly string paths;
+        private readonly string targets;
 
         internal ScribeContentFixture()
         {
             repository = Path.Combine(temporary.Path, "repository");
             bin = Path.Combine(temporary.Path, "bin");
             log = Path.Combine(temporary.Path, "scribe.log");
-            report = Path.Combine(temporary.Path, "raw-lean-report.json");
+            report = Path.Combine(temporary.Path, "scoped-lean-report.json");
             scribe = Path.Combine(repository, "scribe-fixture");
             paths = Path.Combine(temporary.Path, "scribe paths");
+            targets = Path.Combine(temporary.Path, "scribe targets");
             ScriptHarnessScratch.EnsureDirectory(bin);
             ScriptHarnessScratch.EnsureDirectory(repository);
             ScriptHarnessScratch.WriteScratchText(report, "{}\n");
             ScriptHarnessScratch.WriteScratchText(scribe, "candidate fixture\n");
+            ScriptHarnessScratch.WriteScratchText(targets, "D5/Probe.lean\0");
             ScriptHarnessScratch.WriteScratchText(paths, "Blueprint/D5/with spaces.scribe.cs\0");
             ScriptHarnessScratch.CopyScriptInto(
                 Path.Combine(TestRepositoryLayout.FindRoot(), InputHelperPath), Path.Combine(repository, InputHelperPath));
@@ -119,7 +122,7 @@ public sealed class ScribeContentChecksScriptTests
         internal ProcessOutput RunGate(int childExit) => Run(childExit, [paths]);
 
         internal ProcessOutput RunWithoutPaths(bool explicitMissingFile) => Run(0,
-            explicitMissingFile ? [Path.Combine(temporary.Path, "missing paths")] : []);
+            explicitMissingFile ? [Path.Combine(temporary.Path, "missing paths")] : [""]);
 
         private ProcessOutput Run(int childExit, string[] pathArguments) => TestProcessRunner.Run(
             "/bin/bash",
@@ -127,7 +130,7 @@ public sealed class ScribeContentChecksScriptTests
                 + "SCRIBE_EXIT=\"$3\" SCRIBE_FIXTURE_DLL=\"$6\" "
                 + "exec /bin/bash \"$4\" \"$5\" \"$6\" \"${@:7}\"",
                 "scribe-current", bin, log, childExit.ToString(CultureInfo.InvariantCulture),
-                Path.Combine(repository, ContentChecksPath), report, scribe, .. pathArguments],
+                Path.Combine(repository, ContentChecksPath), report, scribe, .. pathArguments, targets],
             repository, TestBudgets.ScriptProcessHangGuard, 1024 * 1024);
 
         private void Write(string relativePath, string contents)

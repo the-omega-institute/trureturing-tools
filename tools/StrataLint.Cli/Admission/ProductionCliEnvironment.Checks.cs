@@ -17,12 +17,10 @@ internal sealed partial class ProductionCliEnvironment
         ImmutableArray<Diagnostic> planeObservations = [];
         try
         {
-            var options = ParseCheckArguments(arguments, stage: true);
-            var scoped = options.ChangedPaths is not null;
-            if (delta != (options.ProtectedBase is not null) || scoped == (options.CandidateLeanReport is not null)
-                || options.ScopeBase is not null && (!scoped || delta)
-                || scoped && options.ScribePaths is not null || !scoped && options.ScopedReports is not null)
-                throw CheckUsage(stage: true);
+            var options = ParseCheckArguments(arguments);
+            if (delta != (options.ProtectedBase is not null) || options.ChangedPaths is null
+                || options.ScopeBase is not null && delta)
+                throw CheckUsage();
 
             var raw = timing.Measure("repository-read", () => AdmissionRepositoryInputs.ReadCurrent(repository));
             var prepared = delta ? timing.Measure("repository-prepare", () => repository.Prepare(options.ProtectedBase)) : null;
@@ -38,12 +36,11 @@ internal sealed partial class ProductionCliEnvironment
             var current = timing.Measure("snapshot-load", () => Decode(raw));
             var scopeBase = options.ScopeBase is null ? prepared
                 : timing.Measure("scope-base", () => repository.Prepare(options.ScopeBase));
-            var changes = !scoped ? null : ScopedAdmissionReports.ChangedPaths(repositoryRoot, options.ChangedPaths!, scopeBase);
-            var plan = changes is null ? null : timing.Measure("lean-scope", () => PullRequestLeanChecks.CreatePlan(
+            var changes = ScopedAdmissionReports.ChangedPaths(repositoryRoot, options.ChangedPaths, scopeBase);
+            var plan = timing.Measure("lean-scope", () => PullRequestLeanChecks.CreatePlan(
                 repositoryRoot, current, changes));
-            var report = timing.Measure("lean-report-load", () => plan is null
-                ? RawLeanReportArtifact.ReadFile(options.CandidateLeanReport!, current, validateMaterials: true)
-                : ScopedAdmissionReports.Read(repositoryRoot, current, plan.Targets, options.ScopedReports));
+            var report = timing.Measure("lean-report-load", () =>
+                ScopedAdmissionReports.Read(repositoryRoot, current, plan.Targets, options.ScopedReports));
             var policy = timing.Measure("policy-load", () => RepositoryPolicyLoader.Load(current) switch
             {
                 PolicyLoadOutcome.Accepted accepted => accepted.Policy,
@@ -70,15 +67,13 @@ internal sealed partial class ProductionCliEnvironment
                 };
                 result = timing.Measure("rule-passes", () => AdmissionPipeline.CheckDelta(
                     DeltaRuleContext.Create(current, baseline, policy, lean, prepared.Changes, meta,
-                        ruleInputChanges: scoped ? PullRequestLeanChecks.SemanticChanges(prepared.Changes) : null),
+                        ruleInputChanges: PullRequestLeanChecks.SemanticChanges(prepared.Changes)),
                     MeasureRule), Blocked);
             }
             else
             {
-                var verified = timing.Measure("scribe-verify", () => plan is not null
-                    ? scribeEmissionVerifier?.VerifyScoped(current, report, changes!, plan.Paths)
-                    : VerifyScribeForAdmission(scribeEmissionVerifier, current, report,
-                        options.ScribePaths is null ? null : RawChangeSet.Create(MarkdownFormulaScope.ParsePaths(File.ReadAllText(options.ScribePaths)))));
+                var verified = timing.Measure("scribe-verify", () =>
+                    scribeEmissionVerifier?.VerifyScoped(current, report, changes, plan.Paths));
                 result = timing.Measure("rule-passes", () => AdmissionPipeline.CheckCurrent(
                     CurrentRuleContext.Create(current, policy, lean, verified), MeasureRule), Blocked);
                 if (timing.Measure("canonicalization", () => RepositoryCanonicalizer.Validate(current, policy),

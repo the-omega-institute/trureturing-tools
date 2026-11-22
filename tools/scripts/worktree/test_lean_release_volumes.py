@@ -43,14 +43,14 @@ def restore_file_limit(size):
 
 
 class VolumeDownloads(unittest.TestCase):
-    def test_prepare_only_checks_report_without_publishing(self):
+    def test_prepare_only_prepares_cache_without_publishing(self):
         import lean_cache_release as release
         import lean_release_sparse as sparse
 
         with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
             root = Path(temp)
             (root / "Makefile").write_text(
-                'check-lean-report:\n\t@echo "$(LEAN_REPORT_CACHE_MISS_POLICY) $(LEAN_REPORT)" > checked\n')
+                'lean-cache-prepare:\n\t@echo prepared > checked\n')
             stack.enter_context(patch.dict(os.environ, LEAN_CACHE_RELEASE_VOLUMES="1",
                                           LEAN_CACHE_SPARSE_PLAN="", FULL_BUILD="1"))
             stack.enter_context(patch.object(release, "partition_path", return_value="fixture"))
@@ -61,14 +61,14 @@ class VolumeDownloads(unittest.TestCase):
                 self.assertEqual(release._main(), 0)
                 self.assertIn('"phase":"report_checked","sparse":false', output.getvalue())
                 self.assertEqual((root / "checked").read_text().strip(),
-                                 "reuse-or-build .lake/build/stratalint/raw-lean-report.json")
+                                 "prepared")
 
                 marker = root / release.SPARSE_PLAN
                 marker.parent.mkdir()
                 plan = {"schema": sparse.SCHEMA, "target_commit": "f"*40}
                 marker.write_text(json.dumps(plan))
                 stack.enter_context(patch.object(sparse.compiler, "checkout", return_value="f"*40))
-                with patch.object(sparse, "check_report") as check:
+                with patch.object(sparse, "prepare_cache") as check:
                     check.return_value.returncode = 0
                     self.assertEqual(release._main(), 0)
                     self.assertEqual(check.call_args.args[-1], plan)
@@ -97,7 +97,7 @@ class VolumeDownloads(unittest.TestCase):
                          [dict(status="started", frames=3, stream_bytes=0),
                           dict(status="streaming", stream_bytes=6), dict(status="finished", frames=3, stream_bytes=9)])
 
-    def test_sparse_report_make_failure_requires_a_bound_compatibility_signal(self):
+    def test_sparse_cache_make_failure_requires_a_bound_compatibility_signal(self):
         from contextlib import nullcontext
         import lean_release_sparse as sparse
 
@@ -128,7 +128,7 @@ class VolumeDownloads(unittest.TestCase):
                  patch.dict(os.environ, GITHUB_ACTIONS="true", GITHUB_WORKSPACE=str(root), GITHUB_ENV="",
                             LEAN_CACHE_SPARSE_PLAN=str(marker), SIGNAL=""):
                 def check(current):
-                    return sparse.check_report(host, root, ["make", "check"], "fixture", True, current).returncode
+                    return sparse.prepare_cache(host, root, ["make", "check"], "fixture", True, current).returncode
                 self.assertEqual(check(plan), 2)
                 self.assertTrue(build.exists())
                 reason = dict(target_commit="0"*40, base_manifest_sha256=plan["base_manifest_sha256"], reason="regenerate")
@@ -336,6 +336,7 @@ class VolumeReleases(unittest.TestCase):
         report = self.project / ".lake/build/stratalint/raw-lean-report.json"
         report.parent.mkdir(parents=True)
         report.write_text("{}")
+        self.write(".lake/build/lean-inspector/modules/D5.A.zip", "module fixture")
         for i in range(3):
             (report.parent / f"payload-{i}").write_bytes(random.Random(i).randbytes(96 * 1024))
         volumes.publish(self.pool, "base", self.project, chunk_bytes=128 * 1024)
@@ -349,9 +350,6 @@ class VolumeReleases(unittest.TestCase):
         self.commit("change B")
         target = run(self.project, "git", "rev-parse", "HEAD").strip()
         clone = self.consumer("sparse")
-        host.report_reuse.CHECKED_STEPS = (["checked"],)
-        host.report_reuse.read_receipt.return_value = {"completed": ["checked"]}
-        host.report_reuse.seed_identity.return_value = "1" * 64
 
         def range_blocks(digest, start, size, deadline):
             with (self.pool / "volumes" / digest).open("rb") as stream:
@@ -372,12 +370,12 @@ class VolumeReleases(unittest.TestCase):
             self.assertEqual(plan["rebuild_modules"], ["D5.B"])
             self.assertEqual(plan["restore_modules"], ["D5.A"])
             self.assertEqual(plan["inherit_modules"], ["D5.A", "D5.C"])
-            self.assertEqual(plan["base_report_sha256"], "1" * 64)
             restored = clone / ".lake/build"
             self.assertTrue((restored / "lib/lean/D5/A.olean").is_file())
             self.assertFalse((restored / "lib/lean/D5/B.olean").exists())
             self.assertFalse((restored / "lib/lean/D5/C.olean").exists())
-            self.assertTrue((restored / "stratalint/raw-lean-report.json").is_file())
+            self.assertFalse((restored / "stratalint/raw-lean-report.json").exists())
+            self.assertEqual((restored / "lean-inspector/modules/D5.A.zip").read_text(), "module fixture")
             # Rerunning the same protected install also recovers a partially rebuilt workspace.
             with patch.dict(os.environ, GITHUB_ACTIONS="true", GITHUB_WORKSPACE=str(clone)):
                 leftover = restored / "interrupted"
@@ -649,11 +647,10 @@ class VolumeReleases(unittest.TestCase):
         stack.enter_context(patch.object(release, "REPO", "fixture/private"))
         stack.enter_context(patch.object(release, "CHUNK_BYTES", chunk_bytes))
         if not real_report:
-            stack.enter_context(patch.object(release.report_reuse, "capture", return_value={}))
-            stack.enter_context(patch.object(release.report_reuse, "read_receipt",
-                                            return_value={"completed": release.report_reuse.CHECKED}))
-            stack.enter_context(patch.object(release.report_reuse.publication, "validate_bundle"))
-            stack.enter_context(patch.object(release.report_reuse, "record_seed_base", return_value=True))
+            # These transport fixtures supply compiled bytes directly.
+            self.write(".lake/build/lean-inspector/modules/D5.A.zip", "module report")
+            selection = stack.enter_context(patch.object(release.publication.selection, "Selection"))
+            selection.return_value.modules.return_value = {"D5.A": "D5/A.lean"}
         stack.enter_context(patch.object(release, "partition_path", return_value=partition))
         stack.enter_context(patch.object(release, "release_key", return_value=key))
         identity = stack.enter_context(patch.object(release, "publication_identity"))
@@ -676,7 +673,7 @@ class VolumeReleases(unittest.TestCase):
             for mode in ("0", "1"):
                 with self.subTest(mode=mode), patch.dict(os.environ, LEAN_CACHE_RELEASE_VOLUMES=mode):
                     tag = release.prefix(partition, key, indexed="volumes" if mode == "1" else True) + "ci-701-1"
-                    self.assertEqual(release.publish(self.project, partition, build_report=False, indexed=True), 0)
+                    self.assertEqual(release.publish(self.project, partition, build_cache=False, indexed=True), 0)
                     target = self.consumer("scoped-" + mode)
                     log = self.area / ("requests-" + mode)
                     with tempfile.TemporaryDirectory() as stage, restore_file_limit(144 * 1024), \
@@ -711,7 +708,7 @@ class VolumeReleases(unittest.TestCase):
                 self.assertEqual(previous.read_bytes(), b"existing")
                 self.assertEqual(list((dest / ".lake").glob(".release-*")), [])
 
-    def test_two_generations_with_sparse_checked_report_and_empty_consumers(self):
+    def test_two_generations_with_sparse_module_reports_and_empty_consumers(self):
         import lean_release_index as index
         import lean_release_sparse as sparse
         import lean_cache_release as release
@@ -733,7 +730,7 @@ class VolumeReleases(unittest.TestCase):
                 identity.return_value = {"producer_commit_sha": commit, "publication_id": suffix,
                     "workflow_run_id": str(number), "workflow_run_attempt": "1"}
                 with redirect_stdout(io.StringIO()) as output:
-                    code = release.publish(project, partition, build_report=False, indexed=True)
+                    code = release.publish(project, partition, build_cache=False, indexed=True)
                 self.assertEqual(code, 0, output.getvalue())
                 self.assertIn('"status":"published"', output.getvalue())
                 return release.prefix(partition, key, indexed="volumes") + suffix
@@ -768,53 +765,26 @@ class VolumeReleases(unittest.TestCase):
             self.assertFalse((rolling / ".lake/build/lib/lean/D5/C.olean").exists())
             run(rolling, "lake", "build", "@fixture/+D5.B:olean")
 
-            # Supply small per-module extractor outputs while running the report entry
-            # through sparse row selection, aggregation, validation and receipt sealing.
-            reuse = release.report_reuse
-            pub = reuse.publication
-            report = reuse.canonical_seed(rolling)
-            prior = reuse.read_receipt(report)
-            names = pub.selection.Selection(rolling).modules()
-            modules = index.workspace_modules(rolling)
-            graph = index.project_imports(rolling, modules)
-            deps = {name: dict(module=name, source_path=path, imports=sorted(graph[name])) for name, path in names.items()}
-            def extract(entry, phase, command):
-                if phase == "utility":
-                    path = entry.temporary / "utilities.json"
-                    path.write_text("[]")
-                    return path
-                self.assertEqual((phase, command[-1]), ("report", "+D5.B:report"))
-                name = "D5.B"
-                row = dict(deps[name], source_sha256="sha256:" + pub.digest(rolling / names[name]), declarations=[])
-                raw = pub.materials.canonical_json(dict(schema=pub.materials.REPORT_SCHEMA, modules=[row]))
-                origin = dict(module=name, report_sha256=hashlib.sha256(raw).hexdigest(),
-                    input_projection=dict(schema="stratalint-judge-input-projection-v1", module=name, inputs=[]),
-                    producer_sources_sha256="a"*64, inspector_executable_sha256="b"*64)
-                artifact = native.state(rolling) / "modules/D5.B.zip"
-                artifact.parent.mkdir(parents=True, exist_ok=True)
-                empty = io.BytesIO()
-                with zipfile.ZipFile(empty, "w"):
-                    pass
-                with zipfile.ZipFile(artifact, "w") as archive:
-                    archive.writestr(pub.RAW, raw)
-                    archive.writestr(pub.RAW + ".provenance.json", pub.materials.canonical_json(origin))
-                    archive.writestr(pub.RAW + ".materials.zip", empty.getvalue())
-
+            # The predecessor retains module ZIPs even for compiler frames it omits.
+            names = release.publication.selection.Selection(rolling).modules()
+            state = native.state(rolling)
+            encoded = {name: json.dumps({"claims": [], "utilities": [], "source_path": path})
+                       for name, path in names.items()}
+            (state / "module-inputs.json").write_text(json.dumps({"records": encoded}))
+            (state / "inputs").mkdir(exist_ok=True)
+            for name, record in encoded.items():
+                (state / "inputs" / (name + ".json")).write_text(record)
             with tempfile.TemporaryDirectory(dir=rolling / ".lake") as temporary, ExitStack() as check:
-                directory = Path(temporary)
                 check.enter_context(patch.object(build_inputs, "ROOT", rolling))
-                check.enter_context(patch.object(build_inputs, "sparse_graph", return_value=deps))
+                check.enter_context(patch.object(build_inputs, "prepare_producer"))
                 check.enter_context(patch.object(build_inputs, "sparse_programs", return_value={}))
                 check.enter_context(patch.object(build_inputs, "prepare"))
                 check.enter_context(patch.object(scoped.Entry, "provision"))
-                check.enter_context(patch.object(scoped.Entry, "phase", extract))
-                build_inputs.checked_report(directory, report, report, directory, directory / "work.json",
-                                            try_seed=False, plan=plan)
-            checked = reuse.read_receipt(report, reuse.capture(rolling))
-            self.assertEqual(checked["completed"], reuse.CHECKED)
-            self.assertNotEqual(prior["bundle"], checked["bundle"])
-            self.assertEqual(set(pub.selection.Selection(rolling).modules()), {r["module"] for r in
-                pub.report_rows(report, pub.materials.REPORT_SCHEMA)})
+                check.enter_context(patch.object(scoped.Entry, "phase"))
+                targets = build_inputs.prepare_sparse_inputs(Path(temporary), plan, regenerate=False)
+            self.assertEqual(targets, ["+D5.B:report"])
+            updated = b"current module fixture"
+            (state / "modules/D5.B.zip").write_bytes(updated)
             second = publish(rolling, target, 802)
             manifest = json.loads((self.pool / second / volumes.MANIFEST).read_bytes())
             previous = json.loads((self.pool / first / volumes.MANIFEST).read_bytes())
@@ -831,7 +801,8 @@ class VolumeReleases(unittest.TestCase):
                 if mode == "full":
                     self.assertTrue(release.restore_snapshot(dest, partition, second, stage, release.operation_deadline(),
                                                              cache_key=key))
-                    self.assertEqual(reuse.read_receipt(reuse.canonical_seed(dest), reuse.capture(dest)), checked)
+                    self.assertEqual((native.state(dest) / "modules/D5.B.zip").read_bytes(), updated)
+                    self.assertFalse((dest / ".lake/build/stratalint/raw-lean-report.json").exists())
                     targets = ["D5.A", "D5.B", "D5.C"]
                 else:
                     count, _ = release.restore_scoped(dest, partition, second, stage, release.operation_deadline(),
@@ -851,8 +822,9 @@ class VolumeReleases(unittest.TestCase):
         artifact.write_bytes(random.Random(1).randbytes(6 * chunk))
         reference = self.area / "reference"
         reference.mkdir()
+        self.write(".lake/build/lean-inspector/modules/D5.A.zip", "module report")
         expected = index.pack(self.project, reference, chunk, None, stable_timestamps=True)
-        modules = ["D5.A", "D5.B", "D5.C"]
+        frames = ["D5.A", "D5.B", "D5.C", None]
         author = run(self.project, "git", "rev-parse", "HEAD").strip()
         with ExitStack() as stack:
             release, key, partition, identity = self.github_transport(stack, chunk)
@@ -888,7 +860,7 @@ class VolumeReleases(unittest.TestCase):
                 encode.reset_mock()
                 transfers.clear()
                 with redirect_stdout(io.StringIO()) as output:
-                    result = release.publish(self.project, partition, build_report=False, indexed=True)
+                    result = release.publish(self.project, partition, build_cache=False, indexed=True)
                 events = dict(line.split(" ", 1) for line in output.getvalue().splitlines())
                 progress[:] = [json.loads(line.split(" ", 1)[1]) for line in output.getvalue().splitlines()
                                if line.startswith("LEAN_CACHE_RELEASE_PROGRESS ")]
@@ -897,7 +869,7 @@ class VolumeReleases(unittest.TestCase):
                 return release.prefix(partition, key, indexed="volumes") + suffix
 
             tag = publish(701)
-            self.assertEqual([call.args[2] for call in encode.call_args_list], modules)
+            self.assertEqual([call.args[2] for call in encode.call_args_list], frames)
             manifest = json.loads((self.pool / tag / volumes.MANIFEST).read_bytes())
             self.assertEqual((manifest["archive_bytes"], manifest["archive_sha256"]),
                              (expected["archive_bytes"], expected["archive_sha256"]))
@@ -921,7 +893,7 @@ class VolumeReleases(unittest.TestCase):
                                   "peak_allocated_bytes": max(n for _, n in measurements)}))
 
             publish(702)
-            self.assertEqual([call.args[2] for call in encode.call_args_list], modules)
+            self.assertEqual([call.args[2] for call in encode.call_args_list], frames)
             self.assertEqual(transfers, [])
             confirmations = [event for event in progress if event["phase"] == "volume_confirmed"]
             self.assertTrue(all(event["source"] == "inherited" for event in confirmations))
@@ -948,7 +920,7 @@ class VolumeReleases(unittest.TestCase):
             self.assertTrue((self.pool / tag / volumes.MANIFEST).exists())
 
             retry = publish(703)
-            self.assertEqual([call.args[2] for call in encode.call_args_list], modules + ["D5.B"])
+            self.assertEqual([call.args[2] for call in encode.call_args_list], frames + ["D5.B"])
             self.assertNotIn(confirmed[0], transfers)
             resumed = next(event for event in progress if event["phase"] == "volume_confirmed"
                            and event["sha256"] == confirmed[0].rsplit("-", 1)[1])
@@ -979,7 +951,7 @@ class VolumeReleases(unittest.TestCase):
                                      "workflow_run_id":"901","workflow_run_attempt":"1"}
             tag = release.prefix(partition, key, indexed="volumes") + "ci-901-1"
             with redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(release.publish(self.project, partition, build_report=False, indexed=True), 0)
+                self.assertEqual(release.publish(self.project, partition, build_cache=False, indexed=True), 0)
             self.assertIn('"status":"published"', output.getvalue())
             manifest = json.loads((self.pool / tag / volumes.MANIFEST).read_bytes())
             tree = volumes.read_tree(self.pool / tag / volumes.INDEX, manifest)
@@ -1069,7 +1041,7 @@ class VolumeReleases(unittest.TestCase):
                 tag = release.prefix(partition, key, indexed="volumes") + suffix
                 tags.append(tag)
                 with redirect_stdout(io.StringIO()) as output:
-                    code = release.publish(self.project, partition, build_report=False, indexed=True)
+                    code = release.publish(self.project, partition, build_cache=False, indexed=True)
                 self.assertEqual(code, 0, output.getvalue())
                 events = output.getvalue().splitlines()
                 final = json.loads(next(x for x in events if x.startswith("LEAN_CACHE_PUBLISH ")).split(" ", 1)[1])
@@ -1161,7 +1133,7 @@ class VolumeReleases(unittest.TestCase):
                     return value
                 with patch.dict(os.environ, options), patch.object(release, "gh", side_effect=interrupted), \
                         redirect_stdout(io.StringIO()) as output:
-                    code = release.publish(self.project, partition, verification=verified, build_report=False, indexed=True)
+                    code = release.publish(self.project, partition, verification=verified, build_cache=False, indexed=True)
                 if num == 503:
                     self.assertEqual(code, 1, output.getvalue())
                     self.assertIn("interrupted after deleting predecessor", output.getvalue())
