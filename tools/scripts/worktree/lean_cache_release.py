@@ -29,7 +29,7 @@ except ImportError:
 
 from lean_cache import SHARED_SEED_PLATFORMS, normalized_platform, partition_path, seed_partitions
 from lean_cache_topology import checkout_topology, git_absolute_path, warm_dev_remediation
-from lean_cache_release_io import (ArchiveInput, INDEXED_ASSET, INDEXED_SCHEMA, MultipartArchiveOutput,
+from lean_cache_release_io import (check_native_products, ArchiveInput, INDEXED_ASSET, INDEXED_SCHEMA, MultipartArchiveOutput,
                                    PRODUCTION_PREFIX, SPARSE_PLAN, VERIFICATION_PREFIX,
                                    OperationBudget, archive_sha, copy_chunks, extract_members, remaining)
 
@@ -590,6 +590,7 @@ def publish(root, partition, verification=None, *, build_report=True, indexed=Fa
             with cache_guard(root, shared=True):
                 if (root / ".lake").is_symlink() or not (root / ".lake/build").is_dir():
                     raise ValueError("no private project build to publish")
+                check_native_products(root / ".lake/build", partition)
                 captured = report_reuse.capture(root)
                 report_receipt = report_reuse.read_receipt(report, captured)
                 if report_receipt['completed'] not in report_reuse.CHECKED_STEPS:
@@ -1131,6 +1132,9 @@ def restore_snapshot(root, partition, tag, stage, deadline, expected=None, refre
                         extract_members(archive, unpacked, members, deadline)
                 if not source.is_dir():
                     raise ValueError("archive has no project build")
+                invalidated = check_native_products(source, manifest["partition"], staging=True)
+                if invalidated:
+                    receipt("native", "invalidated", products=invalidated, partition=manifest["partition"])
                 if approved_producer is not None or require_compatible_seed:
                     checked = report_reuse.seed_format(source / "stratalint/raw-lean-report.json")
                     if not checked["compatible"]:

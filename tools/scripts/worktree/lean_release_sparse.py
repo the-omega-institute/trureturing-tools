@@ -11,7 +11,7 @@ import tempfile
 from lean_artifact_inventory import import_closure, lake_configuration, project_imports, workspace_modules
 import lean_compile_layers as compiler
 import lean_release_index as index
-from lean_cache_release_io import SPARSE_PLAN
+from lean_cache_release_io import SPARSE_PLAN, check_native_products
 
 
 SCHEMA = "lean-release-sparse-plan-v1"
@@ -152,6 +152,10 @@ def install(host, root, stage, tag, manifest, digest, target, source_ref, verifi
         unpacked.mkdir()
         spans = remote.asset_ranges(host, manifest, tree, selected, deadline, {})
         requests, transferred = index.extract_ranges(host.range_blocks, spans, selected, unpacked, reserved, deadline)
+        invalidated = check_native_products(unpacked, manifest["partition"], staging=True)
+        if invalidated:
+            host.receipt("sparse-seed", "full-fallback", tag=tag, native_products=invalidated)
+            return False
         reason = native_fallback(unpacked, reserved, tree, plan)
         if reason is not None:
             host.receipt("sparse-seed", "full-fallback", tag=tag, native_product=reason)

@@ -2,6 +2,7 @@
 
 import contextlib
 import hashlib
+import re
 import time
 
 INDEXED_SCHEMA = "lean-release-seed-v5"
@@ -10,6 +11,68 @@ SPARSE_PLAN = ".lake/lean-release-sparse-plan.json"
 
 PRODUCTION_PREFIX = {False: "lean-cache-v2-", True: "lean-cache-v3-", "volumes": "lean-cache-v4-"}
 VERIFICATION_PREFIX = {False: "lean-cache-verify-v1-", True: "lean-cache-verify-v2-", "volumes": "lean-cache-verify-v3-"}
+
+
+# Lake can reuse Lean and C outputs across arm64 hosts. Linked programs, object
+# files and their Lake freshness sidecars belong to the native toolchain.
+_NATIVE_FILE = re.compile(r'\.(?:o(?:\.export|\.noexport)?|obj|bc|a|lib|so(?:\.\d+)*|dylib|dll|exe)$')
+_MACH_ENDIAN = {
+    b'\xce\xfa\xed\xfe': 'little', b'\xcf\xfa\xed\xfe': 'little',
+    b'\xfe\xed\xfa\xce': 'big', b'\xfe\xed\xfa\xcf': 'big',
+}
+
+
+def native_format(path):
+    with path.open('rb') as stream:
+        header = stream.read(32)
+    if header[:4] == b'\x7fELF' and len(header) >= 20 and header[5] in (1, 2):
+        machine = int.from_bytes(header[18:20], 'little' if header[5] == 1 else 'big')
+        return 'linux', {183: 'arm64', 62: 'x64'}.get(machine, str(machine))
+    if endian := _MACH_ENDIAN.get(header[:4]):
+        cpu = int.from_bytes(header[4:8], endian)
+        return 'darwin', {0x100000c: 'arm64', 0x1000007: 'x64'}.get(cpu, str(cpu))
+    if header[:4] in (b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca', b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'):
+        return 'darwin', None
+    return None
+
+
+def check_native_products(build, source_partition, *, staging=False):
+    """Validate a publisher, or invalidate native facets in a private restored build."""
+    from lean_cache import binary_platform
+    system, machine = binary_platform()
+    if system not in ('darwin', 'linux'):
+        return 0
+    foreign = source_partition.rsplit('/', 1)[-1] != f'{system}-{machine}'
+    products = []
+
+    def fail(error):
+        raise error
+
+    for directory, _, files in build.walk(on_error=fail):
+        for name in files:
+            if name.endswith(('.hash', '.trace', '.rsp')):
+                continue
+            named_native = _NATIVE_FILE.search(name) is not None
+            if not named_native and directory.name != 'bin':
+                continue
+            path = directory / name
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f'invalid native Lake product: {path.relative_to(build)}')
+            fmt = native_format(path)
+            if not named_native and fmt is None:
+                continue
+            products.append(path)
+            if fmt and (fmt[0] != system or (fmt[1] is not None and fmt[1] != machine)):
+                if not staging:
+                    raise ValueError(f'foreign native Lake product in {source_partition}: {path.relative_to(build)}')
+                foreign = True
+    if not foreign or not staging:
+        return 0
+    for path in products:
+        path.unlink()
+        for suffix in ('.hash', '.trace', '.rsp'):
+            path.with_name(path.name + suffix).unlink(missing_ok=True)
+    return len(products)
 
 
 class OperationBudget:
