@@ -298,6 +298,12 @@ def prepare(root):
                      for name, record in records.items()})))
 
 
+@lru_cache(maxsize=None)
+def source_inventory(root):
+    inputs = selection.Selection(root)
+    return set(inputs.dependency_sources())
+
+
 def validate_dependency_paths(root, utility_path, *, inputs=None):
     allowed = (set(inputs.dependency_sources()) if inputs is not None
                else source_inventory(str(root)))
