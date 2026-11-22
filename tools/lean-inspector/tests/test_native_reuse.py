@@ -41,7 +41,7 @@ class NativeReportConsumerTests:
             oleans = {path: (path.stat().st_mtime_ns, publication.digest(path))
                       for path in (self.root / '.lake/build/reg').rglob('*.olean')}
             self.prepare_report_modules(workspace='tools/lean-inspector-reg')
-            result = self.guarded_command(['make', 'lean-cache-prepare'],
+            result = self.guarded_command([self.lake, '-d', 'tools/lean-inspector-reg', 'build', ':moduleReports'],
                 env=dict(self.env if env is None else env, TEST_REPORT_REGISTRATION_GATE='1'))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             records = [json.loads(line) for line in work.read_text().splitlines()]
@@ -173,7 +173,8 @@ package_facet compilerRegistrationContender (pkg : Package) : Unit := do
         # mathematical inputs are tiny.
         implementations = ('CompiledAssessment', 'ArtifactAssessment')
         targets = ['leanInspector/LeanInformationAudit', 'leanInspector/reportInspector',
-                   'leanInspectorInterface/LeanInformationAuditInterface', 'reg/Reg']
+                   'leanInspectorInterface/LeanInformationAuditInterface', 'reg/Reg',
+                   'regInspector/LeanInformationAuditRegTests']
         self.reg_package()
         # Restore the same compiler materials without producing an unrelated
         # report before this case has installed its production configuration.
@@ -260,8 +261,9 @@ package_facet compilerRegistrationContender (pkg : Package) : Unit := do
 
         self.write('tools/lean-inspector/LeanInformationAudit/ArtifactAssessment.lean',
                    implementation('ArtifactAssessment', 'true'))
-        reused = entry('production-consumer-reuse')
-        self.assertEqual(reused.returncode, 0, reused.stderr)
-        self.assertNotIn('phase=programs ', reused.stderr)
+        rejected = entry('invalid-program')
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('ArtifactAssessment.lean:', rejected.stderr)
+        self.assertFalse((self.root / 'build/lean-cache/build-work.json').exists())
         self.assertEqual(expected, self.report()[1:])
         self.assertEqual(report_stamps, self.stamps())

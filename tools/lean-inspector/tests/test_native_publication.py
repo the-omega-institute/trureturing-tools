@@ -221,19 +221,13 @@ class NativePublicationConsumerTests:
                         verify()
                 finally:
                     added.unlink()
-    def test_publication_recomputes_identities_only_for_bundles_not_accepted_by_lake(self):
+    def test_staging_validates_supplied_material_identities(self):
         self.build()
         rows, raw, material_bytes = self.report()
         declarations = sum(len(row['declarations']) for row in rows)
         self.assertEqual(declarations, 6)
         destination = self.root / 'public.json'
-        with patch.dict(os.environ, self.env), patch.object(materials, 'material_identities',
-                wraps=materials.material_identities) as identities, \
-                patch.object(publication, 'validate_rows', wraps=publication.validate_rows) as validations:
-            native.publish(self.root, destination)
-            # Lake recorded acceptance of these bundle bytes; publication checks only the envelope.
-            self.assertEqual(identities.call_count, 0, '[FAIL] post_lake_publish_skips_identity_replay')
-            self.assertEqual(validations.call_count, 0, '[FAIL] post_lake_publish_skips_row_replay')
+        self.publish()
         self.assertEqual(destination.read_bytes(), raw)
         self.assertEqual(publication.member(destination, '.materials.zip').read_bytes(), material_bytes)
         staged = self.root / 'stage' / publication.RAW

@@ -103,8 +103,6 @@ selection = public.selection'''))
     inspector_state = fixture / '.lake/build/lean-inspector'
     for path in (inspector_state / 'modules').iterdir():
         path.unlink()
-    for path in inspector_state.glob('report.zip*'):
-        path.unlink()
     observer = load('native_observer', args.observer_program.resolve())
     results = dict(modules=args.modules, source_root=str(source),
                    fixture=str(fixture), source_sha256={str(path.relative_to(fixture)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -142,7 +140,7 @@ selection = public.selection'''))
         elapsed = time.monotonic() - started
         activity = [json.loads(line) for line in (fixture / 'activity.jsonl').read_text().splitlines()]
         validation = [json.loads(line) for line in (fixture / 'validation-work.jsonl').read_text().splitlines()]
-        expected = {'full': (args.modules, 1), 'unchanged': (0, 0), 'single-module': (1, 1)}[mode]
+        expected = {'full': (args.modules, 0), 'unchanged': (0, 0), 'single-module': (1, 0)}[mode]
         counts = tuple(sum(row['count'] for row in activity if row['kind'] == kind) for kind in ('extract', 'aggregate'))
         results['modes'][mode] = dict(exit=status, seconds=elapsed, extraction_aggregation_counts=counts,
             lake_peak_threads=lake_threads, lake_peak_footprint_bytes=lake_footprint,
@@ -154,10 +152,7 @@ selection = public.selection'''))
         (output / 'result.json').write_text(json.dumps(results, indent=2) + '\n')
         if status != 0 or counts != expected:
             raise RuntimeError(f'{mode}: status={status}, counts={counts}, expected={expected}; see {output}')
-        # Validate with the measured producer's full validator outside timing;
-        # a retained pre-change fixture can have an older sidecar contract.
-        subprocess.run([sys.executable, str(native), 'validate', 'report', str(fixture),
-                        str(inspector_state / 'report.zip')], env=case.env, check=True)
+        case.report()
     print(json.dumps(results, indent=2))
     case.doCleanups()
 
