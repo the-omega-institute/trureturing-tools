@@ -76,7 +76,11 @@ def write_release_report(root):
     directory = root / ".lake/build/lean-inspector/modules"
     directory.mkdir(parents=True, exist_ok=True)
     for path in [root / "Trureturing.lean", *sorted((root / "D5").rglob("*.lean"))]:
-        module = ".".join(path.relative_to(root).with_suffix("").parts)
+        address = path.relative_to(root).with_suffix("")
+        module = ".".join(address.parts)
+        compiled = root / ".lake/build/lib/lean" / address.with_suffix(".olean")
+        if not compiled.exists():
+            write(compiled, "fixture compiler artifact")
         with zipfile.ZipFile(directory / (module + ".zip"), "w") as archive:
             archive.writestr("fixture.txt", module)
 
