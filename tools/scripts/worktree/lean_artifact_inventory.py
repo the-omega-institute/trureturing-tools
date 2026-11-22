@@ -237,6 +237,12 @@ def _owner(path, module_paths, modules):
     return None, "other"
 
 
+def release_report_path(path):
+    return (path.parts[:2] in {("lean-inspector", "modules"), ("lean-inspector", "inputs"),
+                               ("lean-inspector", "judge-inputs")}
+            or path == PurePosixPath("lean-inspector/module-inputs.json"))
+
+
 def retired_report_path(path):
     if path.parent == PurePosixPath("stratalint"):
         return path.name.startswith("raw-lean-report.json")

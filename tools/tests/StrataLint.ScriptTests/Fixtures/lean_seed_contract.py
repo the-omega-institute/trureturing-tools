@@ -14,7 +14,7 @@ import tarfile
 import unittest
 from unittest.mock import patch
 
-from lean_seed_support import REPORT_BUILD, INPUT, OTHER, PUBLISH, REV, ROOT, PartitionFixture, digest, write
+from lean_seed_support import COMPILER_BUILD, INPUT, OTHER, PUBLISH, REV, ROOT, PartitionFixture, digest, write
 from lean_seed_transport import FAKE_GH, ReleaseTransportCases
 from lean_release_verification import ReleaseVerificationCases
 from lean_release_legacy import ReleaseLegacyCases
@@ -786,11 +786,11 @@ ctypes.CDLL = cdll
                 write(self.root / "D5/A.lean", "def a := 1\n")
                 (self.root / "untracked-input.lean").unlink(missing_ok=True)
 
-    def test_local_publication_requires_registered_module_reports(self):
-        (self.root / ".lake/build/lean-inspector/modules/D5.A.zip").unlink()
-        result = self.transport("publish", **self.local_environment(FAKE_REPORT_PRESERVE="1"))
+    def test_local_publication_requires_registered_compiler_outputs(self):
+        (self.root / ".lake/build/lib/lean/D5/A.olean").unlink()
+        result = self.transport("publish", **self.local_environment(FAKE_COMPILER_PRESERVE="1"))
         self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertIn("project cache is missing the module report for D5.A", result.stdout)
+        self.assertIn("project cache is missing the compiler output for D5.A", result.stdout)
         self.assertEqual([], list(self.remote.iterdir()))
 
     def test_ci_fetch_never_reads_release_even_when_actions_seed_is_absent(self):
@@ -901,7 +901,7 @@ ctypes.CDLL = cdll
     def test_publication_requires_current_report_before_transport(self):
         result = self.transport("publish")
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertEqual([REPORT_BUILD], (self.root / "build-runs").read_text().splitlines())
+        self.assertEqual([COMPILER_BUILD], (self.root / "build-runs").read_text().splitlines())
 
     def test_fetch_cannot_widen_partition_compatibility(self):
         self.assertEqual(0, self.transport("publish").returncode)
@@ -932,13 +932,13 @@ ctypes.CDLL = cdll
             self.assertIn('"prune_error":', result.stdout)
         self.assertEqual(["build"] * len(malformed), calls.read_text().splitlines())
 
-    def test_publication_requires_module_artifacts(self):
+    def test_publication_accepts_compiled_tree_without_module_reports(self):
         write(self.bin / "make", '#!/bin/sh\nexit 0\n')
         shutil.rmtree(self.root / ".lake/build/lean-inspector/modules")
         result = self.transport("publish")
-        self.assertEqual(2, result.returncode, result.stdout + result.stderr)
-        self.assertIn("project cache is missing lean-inspector/modules", result.stdout)
-        self.assertEqual([], list(self.remote.iterdir()))
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn('"status":"published"', result.stdout)
+        self.assertFalse((self.root / ".lake/build/lean-inspector/modules").exists())
 
     def host_platform(self, system, machine):
         # Seed compatibility follows the host that runs the transport.
@@ -973,7 +973,7 @@ ctypes.CDLL = cdll
                 self.assertIn(f'"resolved":"{tag}"', restored.stdout)
                 self.assertIn(f'"partition":"{REV}/{own}"', restored.stdout)
                 self.assertEqual(seed, (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
-                self.assertTrue((self.root / ".lake/build/lean-inspector/modules/D5.A.zip").is_file())
+                self.assertFalse((self.root / ".lake/build/lean-inspector/modules").exists())
                 self.assertFalse((self.root / ".lake/build/stratalint/raw-lean-report.json").exists())
 
 

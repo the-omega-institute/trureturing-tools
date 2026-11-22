@@ -14,7 +14,7 @@ import re
 import tarfile
 
 from lean_artifact_inventory import (
-    PROJECT_BUILD, build_inventory, retired_report_path, import_closure, lake_configuration, lean_artifact_paths,
+    PROJECT_BUILD, build_inventory, release_report_path, retired_report_path, import_closure, lake_configuration, lean_artifact_paths,
     project_imports, required_compiler_paths, workspace_modules,
 )
 from lean_cache_release_io import (
@@ -70,7 +70,7 @@ def member_groups(inventory, graph):
     for artifact in inventory.artifacts:
         if artifact.kind == "lean":
             by_module[artifact.module].append(artifact)
-        else:
+        elif not release_report_path(artifact.path):
             residual.append(artifact)
     for name in ordered_modules(inventory.modules, graph):
         if by_module[name]:

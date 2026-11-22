@@ -13,7 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[4]
 INPUT = ROOT / "tools/scripts/worktree/lean-cache-input.sh"
 REV = "0123456789abcdef0123456789abcdef01234567"
 OTHER = "f" * 40
-REPORT_BUILD = "lean-cache-prepare"
+COMPILER_BUILD = "lean FULL_BUILD=1"
 PUBLISH = ROOT / "tools/scripts/worktree/lean-cache-publish.sh"
 
 
@@ -76,7 +76,7 @@ def write_release_report(root):
     directory = root / ".lake/build/lean-inspector/modules"
     directory.mkdir(parents=True, exist_ok=True)
     compiled = root / ".lake/build/lib/lean"
-    if not compiled.is_dir():
+    if not (compiled / "Trureturing.olean").exists():
         write(compiled / "Trureturing.olean", "fixture compiler artifact")
     for path in [root / "Trureturing.lean", *sorted((root / "D5").rglob("*.lean"))]:
         address = path.relative_to(root).with_suffix("")

@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import datetime
 import hashlib
+import importlib
 import json
 import os
 import pathlib
@@ -20,6 +21,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import tomllib
 from urllib.parse import quote
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -34,9 +36,9 @@ from lean_cache_release_io import (check_native_products, ArchiveInput, INDEXED_
                                    PRODUCTION_PREFIX, SPARSE_PLAN, VERIFICATION_PREFIX,
                                    OperationBudget, archive_sha, copy_chunks, extract_members, publish_progress, remaining)
 
-# Reuse the registered compiler and module report input format.
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "lean-inspector"))
-import publication
+# Historic release addresses bind the format and execution fields in this registration.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "report"))
+report_selection = importlib.import_module("lean-report-selection")
 
 ASSET = "lean-build.tgz"
 MANIFEST = "manifest.json"
@@ -248,7 +250,7 @@ def partition_prefix(partition, verification=False, *, indexed=False):
 
 
 def release_key(root):
-    selection = publication.selection.Selection(root)
+    selection = report_selection.Selection(root)
     selection.validate('lean-report')
     registered = selection.data.get('report_execution')
     if registered is None:
@@ -266,7 +268,7 @@ def release_key(root):
         tools=sorted(execution['tools']), platform="+".join(sorted(family)),
         environment=execution['environment'])
     digest = hashlib.sha256(json.dumps(projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return dict(report_format=publication.selection.REPORT_FORMAT, execution_sha256=digest)
+    return dict(report_format=report_selection.REPORT_FORMAT, execution_sha256=digest)
 
 
 def prefix(partition, cache_key, verification=False, *, indexed=False):
@@ -557,11 +559,22 @@ def fetch_staging_cleanup(root, *, now):
     return results
 
 
-def validate_project_cache(build):
-    for name in ("lib/lean", "lean-inspector/modules"):
-        directory = build / name
-        if directory.is_symlink() or not directory.is_dir():
-            raise ValueError("project cache is missing " + name)
+def validate_project_cache(root):
+    build = root / ".lake/build"
+    library = build / "lib/lean"
+    if library.is_symlink() or not library.is_dir():
+        raise ValueError("project cache is missing lib/lean")
+    packages = {root: library}
+    for name, source in report_selection.Selection(root).modules().items():
+        package = root / "Reg" if pathlib.PurePosixPath(source).parts[0] == "Reg" else root
+        if package not in packages:
+            config = tomllib.loads((package / "lakefile.toml").read_text())
+            configured = package / config.get("buildDir", ".lake/build")
+            packages[package] = pathlib.Path(os.path.normpath(configured)) / "lib/lean"
+        compiled = packages[package].joinpath(*name.split(".")).with_suffix(".olean")
+        if (has_unsafe_parent(build, compiled.relative_to(build)) or compiled.is_symlink()
+                or not compiled.is_file()):
+            raise ValueError("project cache is missing the compiler output for " + name)
 
 
 def retired_report_member(member):
@@ -578,6 +591,13 @@ def cache_tar_member(member):
     if member.isfile() and member.name.endswith(".setup.json"):
         return None
     return member
+
+
+def published_tar_member(member):
+    from lean_artifact_inventory import release_report_path
+
+    path = pathlib.PurePosixPath(member.name).relative_to("build")
+    return None if release_report_path(path) else cache_tar_member(member)
 
 
 def publish(root, partition, verification=None, *, build_cache=True, indexed=False, prepare_only=False):
@@ -599,9 +619,9 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
         if os.environ.get("FULL_BUILD") != "1":
             print("cache production requires explicit FULL_BUILD=1", file=sys.stderr)
             return 2
-        command = ["make", "lean-cache-prepare"]
+        command = ["make", "lean", "FULL_BUILD=1"]
         if physical or prepare_only:
-            publish_progress("report_started", sparse=bool(plan))
+            publish_progress("compile_started", sparse=bool(plan))
         if plan:
             build = sparse.prepare_cache(sys.modules[__name__], root, command, partition, verification is not None, plan)
         else:
@@ -610,8 +630,10 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
             _observe("publish", "failed", phase="build",
                      error=subprocess.CalledProcessError(build.returncode, "make"))
             return build.returncode
+        if plan:
+            plan = sparse.read_plan(root)
         if physical or prepare_only:
-            publish_progress("report_checked", sparse=bool(plan and os.path.lexists(root / SPARSE_PLAN)))
+            publish_progress("compile_ready", sparse=bool(plan))
         if prepare_only:
             _observe("publish", "prepared", phase="build")
             return 0
@@ -626,12 +648,8 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
                 if (root / ".lake").is_symlink() or not (root / ".lake/build").is_dir():
                     raise ValueError("no private project build to publish")
                 check_native_products(root / ".lake/build", partition)
-                build = root / ".lake/build"
                 if not plan:
-                    validate_project_cache(build)
-                for module in publication.selection.Selection(root).modules():
-                    if not (build / "lean-inspector/modules" / (module + ".zip")).is_file():
-                        raise ValueError("project cache is missing the module report for " + module)
+                    validate_project_cache(root)
                 if partition != partition_path(root):
                     raise ValueError("publication partition differs from the local tree")
                 cache_key = release_key(root)
@@ -664,7 +682,7 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
                         with tarfile.open(stage / ASSET, "w:gz", compresslevel=1,
                                           fileobj=output) as archive:
                             archive.add(root / ".lake/build", arcname="build",
-                                        filter=cache_tar_member)
+                                        filter=published_tar_member)
                     contents = output.metadata()
             metadata = {"schema": ("lean-release-seed-v6" if physical else INDEXED_SCHEMA) if indexed else "lean-release-seed-v4",
                         "partition": partition, "cache_key": cache_key, **identity, **contents}
@@ -807,7 +825,7 @@ def snapshot_manifest(partition, tag, stage, deadline, expected=None, verificati
        "--pattern", manifest_name)
     if recorded.get(manifest_name) != "sha256:" + archive_sha(stage / manifest_name, deadline):
         raise ValueError("transferred asset digest mismatch")
-    manifest = publication.read_json((stage / manifest_name).read_bytes())
+    manifest = json.loads((stage / manifest_name).read_bytes(), object_pairs_hook=report_selection.unique_object)
     if not isinstance(manifest, dict):
         raise ValueError("snapshot manifest must be an object")
     commit, publication_id = manifest.get("producer_commit_sha", ""), manifest.get("publication_id", "")

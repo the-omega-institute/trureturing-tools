@@ -632,7 +632,7 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
         self.bundle = self.root / "preparation"
         with mock.patch.object(shards, "workspace_modules", return_value={name: module}), \
                 mock.patch.object(shards, "project_imports", return_value={name: set()}), \
-                mock.patch.object(shards.publication.selection, "Selection") as selection:
+                mock.patch.object(shards.report_selection, "Selection") as selection:
             selection.return_value.modules.return_value = {name: {}}
             result = self.run_with(lambda: producer.pack(self.root, self.identity, self.bundle,
                                    anchor=self.identity["base"]), env=env)

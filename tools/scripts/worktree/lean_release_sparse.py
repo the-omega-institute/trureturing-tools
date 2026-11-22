@@ -275,23 +275,9 @@ def full_fallback(host, root, partition, key, verification, plan, deadline):
 
 
 def prepare_cache(host, root, command, partition, verification, plan):
-    def retry_full():
+    if plan.get("restoring_full"):
         full_fallback(host, root, partition, host.release_key(root), verification, plan, host.operation_deadline())
         return subprocess.run(command, cwd=root, env=dict(os.environ, PARTIAL_INDEXED_PROJECT="true"))
-
-    if plan.get("restoring_full"):
-        return retry_full()
-    compiler.compile_roots(root, workspace_modules(root), plan["rebuild_modules"])
-    with tempfile.TemporaryDirectory(prefix="lean-sparse-cache-") as directory:
-        fallback = Path(directory) / "fallback.json"
-        env = dict(os.environ, LEAN_CACHE_SPARSE_PLAN=str(plan_path(root)),
-                   LEAN_CACHE_SPARSE_FALLBACK_FILE=str(fallback))
-        result = subprocess.run(command, cwd=root, env=env)
-        if not result.returncode or not fallback.is_file():
-            return result
-        reason = json.loads(fallback.read_bytes())
-        if (reason.get("target_commit") != plan["target_commit"]
-                or reason.get("base_manifest_sha256") != plan["base_manifest_sha256"]
-                or not isinstance(reason.get("reason"), str) or not reason["reason"]):
-            raise ValueError("unbound sparse cache fallback")
-    return retry_full()
+    if plan["rebuild_modules"]:
+        compiler.compile_roots(root, workspace_modules(root), plan["rebuild_modules"])
+    return subprocess.CompletedProcess(command, 0)

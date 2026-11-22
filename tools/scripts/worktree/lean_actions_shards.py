@@ -28,7 +28,7 @@ from lean_artifact_inventory import (
     PROJECT_BUILD, build_inventory, retired_report_path, import_closure, lake_configuration, project_imports,
     required_compiler_paths, workspace_modules,
 )
-from lean_cache_release import cache_guard, has_unsafe_parent, install_scoped, publication
+from lean_cache_release import cache_guard, has_unsafe_parent, install_scoped, report_selection
 from lean_cache_release_io import archive_sha, check_native_products, copy_chunks
 from lean_cache_shards import group_identity, make_layout
 from lean_release_index import safe_path, valid_digest
@@ -241,7 +241,7 @@ def write_payload(root, build, paths):
 
 
 def required_outputs(root, modules, graph, owners):
-    selection = publication.selection.Selection(root)
+    selection = report_selection.Selection(root)
     reported = selection.modules()
     if not reported or not reported.keys() <= modules.keys():
         raise ValueError("report modules do not match Actions workspace ownership")
