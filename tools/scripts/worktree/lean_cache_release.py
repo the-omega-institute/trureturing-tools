@@ -32,7 +32,7 @@ from lean_cache import SHARED_SEED_PLATFORMS, normalized_platform, partition_pat
 from lean_cache_topology import checkout_topology, git_absolute_path, warm_dev_remediation
 from lean_cache_release_io import (check_native_products, ArchiveInput, INDEXED_ASSET, INDEXED_SCHEMA, MultipartArchiveOutput,
                                    PRODUCTION_PREFIX, SPARSE_PLAN, VERIFICATION_PREFIX,
-                                   OperationBudget, archive_sha, copy_chunks, extract_members, remaining)
+                                   OperationBudget, archive_sha, copy_chunks, extract_members, publish_progress, remaining)
 
 # Reuse the registered compiler and module report input format.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "lean-inspector"))
@@ -167,7 +167,7 @@ def _error_category(status, reason, explicit=None):
         return "cancellation"
     if explicit:
         return type(explicit).__name__ if isinstance(explicit, BaseException) else str(explicit)[:96]
-    if status in ("published", "unpacked", "skipped", "exists", "staging-cleanup", "resolved"):
+    if status in ("published", "prepared", "unpacked", "skipped", "exists", "staging-cleanup", "resolved"):
         return None
     text = str(reason or "").lower()
     if "timeout" in text or "timed out" in text or "deadline" in text:
@@ -580,12 +580,14 @@ def cache_tar_member(member):
     return member
 
 
-def publish(root, partition, verification=None, *, build_cache=True, indexed=False):
+def publish(root, partition, verification=None, *, build_cache=True, indexed=False, prepare_only=False):
     # Build/content and local archive failures remain failures. Remote transport is optional;
     # explicit verification succeeds only after the uploaded bytes restore.
     if indexed and os.environ.get("LEAN_CACHE_RELEASE_VOLUMES") == "1":
         indexed = "volumes"
     physical = indexed == "volumes"
+    if prepare_only and not build_cache:
+        raise ValueError("cache preparation requires a build")
     plan = None
     if os.environ.get("LEAN_CACHE_SPARSE_PLAN") or os.path.lexists(root / SPARSE_PLAN):
         import lean_release_sparse as sparse
@@ -598,6 +600,8 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
             print("cache production requires explicit FULL_BUILD=1", file=sys.stderr)
             return 2
         command = ["make", "lean-cache-prepare"]
+        if physical or prepare_only:
+            publish_progress("report_started", sparse=bool(plan))
         if plan:
             build = sparse.prepare_cache(sys.modules[__name__], root, command, partition, verification is not None, plan)
         else:
@@ -606,6 +610,11 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
             _observe("publish", "failed", phase="build",
                      error=subprocess.CalledProcessError(build.returncode, "make"))
             return build.returncode
+        if physical or prepare_only:
+            publish_progress("report_checked", sparse=bool(plan and os.path.lexists(root / SPARSE_PLAN)))
+        if prepare_only:
+            _observe("publish", "prepared", phase="build")
+            return 0
     content_validated = False
     preparing = False
     try:
@@ -665,6 +674,8 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
             # Never clobber an existing snapshot. Failed/racing publishers leave
             # at most a draft, which fetch never considers an applicable seed.
             # The server's default branch anchors only the storage container.
+            if physical:
+                publish_progress("snapshot_draft", tag=tag)
             gh(deadline, "release", "create", tag, "--repo", REPO, "--draft",
                "--title", "Lean cache " + partition, "--notes", "Lean compiler artifacts and module reports for incremental reuse.")
             entries = metadata.get("parts", []) + ([metadata["index"]] if indexed else [])
@@ -672,6 +683,8 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
                str(stage / MANIFEST), "--repo", REPO)
             draft = None
             if indexed:
+                if physical:
+                    publish_progress("snapshot_verify_draft", tag=tag)
                 locator = json.loads(gh(deadline, "release", "view", tag, "--repo", REPO,
                                         "--json", "databaseId,isDraft,tagName"))
                 release_id = locator.get("databaseId")
@@ -687,6 +700,8 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
             else:
                 gh(deadline, "release", "edit", tag, "--repo", REPO, "--draft=false")
             if verification is not None:
+                if physical:
+                    publish_progress("snapshot_verify_restore", tag=tag)
                 # Uploaded transport copies must not share the empty restore
                 # target's disk budget with the independently downloaded bytes.
                 for name in {ASSET, *(part["name"] for part in entries)}:
@@ -740,9 +755,13 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
                 # Draft validation and verification restore are complete. Give
                 # the final promotion and read-back their own bounded budget.
                 deadline = operation_deadline()
+                if physical:
+                    publish_progress("snapshot_promote", tag=tag)
                 gh(deadline, "release", "edit", tag, "--repo", REPO, "--draft=false")
             pruned, prune_error = 0, None
             if indexed or verification is None:
+                if physical:
+                    publish_progress("snapshot_readback", tag=tag)
                 current = existing_release(tag, deadline)
                 if current is None or current["draft"]:
                     raise ValueError(f"new snapshot {tag} is not readable as published; pruned nothing")
@@ -754,6 +773,7 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
                     remote.retire_verification(sys.modules[__name__], partition, cache_key, tag, metadata, old_tag, deadline)
                 if verification is None:
                     if physical:
+                        publish_progress("snapshot_prune", tag=tag)
                         pruned, prune_error = remote.prune(sys.modules[__name__], partition, cache_key, tag,
                                                          identity["publication_id"], deadline)
                     else:
@@ -1653,7 +1673,9 @@ def _main():
                         help="select a rolling base from a strict ancestor of the target commit")
     parser.add_argument("--target", action="append", default=[], help="restore the current import closure for this Lean module")
     parser.add_argument("--indexed", action="store_true", help="use indexed Release snapshot transport")
-    parser.add_argument("--no-build", action="store_true", help="publish an existing project cache")
+    build_mode = parser.add_mutually_exclusive_group()
+    build_mode.add_argument("--no-build", action="store_true", help="publish an existing project cache")
+    build_mode.add_argument("--prepare-only", action="store_true", help="prepare the project cache and stop before packing")
     # Internal handoff from LeanArchiveFetch after its typed guard assertion.
     parser.add_argument("--writer-owned", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--approved-tag", help=argparse.SUPPRESS)
@@ -1672,6 +1694,8 @@ def _main():
         LOG.emit("operation_started", operation=CURRENT_OPERATION, action=CURRENT_OPERATION, mode=CURRENT_MODE)
     try:
         args.repository = args.repository.resolve()
+        if args.prepare_only and args.command != "publish":
+            raise ValueError("--prepare-only requires publish")
         if args.command in ("select-base", "install-base"):
             return rolling_base(args)
         if args.producer or args.manifest_sha256 or args.previous_commit_only:
@@ -1723,7 +1747,8 @@ def _main():
             return fetch(args.repository, partition, args.writer_owned, args.refresh_stale,
                          args.approved_tag, args.approved_producer, args.local_assets,
                          indexed=args.indexed, targets=args.target)
-        return publish(args.repository, partition, verification, build_cache=not args.no_build, indexed=args.indexed)
+        return publish(args.repository, partition, verification, build_cache=not args.no_build, indexed=args.indexed,
+                       prepare_only=args.prepare_only)
     except RollbackFailed as error:
         receipt(args.command, "rollback-failed", _error=error, reason=str(error), backup=error.backup)
         return 2

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
 
 import lean_release_index as index
 from lean_compile_layers import checkout
@@ -138,7 +139,31 @@ def finish_tree(rows, locations, sizes, parts):
     return tree, written, peak
 
 
-def pack_measured(stage, old_tree, rows, contents, chunk_bytes, save_part, emit, deadline):
+def stream_frames(emit, selected, output, phase, progress):
+    if progress is None:
+        yield from emit(selected, output)
+        return
+    progress(phase, status="started", frames=len(selected), stream_bytes=0)
+    next_update = time.monotonic() + 60
+
+    class ProgressOutput:
+        def tell(self):
+            return output.tell()
+
+        def write(self, block):
+            nonlocal next_update
+            count = output.write(block)
+            now = time.monotonic()
+            if now >= next_update:
+                progress(phase, status="streaming", stream_bytes=output.tell())
+                next_update = now + 60
+            return count
+
+    yield from emit(selected, ProgressOutput())
+    progress(phase, status="finished", frames=len(selected), stream_bytes=output.tell())
+
+
+def pack_measured(stage, old_tree, rows, contents, chunk_bytes, save_part, emit, deadline, *, progress=None):
     """Write the selected frames of a measured logical stream and verify pass two."""
     logical_bytes = contents["archive_bytes"]
     index.validate_members(rows, logical_bytes)
@@ -158,9 +183,13 @@ def pack_measured(stage, old_tree, rows, contents, chunk_bytes, save_part, emit,
 
     parts = []
     selected = [pos for pos, spans in enumerate(locations) if spans is None]
+    if progress:
+        progress("volume_plan", logical_bytes=logical_bytes, selected_frames=len(selected),
+                 selected_bytes=sum(rows[pos]["bytes"] for pos in selected), compacted=compact)
     if selected:
         with MultipartArchiveOutput(stage, "volume", chunk_bytes, deadline, on_part=save_part) as output:
-            for pos, row in zip(selected, emit(selected, output), strict=True):
+            stream = stream_frames(emit, selected, output, "volume_pack", progress)
+            for pos, row in zip(selected, stream, strict=True):
                 if dict(row, offset=rows[pos]["offset"]) != rows[pos]:
                     raise ValueError("compiler frame changed between measurement and upload")
         parts = output.parts
@@ -168,7 +197,7 @@ def pack_measured(stage, old_tree, rows, contents, chunk_bytes, save_part, emit,
     return contents, tree, written, compact, peak
 
 
-def pack_volumes(root, stage, previous, chunk_bytes, save_part, deadline=None):
+def pack_volumes(root, stage, previous, chunk_bytes, save_part, deadline=None, *, progress=None):
     """Index a logical snapshot while staging at most one confirmed physical volume."""
     if not 0 < chunk_bytes <= VOLUME_BYTES:
         raise ValueError("invalid physical volume size")
@@ -182,15 +211,16 @@ def pack_volumes(root, stage, previous, chunk_bytes, save_part, deadline=None):
 
     if previous is not None and previous[0]["lake_inputs_sha256"] == config:
         logical = HashOutput()
-        rows = list(emit(range(len(groups)), logical))
+        rows = list(stream_frames(emit, range(len(groups)), logical, "volume_measure", progress))
         contents = {"archive_bytes": logical.size, "archive_sha256": logical.digest.hexdigest(),
                     "lake_inputs_sha256": config}
-        return pack_measured(stage, previous[1], rows, contents, chunk_bytes, save_part, emit, deadline)
+        return pack_measured(stage, previous[1], rows, contents, chunk_bytes, save_part, emit, deadline,
+                             progress=progress)
 
     if not groups:
         raise ValueError("member index does not cover archive")
     with MultipartArchiveOutput(stage, "volume", chunk_bytes, deadline, on_part=save_part) as output:
-        rows = list(emit(range(len(groups)), output))
+        rows = list(stream_frames(emit, range(len(groups)), output, "volume_pack", progress))
     index.validate_members(rows, output.archive_bytes)
     tree, written, peak = finish_tree(rows, [None] * len(rows), {}, output.parts)
     contents = {"archive_bytes": output.archive_bytes, "archive_sha256": output.archive_hash.hexdigest(),

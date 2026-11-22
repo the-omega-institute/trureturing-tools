@@ -2,6 +2,7 @@
 
 import contextlib
 import hashlib
+import json
 import re
 import time
 
@@ -11,6 +12,10 @@ SPARSE_PLAN = ".lake/lean-release-sparse-plan.json"
 
 PRODUCTION_PREFIX = {False: "lean-cache-v2-", True: "lean-cache-v3-", "volumes": "lean-cache-v4-"}
 VERIFICATION_PREFIX = {False: "lean-cache-verify-v1-", True: "lean-cache-verify-v2-", "volumes": "lean-cache-verify-v3-"}
+
+
+def publish_progress(phase, **fields):
+    print("LEAN_CACHE_RELEASE_PROGRESS " + json.dumps({"phase": phase, **fields}, separators=(",", ":")), flush=True)
 
 
 # Lake can reuse Lean and C outputs across arm64 hosts. Linked programs, object
