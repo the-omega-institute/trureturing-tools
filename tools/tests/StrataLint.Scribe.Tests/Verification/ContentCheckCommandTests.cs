@@ -5,7 +5,6 @@ namespace StrataLint.Scribe.Tests;
 public sealed class ContentCheckCommandTests
 {
     [Theory]
-    [InlineData("content-check", "--report", "report.json")]
     [InlineData("emit")]
     [InlineData("emit", "--check")]
     public void MissingManifestFailsBeforeRepositoryResolution(params string[] arguments)
@@ -16,18 +15,13 @@ public sealed class ContentCheckCommandTests
         Assert.Contains("MissingPathsManifest", error.ToString(), StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void MissingContentManifestFailsWithAValidRepositoryAndReport()
-    {
-        using var fixture = new Fixture();
-        var error = new StringWriter();
-        Assert.Equal(2, ScribeCli.Run(["content-check", "--report", "fixture.json"],
-            fixture.Root.Path, TextWriter.Null, error, fixture.Report));
-        Assert.Contains("MissingPathsManifest", error.ToString(), StringComparison.Ordinal);
-    }
-
     [Theory]
     [InlineData("content-check")]
+    [InlineData("content-check", "--scoped", "--report", "report.json", "--targets-from", "targets")]
+    [InlineData("content-check", "--scoped", "--report", "", "--targets-from", "targets", "--paths-from", "paths")]
+    [InlineData("describe-report", "--scribe-pack", "pack.zip", "--scribe-pack-digest", "digest")]
+    [InlineData("projections", "--check", "--report", "report.json")]
+    [InlineData("markdown-check", "--report", "report.json", "--paths-from", "paths")]
     [InlineData("content-check", "--report")]
     [InlineData("content-check", "--report", "report.json", "--paths-from")]
     [InlineData("content-check", "--report", "report.json", "--bad", "paths.txt")]
@@ -163,38 +157,37 @@ public sealed class ContentCheckCommandTests
         Assert.Contains("no Scribe document renders", error.ToString(), StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void ProjectionFailurePrecedesScriptExecution()
+    [Theory]
+    [InlineData("", 0, "markdown: judged=0")]
+    [InlineData(Markdown, 1, "Double subscript")]
+    [InlineData(Path, 2, "selected Scribe definitions require Lean targets")]
+    public void ScopedCommandChecksEmptyTargetSelectionWithoutAReport(string selection, int expected, string message)
     {
         using var fixture = new Fixture();
-        fixture.Write(Path, "invalid C#");
-        fixture.Write("Golden/Projection/statement-projection-pilot-v1.json", """
-            {"schema":"statement-projection-pilot-fixture-v1","declarations":[
-            {"name":"D5.S0.Synthetic.CurrentMarkdown.missing","source_path":"D5/S0/Synthetic/CurrentMarkdown.lean",
-             "kind":"theorem","type":"statement-v1(uparams=[],type=es(l0))"}]}
-            """);
+        fixture.Write(Markdown, "$$u_{n}_{i}$$");
+        var targets = fixture.Root.Resolve("targets");
+        File.WriteAllText(targets, "");
+        var output = new StringWriter();
         var error = new StringWriter();
-        Assert.Equal(1, fixture.Run(Path, TextWriter.Null, error));
-        Assert.Contains("pinned statement projection is missing", error.ToString(), StringComparison.Ordinal);
-        Assert.DoesNotContain("CompilationFailed", error.ToString(), StringComparison.Ordinal);
+
+        var exit = ScribeCli.Run(["content-check", "--scoped", "--targets-from", targets, "--paths-from", "-"],
+            fixture.Root.Path, output, error, new StringReader(selection));
+
+        Assert.Equal(expected, exit);
+        Assert.Contains(message, output.ToString() + error, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void DescribeReportConsumesTheExactPackWithoutExecutingDefinitions()
+    public void ScopedCommandRequiresAReportForNonemptyTargets()
     {
         using var fixture = new Fixture();
-        var packPath = fixture.Root.Resolve("pack.zip");
-        var manifest = ScribeResourcePack.Write(packPath, [MarkdownCurrentCommandTests.Definition()]);
-        fixture.Write(Path, "invalid C#");
-        var output = new StringWriter();
+        var targets = fixture.Root.Resolve("targets");
+        File.WriteAllText(targets, "D5/S0/Synthetic/CurrentMarkdown.lean\0");
         var error = new StringWriter();
-        int Run(string digest) => ScribeCli.Run(["describe-report", "--scribe-pack", packPath,
-            "--scribe-pack-digest", digest, "--json", "--check"], fixture.Root.Path, output, error,
-            fixture.Report);
-        Assert.True(Run(manifest.TotalSha256) == 0, error.ToString());
-        Assert.Contains("scribe-describe-report-v3", output.ToString(), StringComparison.Ordinal);
-        Assert.Equal(2, Run(new string('0', 64)));
-        Assert.Contains("ScribePackDigestMismatch", error.ToString(), StringComparison.Ordinal);
+
+        Assert.Equal(2, ScribeCli.Run(["content-check", "--scoped", "--targets-from", targets, "--paths-from", "-"],
+            fixture.Root.Path, TextWriter.Null, error, new StringReader("")));
+        Assert.Contains("nonempty Lean targets require --report", error.ToString(), StringComparison.Ordinal);
     }
 
     private const string Path = "Blueprint/D5/S0/Synthetic/CurrentMarkdown.scribe.cs";
@@ -234,9 +227,9 @@ public sealed class ContentCheckCommandTests
                 Write($"Golden/Projection/statement-projection-{group}-v1.json",
                     $$"""{"schema":"statement-projection-{{group}}-fixture-v1","declarations":[]}""");
         }
-        internal int Run(string selection, TextWriter output, TextWriter error) => ScribeCli.Run(
-            ["content-check", "--report", "fixture.json", "--paths-from", "-"],
-            Root.Path, output, error, Report, new StringReader(selection));
+        internal int Run(string selection, TextWriter output, TextWriter error) =>
+            ScribeContentChecks.Run(Root.Path, MarkdownFormulaScope.ParsePaths(selection), Report,
+                checkContent: true, output, error);
         internal void Write(string path, string text) => File.WriteAllText(Root.Resolve(path), text);
         public void Dispose() => Root.Dispose();
     }

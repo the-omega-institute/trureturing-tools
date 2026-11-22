@@ -20,10 +20,8 @@ public sealed class CapabilityConstructionTests
         "StrataLint.Engine.MetaClear",
         "StrataLint.Engine.PolicyLoadOutcome+Accepted",
         "StrataLint.Engine.RuleExecutionOutcome+Completed",
-        "StrataLint.Engine.TowerValidationOutcome+Accepted",
         "StrataLint.Engine.ValidatedManifest",
         "StrataLint.Engine.ValidatedPolicy",
-        "StrataLint.Engine.ValidatedTowerManifest",
     ];
 
     [Fact]

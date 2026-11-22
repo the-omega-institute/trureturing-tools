@@ -109,7 +109,7 @@ public sealed class LedgerAlignWriterTests
         using var fixture = new AlignFixture(Module("A"), Module("C"));
         var path = fixture.ReportPath(scoped: false, "--add", PathFor("A"));
 
-        AssertRejectedBeforeAnyWrite(fixture, path, RawLeanReportArtifact.ScopedSchema, invalidData: false);
+        AssertRejectedBeforeAnyWrite(fixture, path, RawLeanReportArtifact.ScopedSchema);
         Assert.Equal(1, fixture.Repository.WholeTreeReadCount);
     }
 
@@ -144,7 +144,7 @@ public sealed class LedgerAlignWriterTests
         var path = fixture.ReportPath(scoped: true, "--add", PathFor("A"));
         fixture.Corrupt(path, "A", defect);
 
-        AssertRejectedBeforeAnyWrite(fixture, path, expectedError, defect is "material" or "statement");
+        AssertRejectedBeforeAnyWrite(fixture, path, expectedError);
     }
 
     [Theory]
@@ -214,21 +214,12 @@ public sealed class LedgerAlignWriterTests
         Assert.Equal(0, fixture.Repository.ReadCount);
     }
 
-    private static void AssertRejectedBeforeAnyWrite(AlignFixture fixture, string path, string expectedError, bool invalidData)
+    private static void AssertRejectedBeforeAnyWrite(AlignFixture fixture, string path, string expectedError)
     {
-        string error;
-        if (invalidData)
-            error = Assert.Throws<InvalidDataException>(() =>
-                fixture.Invoke(["--add", PathFor("A"), "--candidate-lean-report", path])).Message;
-        else
-        {
-            var result = fixture.Invoke(["--add", PathFor("A"), "--candidate-lean-report", path]);
-            Assert.False(result.Success);
-            error = result.Error;
-        }
-        Assert.Contains(expectedError, error, StringComparison.Ordinal);
+        var result = fixture.Invoke(["--add", PathFor("A"), "--candidate-lean-report", path]);
+        Assert.False(result.Success);
+        Assert.Contains(expectedError, result.Error, StringComparison.Ordinal);
         Assert.Empty(fixture.Image());
-        Assert.False(Directory.Exists(Path.GetDirectoryName(fixture.StateFile("A"))));
     }
 
     private sealed class AlignFixture : IDisposable

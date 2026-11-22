@@ -84,7 +84,7 @@ internal static partial class FileMapPolicy
     private static readonly ImmutableHashSet<string> ProgramActorWords =
         [
             "GitHub-Actions", "Lean", "Scribe", "StrataLint", "agent", "architecture-tests",
-            "automation", "BannedApiAnalyzers", "CoverageAnalyzer", "developer", "dotnet",
+            "automation", "BannedApiAnalyzers", "developer", "dotnet",
             "git", "make-gate", "repository-policy", "dotnet-build", "dotnet-test",
             "lean-build", "lean-inspector", "reader",
         ];

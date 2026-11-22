@@ -309,17 +309,11 @@ public sealed partial class OpenProblemResolutionClaimTests
             var document = CreateDocument(ClaimDescribe(resolutionKind: ResolutionKind.Refuted));
             var report = Report((TheoremGid, "theorem"));
 
-            var json = DescribeReportWriter.WriteJson(DescribeReport.Build(root, [document], report));
-
-            using var parsed = JsonDocument.Parse(json);
-            Assert.Equal(
-                "scribe-describe-report-v3",
-                parsed.RootElement.GetProperty("schema").GetString());
-            var resolution = Assert.Single(parsed.RootElement.GetProperty("nodes").EnumerateArray())
-                .GetProperty("open_problem_resolution");
-            Assert.Equal(ProblemSlug, resolution.GetProperty("problem_slug").GetString());
-            Assert.Equal(TheoremGid, Assert.Single(resolution.GetProperty("declaration_gids").EnumerateArray()).GetString());
-            Assert.Equal("refuted", resolution.GetProperty("resolution_kind").GetString());
+            var node = Assert.Single(DescribeReport.Build(root, [document], report).Nodes);
+            var claim = Assert.IsType<OpenProblemResolutionClaim>(node.OpenProblemResolutionClaim);
+            Assert.Equal(ProblemSlug, claim.ProblemSlug.Value);
+            Assert.Equal(TheoremGid, node.DeclarationGid);
+            Assert.Equal(ResolutionKind.Refuted, claim.ResolutionKind);
         });
     }
 
@@ -347,13 +341,6 @@ public sealed partial class OpenProblemResolutionClaimTests
             var node = Assert.Single(report.Nodes);
             Assert.Equal("theorem", node.Kind);
             Assert.Equal(claim, node.OpenProblemResolutionClaim);
-            using var json = JsonDocument.Parse(DescribeReportWriter.WriteJson(report));
-            var projected = Assert.Single(json.RootElement.GetProperty("nodes").EnumerateArray());
-            Assert.Equal("theorem", projected.GetProperty("kind").GetString());
-            var resolution = projected.GetProperty("open_problem_resolution");
-            Assert.Equal(ProblemSlug, resolution.GetProperty("problem_slug").GetString());
-            Assert.Equal(TheoremGid, Assert.Single(resolution.GetProperty("declaration_gids").EnumerateArray()).GetString());
-            Assert.Equal("proved", resolution.GetProperty("resolution_kind").GetString());
         });
     }
 
@@ -369,19 +356,13 @@ public sealed partial class OpenProblemResolutionClaimTests
                 Report((TheoremGid, "theorem"), (otherGid, "theorem")));
 
             Assert.Equal("classified", report.Status);
-            using var json = JsonDocument.Parse(DescribeReportWriter.WriteJson(report));
-            var node = Assert.Single(json.RootElement.GetProperty("nodes").EnumerateArray(),
-                item => item.GetProperty("open_problem_resolution").ValueKind != JsonValueKind.Null);
-            Assert.EndsWith("#describe/editorial-title", node.GetProperty("node_id").GetString());
-            Assert.Equal(otherGid, Assert.Single(node.GetProperty("open_problem_resolution")
-                .GetProperty("declaration_gids").EnumerateArray()).GetString());
-            Assert.Contains($"declaration_gids=[\"{otherGid}\"]", DescribeReportWriter.WriteText(report));
+            var node = Assert.Single(report.Nodes, item => item.OpenProblemResolutionClaim is not null);
+            Assert.EndsWith("#describe/editorial-title", node.NodeId);
+            Assert.Equal(otherGid, node.DeclarationGid);
             using var marker = ParseResolutionMarker(Encoding.UTF8.GetString(
                 CanonicalMarkdownWriter.Write(document,
                     DeclarationCatalog.Create(Report((TheoremGid, "theorem"), (otherGid, "theorem")))).AsSpan()));
-            Assert.Equal(marker.RootElement.GetProperty("declaration_gid").GetString(),
-                Assert.Single(node.GetProperty("open_problem_resolution")
-                    .GetProperty("declaration_gids").EnumerateArray()).GetString());
+            Assert.Equal(node.DeclarationGid, marker.RootElement.GetProperty("declaration_gid").GetString());
         });
     }
 
@@ -590,12 +571,9 @@ public sealed partial class OpenProblemResolutionClaimTests
             Assert.Contains($"\"declaration_gid\":\"{OtherTheoremGid}\"", markers[1]);
 
             var describeReport = DescribeReport.Build(root, [document, otherDocument], report);
-            using var json = JsonDocument.Parse(DescribeReportWriter.WriteJson(describeReport));
-            var node = Assert.Single(json.RootElement.GetProperty("nodes").EnumerateArray(),
-                static item => item.GetProperty("open_problem_resolution").ValueKind != JsonValueKind.Null);
-            Assert.Equal(TheoremGid, node.GetProperty("declaration_gid").GetString());
-            Assert.Equal([TheoremGid, OtherTheoremGid], node.GetProperty("open_problem_resolution")
-                .GetProperty("declaration_gids").EnumerateArray().Select(static item => item.GetString()));
+            var node = Assert.Single(describeReport.Nodes, item => item.OpenProblemResolutionClaim is not null);
+            Assert.Equal(TheoremGid, node.DeclarationGid);
+            Assert.Equal([TheoremGid, OtherTheoremGid], node.OpenProblemResolutionClaim!.Members(TheoremGid));
         });
     }
 

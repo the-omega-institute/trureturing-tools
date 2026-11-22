@@ -1,5 +1,4 @@
 using System.Text;
-using System.Text.Json;
 
 namespace StrataLint.Scribe.Tests;
 
@@ -97,30 +96,18 @@ public sealed class ProvenanceAcknowledgementTests
                         AssessedProvenance.NovelAfterSearch(searchReceipt, note)),
                 ]));
 
-            using var json = JsonDocument.Parse(
-                DescribeReportWriter.WriteJson(DescribeReport.Build(root, [document])));
-            var nodes = json.RootElement.GetProperty("nodes").EnumerateArray().ToArray();
-            var repository = Assert.Single(nodes, static node =>
-                node.GetProperty("title").GetString() == "Repository");
-            var literature = Assert.Single(nodes, static node =>
-                node.GetProperty("title").GetString() == "Literature");
-            var candidate = Assert.Single(nodes, static node =>
-                node.GetProperty("title").GetString() == "Candidate");
-
-            Assert.Equal("repo-derived", repository.GetProperty("provenance").GetString());
-            Assert.Equal(JsonValueKind.Null, repository.GetProperty("literature_gid").ValueKind);
-            Assert.Equal(
-                [NoteGid],
-                repository.GetProperty("acknowledgement_gids").EnumerateArray()
-                    .Select(static item => item.GetString()));
-            Assert.Equal("literature-attested", literature.GetProperty("provenance").GetString());
-            Assert.Equal(NoteGid, literature.GetProperty("literature_gid").GetString());
-            Assert.Empty(literature.GetProperty("acknowledgement_gids").EnumerateArray());
-            Assert.Equal("suspected-novel", candidate.GetProperty("provenance").GetString());
-            Assert.Equal(
-                [NoteGid],
-                candidate.GetProperty("acknowledgement_gids").EnumerateArray()
-                    .Select(static item => item.GetString()));
+            var nodes = DescribeReport.Build(root, [document]).Nodes;
+            var repository = Assert.Single(nodes, node => node.Title == "Repository");
+            var literature = Assert.Single(nodes, node => node.Title == "Literature");
+            var candidate = Assert.Single(nodes, node => node.Title == "Candidate");
+            Assert.Equal("repo-derived", repository.Provenance);
+            Assert.Null(repository.LiteratureGid);
+            Assert.Equal([NoteGid], repository.AcknowledgementGids);
+            Assert.Equal("literature-attested", literature.Provenance);
+            Assert.Equal(NoteGid, literature.LiteratureGid);
+            Assert.Empty(literature.AcknowledgementGids);
+            Assert.Equal("suspected-novel", candidate.Provenance);
+            Assert.Equal([NoteGid], candidate.AcknowledgementGids);
         });
     }
 

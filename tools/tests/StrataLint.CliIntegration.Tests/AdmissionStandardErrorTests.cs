@@ -15,9 +15,11 @@ public sealed class AdmissionStandardErrorTests
         """;
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void SuccessfulDeltaAcceptsStandardErrorRegardlessOfInjectedPhaseTime(bool emitTiming)
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void ScopedChecksAcceptTimingOnStandardError(bool delta, bool emitTiming)
     {
         using var temporary = new TemporaryDirectory();
         const string document = "Library/notes/Fixture.md";
@@ -33,9 +35,6 @@ public sealed class AdmissionStandardErrorTests
             """;
         fixture.Files["Meta/ReportProducers/scribe-content.json"] = registration;
         fixture.Files["lean-report-inputs.json"] = inputs;
-        Directory.CreateDirectory(Path.Combine(temporary.Path, "Meta/ReportProducers"));
-        File.WriteAllText(Path.Combine(temporary.Path, "Meta/ReportProducers/scribe-content.json"), registration);
-        File.WriteAllText(Path.Combine(temporary.Path, "lean-report-inputs.json"), inputs);
         static RawRepositorySnapshot Snapshot(Dictionary<string, string> files) =>
             RawRepositorySnapshot.Create(files.Select(static pair => RawRepositoryEntry.FromText(pair.Key, pair.Value)));
         var current = Snapshot(fixture.Files);
@@ -55,9 +54,10 @@ public sealed class AdmissionStandardErrorTests
         {
             Console.SetOut(output);
             Console.SetError(error);
-            exitCode = CliApplication.Run(
-                ["check-delta", "--protected-base", new string('a', 40), "--changed-paths-from", changedPaths],
-                environment, new SystemCliConsole());
+            string[] arguments = delta
+                ? ["check-delta", "--protected-base", new string('a', 40), "--changed-paths-from", changedPaths]
+                : ["check-current", "--changed-paths-from", changedPaths];
+            exitCode = CliApplication.Run(arguments, environment, new SystemCliConsole());
         }
         finally
         {
@@ -67,8 +67,10 @@ public sealed class AdmissionStandardErrorTests
 
         Assert.True(exitCode == 0, output.ToString() + error);
         using var verdict = JsonDocument.Parse(output.ToString());
-        Assert.Contains("SL-003", verdict.RootElement.GetProperty("executed")
-            .EnumerateArray().Select(static value => value.GetString()));
+        var executed = verdict.RootElement.GetProperty("executed").EnumerateArray()
+            .Select(static value => value.GetString()).ToArray();
+        Assert.NotEmpty(executed);
+        if (delta) Assert.Contains("SL-003", executed);
         var standardError = Encoding.UTF8.GetBytes(error.ToString());
         if (emitTiming)
         {

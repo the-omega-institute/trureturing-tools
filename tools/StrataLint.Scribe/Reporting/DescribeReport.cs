@@ -45,8 +45,6 @@ internal sealed class DescribeReport
         Observations = observations;
     }
 
-    internal const string CaseId = "DESCRIBE-NODES";
-
     internal DescribeNodeStats NodeStats { get; }
 
     internal ImmutableArray<DescribeNodeRecord> Nodes { get; }
