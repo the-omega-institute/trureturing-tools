@@ -57,6 +57,7 @@ def pin_release(root, version):
             os.chmod(replacement, mode)
             replacement.replace(lockfile)
     print(f"Pinned {version} (sha256 {pin['sha256']})")
+    print("To submit this source for tools/dev review, run python3 tools/consumer/source_pr.py --lock Meta/tools-release.json.")
 
 
 if __name__ == "__main__":
