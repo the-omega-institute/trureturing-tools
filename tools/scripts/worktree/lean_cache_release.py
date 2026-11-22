@@ -1160,7 +1160,9 @@ def restore_snapshot(root, partition, tag, stage, deadline, expected=None, refre
                 invalidated = check_native_products(source, partition, staging=True)
                 if invalidated:
                     receipt("native", "invalidated", products=invalidated, partition=partition)
-                validate_project_cache(source)
+                compiled = source / "lib/lean"
+                if compiled.is_symlink() or not compiled.is_dir():
+                    raise ValueError("project cache is missing lib/lean")
                 remaining(deadline)
                 with observed_phase("install"):
                     remaining(deadline)

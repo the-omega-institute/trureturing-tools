@@ -895,6 +895,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
             stage = pathlib.Path(temporary)
             with tarfile.open(archive) as source:
                 source.extractall(stage, filter="data")
+            shutil.rmtree(stage / "build/lean-inspector/modules")
             for member in retired:
                 write(stage / member, "legacy aggregate")
             with tarfile.open(archive, "w:gz") as output:
@@ -933,7 +934,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertNotEqual(0, result.returncode)
         self.assertEqual("keep current material", (self.root / ".lake/build/keep.txt").read_text())
 
-    def test_candidate_restore_rejects_missing_module_layout_before_replacement(self):
+    def test_candidate_restore_rejects_missing_compiler_layout_before_replacement(self):
         self.candidate_fixture()
         tag = self.candidate_tag()
         snapshot = self.remote / tag
@@ -942,7 +943,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
             stage = pathlib.Path(temporary)
             with tarfile.open(archive) as source:
                 source.extractall(stage, filter="data")
-            shutil.rmtree(stage / "build/lean-inspector/modules")
+            shutil.rmtree(stage / "build/lib/lean")
             with tarfile.open(archive, "w:gz") as output:
                 output.add(stage / "build", arcname="build")
         packed = archive.read_bytes()
@@ -953,7 +954,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         write(self.root / ".lake/build/keep.txt", "keep current material")
         result = self.candidate_transport("fetch", tag, **self.candidate_consumer())
         self.assertEqual(1, result.returncode, result.stdout + result.stderr)
-        self.assertIn("project cache is missing lean-inspector/modules", result.stdout)
+        self.assertIn("project cache is missing lib/lean", result.stdout)
         self.assertEqual("keep current material", (self.root / ".lake/build/keep.txt").read_text())
 
     def test_candidate_notification_failure_rolls_back_installation(self):
