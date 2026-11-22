@@ -580,6 +580,8 @@ class VolumeReleases(unittest.TestCase):
 
             first = publish(self.project, base, 801)
             self.write("D5/B.lean", "import D5.A\ndef valB : Nat := valA + 5\n")
+            self.write("Library/Arithmetic/Reference.md", "A reference for B\n")
+            self.write("Problems/Arithmetic.md", "A related problem\n")
             self.commit("B consumes A")
             target = run(self.project, "git", "rev-parse", "HEAD").strip()
             rolling = self.consumer("rolling-checked")

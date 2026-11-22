@@ -41,6 +41,10 @@ def sparse_plan(root, tag, manifest, digest, tree, target, *, extra_roots=()):
             continue
         if path.startswith("Golden/Frozen/state/") and path.endswith(".lean.json"):
             continue
+        # The consumer's literature entries and problem statements are Markdown
+        # content alongside the Lean change. Other files retain full preparation.
+        if re.fullmatch(r"(?:Library/[^/]+|Problems)/[^/]+\.md", path):
+            continue
         return None
     graph = project_imports(root, modules)
     scope = import_closure(graph, compiler.production_targets(root, modules) | set(extra_roots))
