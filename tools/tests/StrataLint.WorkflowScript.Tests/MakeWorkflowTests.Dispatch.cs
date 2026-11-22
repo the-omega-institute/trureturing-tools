@@ -52,7 +52,7 @@ public sealed partial class MakeWorkflowTests
         foreach (var target in expectedTargets)
         {
             Assert.Matches(new Regex($"(?m)^{Regex.Escape(target)}:", RegexOptions.CultureInvariant), makefile);
-            Assert.InRange(RecipeCount(makefile, target), 0, 1);
+            Assert.InRange(RecipeCount(makefile, target), 0, target == "test" ? 2 : 1);
         }
 
         Assert.Contains("build: lean", makefile, StringComparison.Ordinal);
@@ -60,7 +60,7 @@ public sealed partial class MakeWorkflowTests
         // `scribe-strip` is not a supported target or help entry.
         Assert.DoesNotContain("scribe-strip", makefile, StringComparison.Ordinal);
         Assert.DoesNotContain("strip-scribe-receipts", makefile, StringComparison.Ordinal);
-        var mathematicalTestRecipe = Recipe(makefile, "test");
+        var mathematicalTestRecipe = string.Join('\n', RecipeLines(makefile, "test"));
         Assert.DoesNotContain("dotnet test", mathematicalTestRecipe, StringComparison.Ordinal);
         Assert.Contains("ci_pr_lean.py", mathematicalTestRecipe, StringComparison.Ordinal);
         Assert.Equal(
@@ -231,7 +231,7 @@ public sealed partial class MakeWorkflowTests
         foreach (var target in ToolsTargets)
         {
             Assert.Matches(new Regex($"(?m)^{Regex.Escape(target)}:", RegexOptions.CultureInvariant), makefile);
-            Assert.InRange(RecipeCount(makefile, target), 0, 1);
+            Assert.InRange(RecipeCount(makefile, target), 0, target == "test" ? 2 : 1);
         }
 
         Assert.Contains("$(HERE)/scripts/dotnet-build.sh", Recipe(makefile, "dotnet"), StringComparison.Ordinal);

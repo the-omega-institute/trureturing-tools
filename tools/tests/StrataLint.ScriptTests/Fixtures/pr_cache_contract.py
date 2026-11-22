@@ -444,6 +444,23 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
             self.assertFalse(actions.adoption_record(self.root)["merged"])
             self.assertEqual("pull-requests-do-not-publish-project-seeds", actions.project_publication(self.root)[1])
 
+    def test_old_preparation_adopts_native_members_and_discards_retired_reports(self):
+        registration = self.root / "Meta/ci-cache-paths.json"
+        current = registration.read_text()
+        data = json.loads(current)
+        data["layers"]["project"].extend([".lake/build/lean-inspector", ".lake/build/stratalint/raw-lean-report.json*"])
+        registration.write_text(json.dumps(data))
+        report = self.root / ".lake/build/lean-inspector/report.zip"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_bytes(b"retired bundle")
+        self.preparation()
+        registration.write_text(current)
+        result, _ = self.adopt()
+        self.assertEqual("adopted", result["status"])
+        self.assertEqual(b"native", (self.root / ".lake/build/lib/Module.olean").read_bytes())
+        self.assertFalse(report.exists())
+        self.assertFalse((self.root / ".lake/build/stratalint/raw-lean-report.json").exists())
+
     def test_adoption_reclaims_download_zip_before_native_unpack(self):
         self.preparation()
         with mock.patch.object(producer, "unpack", wraps=producer.unpack) as unpack:

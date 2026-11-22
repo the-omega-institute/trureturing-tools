@@ -35,7 +35,7 @@ public sealed class FileMapProgramTests
     public void RequiredDocumentInputRemainsInInventoryAndDuplicatesAreRejected()
     {
         var inventory = GeneratedArtifactInventory.Create(["Blueprint/Z.md", "Blueprint/A.md"]);
-        Assert.Equal(8, inventory.Length);
+        Assert.Equal(7, inventory.Length);
         Assert.Equal(inventory.Select(item => item.Path).Order(StringComparer.Ordinal),
             inventory.Select(item => item.Path));
         Assert.Equal("ScribeEmitter", inventory.Single(item => item.Path == "Blueprint/A.md").Producer);
