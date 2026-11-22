@@ -205,12 +205,12 @@ def download(host, manifest, tree, rows, output, deadline, assets):
 
 
 def single_volume_restore(stage, root, manifest, tree):
-    # On a shared filesystem the logical archive and extracted build coexist.
-    # The index gives the compressed length but no upper bound on expanded files.
-    logical = manifest["archive_bytes"]
-    largest = max(tree["volumes"].values())
-    threshold = max(logical + largest, 2 * logical if stage.stat().st_dev == root.stat().st_dev else 0)
-    return shutil.disk_usage(stage).free < threshold
+    # v6 records compressed lengths only. On the extraction filesystem, keep
+    # one physical volume beside the build as its uncompressed files grow.
+    if stage.stat().st_dev == root.stat().st_dev:
+        return True
+    staging_bytes = manifest["archive_bytes"] + max(tree["volumes"].values())
+    return shutil.disk_usage(stage).free < staging_bytes
 
 
 class LogicalVolumeInput:
