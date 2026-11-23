@@ -1,0 +1,32 @@
+name: Merge tools adopted by the consumer
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+    inputs:
+      consumer_pr:
+        description: 'Merged trureturing/dev PR number (empty to catch up)'
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: read
+
+concurrency: tools-consumer-adoption
+
+jobs:
+  adopt:
+    if: github.repository == 'the-omega-institute/trureturing-tools' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Validate and deliver adopted tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONSUMER_PR: ${{ inputs.consumer_pr }}
+        run: python3 .github/scripts/adopt-tools.py "$CONSUMER_PR"

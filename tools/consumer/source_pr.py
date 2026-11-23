@@ -8,8 +8,8 @@ import sys
 import tempfile
 
 from pin import REPOSITORY, release_pin
+from paired import BASE_TRAILER, CONSUMER, PR_PREVIEW, artifact_fields, branch_tip, read_pin, tag_source
 
-CONSUMER = "the-omega-institute/trureturing"
 REPO_URL = f"https://github.com/{REPOSITORY}"
 PULLS = """
 query($endCursor: String) {
@@ -60,13 +60,12 @@ def source_pr(lockfile):
         pin = gh_json(f"repos/{CONSUMER}/contents/Meta/tools-release.json?ref={adoption}",
                       "-H", "Accept: application/vnd.github.raw+json")
         provenance = f"The [consumer dev lock](https://github.com/{CONSUMER}/blob/{adoption}/Meta/tools-release.json)"
-    if "workflow_sha" in pin:
-        workflow = pin.pop("workflow_sha")
-        if not isinstance(workflow, str) or not re.fullmatch("[0-9a-f]{40}", workflow):
-            raise ValueError("Invalid workflow_sha in consumer pin")
+    pin = artifact_fields(pin)
     tag = pin["version"]
     if release_pin(tag) != pin:
         raise ValueError(f"Consumer pin differs from the published {tag} archive")
+    if "source_sha" in pin:
+        return f"{tag} is paired with tools PR #{PR_PREVIEW.fullmatch(tag)[1]}. Submit the pin to consumer dev first."
     ref = tools_api(f"git/ref/tags/{tag}")["object"]
     source = ref["sha"]
     if ref["type"] != "commit" or not re.fullmatch("[0-9a-f]{40}", source):
@@ -100,6 +99,29 @@ def source_pr(lockfile):
     if pull["head"]["sha"] != source:
         raise ValueError(f"{pull['html_url']} head changed during creation; check it before review")
     return f"{pull['html_url']} (open, head {source})"
+
+
+def prepare():
+    root = Path(git(".", "rev-parse", "--show-toplevel"))
+    if not (root / "package_release.py").is_file():
+        raise ValueError("run --prepare in the tools PR checkout")
+    git(root, "symbolic-ref", "--quiet", "HEAD")
+    baseline, pin = read_pin(branch_tip(CONSUMER))
+    source = tag_source(pin["version"])
+    if pin.get("source_sha", source) != source:
+        raise ValueError("consumer dev pin's source differs from its release tag")
+    ancestry = subprocess.run(["git", "-C", root, "merge-base", "--is-ancestor", source, "HEAD"],
+                              stderr=subprocess.DEVNULL)
+    if ancestry.returncode:
+        raise ValueError(f"integrate {pin['version']} ({source}) first: "
+                         f"git fetch origin refs/tags/{pin['version']} && git merge FETCH_HEAD")
+    trailer = f"{BASE_TRAILER}: {baseline}"
+    existing = git(root, "log", "-1", "--format=%(trailers:key=Consumer-Tools-Base,unfold)")
+    if existing.lower() != trailer.lower():
+        # A separate commit preserves the existing PR and cannot include staged changes.
+        subprocess.run(["git", "-C", root, "commit", "--only", "--allow-empty",
+                        "-m", "Record the consumer tools pin for the preview", "-m", trailer], check=True)
+    return f"Tools head {git(root, 'rev-parse', 'HEAD')} is based on consumer pin {baseline}."
 
 
 def git(repo, *args):
@@ -165,10 +187,13 @@ if __name__ == "__main__":
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--lock", type=Path, help="use this proposed Meta/tools-release.json")
     group.add_argument("--list", action="store_true", help="classify open PRs without publishing")
+    group.add_argument("--prepare", action="store_true", help="record the current consumer dev pin on the tools PR head")
     args = parser.parse_args()
     try:
         if args.list:
             inventory()
+        elif args.prepare:
+            print(prepare())
         else:
             print(source_pr(args.lock))
     except (KeyError, ValueError, OSError, subprocess.CalledProcessError) as error:

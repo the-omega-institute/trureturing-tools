@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 from ci_contract import read_changed, write_paths
 from ci_checks import CLI
@@ -94,6 +95,10 @@ def check(manifest, protected_base=None, scope_file=None, base=None):
             subprocess.run(["bash", "tools/scripts/worktree/lean-cache-run.sh", "lake",
                             "-d", "tools/lean-inspector-reg", "build",
                             *["+" + module for module in programs]], env=environment, check=True)
+        internal = [name for name in programs if Path("src", *name.split(".")).with_suffix(".lean").is_file()]
+        if internal and tomllib.loads(Path("lakefile.toml").read_text()).get("testDriver"):
+            subprocess.run(["bash", "tools/scripts/worktree/lean-cache-run.sh", "lake", "test", "--", *internal],
+                           env=environment, check=True)
         reports = []
         for index, (targets, selected_paths) in enumerate(report_batches(scope)):
             batch = directory / str(index)

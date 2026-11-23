@@ -70,7 +70,7 @@ class SourcePrTests(unittest.TestCase):
 
     def test_workflow_provenance_is_independent_of_release_digest(self):
         self.reachable.add(self.base)
-        self.remote_pin = dict(self.pin, workflow_sha="9" * 40)
+        self.remote_pin = dict(self.pin, workflow_sha="9" * 40, previous_pin="8" * 40)
         self.assertIn("already in", source_pr.source_pr(None))
         self.remote_pin["workflow_sha"] = "malformed"
         with self.assertRaisesRegex(ValueError, "workflow_sha"):
