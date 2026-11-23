@@ -19,7 +19,6 @@ public sealed class RuleEngineTests
         { 12, "header" },
         { 15, "formula" },
         { 17, "query" },
-        { 18, "values" },
         { 19, "anomaly" },
         { 20, "axiom" },
         { 21, "future" },
@@ -32,8 +31,6 @@ public sealed class RuleEngineTests
     {
         { 11, RuleFixture.RingPath },
         { 15, "notes/new-artifact.txt" },
-        { 18, ValuesKernelBindingValidator.RelativePath },
-        { 18, "Directory.Build.props" },
         { 22, RuleFixture.SyntheticProtectedPath },
         { 23, RuleFixture.BlueprintSourcePath },
         { 23, "Directory.Build.props" },
@@ -54,7 +51,6 @@ public sealed class RuleEngineTests
         { 12, RuleFixture.BlueprintPath },
         { 15, null },
         { 17, "Chronicle/2026/07/10-old.md" },
-        { 18, "Chronicle/2026/07/10-old.md" },
         { 19, RuleFixture.BlueprintPath },
         { 20, RuleFixture.BlueprintPath },
         { 21, RuleFixture.BlueprintPath },
@@ -169,7 +165,6 @@ public sealed class RuleEngineTests
     [Theory]
     [InlineData(15, "formula")]
     [InlineData(17, "query")]
-    [InlineData(18, "values")]
     public void SourceFindingsSurviveAnEmptyScopedReport(int number, string mutation)
     {
         var fixture = new RuleFixture();
@@ -344,61 +339,6 @@ public sealed class RuleEngineTests
     }
 
     [Fact]
-    public void Sl018RejectsValuesOutsideTheCanonicalProjectionAddress()
-    {
-        var fixture = new RuleFixture();
-        fixture.Files["Evidence/D5/values.result.json"] =
-            "{\"D5/sample\": {\"status\": \"verified\", \"value\": 123}}\n";
-
-        var diagnostic = Assert.Single(
-            RuleCatalog.Default.EvaluateSingle(
-                RuleId.CreateKnown(18),
-                fixture.BuildScopeProbe(RawChangeSet.Create(["Evidence/D5/values.result.json"]))).Diagnostics);
-
-        Assert.Equal("canonical values projection must be Evidence/D5/values.json", diagnostic.Message);
-    }
-
-    [Fact]
-    public void Sl018AcceptsTheCanonicalProjectionWithoutReverifyingItsBytes()
-    {
-        var fixture = new RuleFixture();
-        fixture.AddValuesProjection();
-        fixture.Files[RuleFixture.ValuesProjectionPath] += "\n";
-
-        Assert.Empty(
-            RuleCatalog.Default.EvaluateSingle(
-                RuleId.CreateKnown(18),
-                fixture.BuildScopeProbe(RawChangeSet.Create(fixture.Changes))).Diagnostics);
-    }
-
-    [Fact]
-    public void ValuesProjectionFixtureContainsOnlySyntheticData()
-    {
-        var fixture = new RuleFixture();
-        fixture.AddValuesProjection();
-        using var document = System.Text.Json.JsonDocument.Parse(fixture.Files[RuleFixture.ValuesProjectionPath]);
-        Assert.Empty(document.RootElement.EnumerateObject());
-    }
-
-    [Theory]
-    [InlineData("{\"fixture\":\"独立载荷\",\"attestation\":\"stale\"}\n")]
-    [InlineData("not JSON\n")]
-    public void Sl018ChecksProjectionAddressIndependentlyOfPayload(string payload)
-    {
-        var fixture = new RuleFixture();
-        fixture.Files[RuleFixture.ValuesProjectionPath] = payload;
-        Assert.Empty(RuleCatalog.Default.EvaluateSingle(RuleId.CreateKnown(18),
-            fixture.BuildScopeProbe(RawChangeSet.Create([RuleFixture.ValuesProjectionPath]))).Diagnostics);
-
-        fixture.Files.Remove(RuleFixture.ValuesProjectionPath);
-        const string wrongAddress = "Evidence/D5/values.result.json";
-        fixture.Files[wrongAddress] = payload;
-        var diagnostic = Assert.Single(RuleCatalog.Default.EvaluateSingle(RuleId.CreateKnown(18),
-            fixture.BuildScopeProbe(RawChangeSet.Create([wrongAddress]))).Diagnostics);
-        Assert.Equal("canonical values projection must be Evidence/D5/values.json", diagnostic.Message);
-    }
-
-    [Fact]
     public void Sl025DoesNotGovernBlueprintMarkdownContent()
     {
         var fixture = new RuleFixture();
@@ -468,7 +408,7 @@ public sealed class RuleEngineTests
             .Order()
             .ToArray();
 
-        Assert.Equal(Enumerable.Range(1, 23).Except([5, 16]).Append(25).Append(26).Append(30), exercised);
+        Assert.Equal(Enumerable.Range(1, 23).Except([5, 16, 18]).Append(25).Append(26).Append(30), exercised);
     }
 
     [Fact]

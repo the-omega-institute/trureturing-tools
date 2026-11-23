@@ -8,8 +8,6 @@ internal enum RepositoryRootCriterion
     ClaudeDirectoryNotFound,
     LakefileInvalidOperation,
     FileMapDirectoryNotFound,
-    ValuesDataDirectoryNotFound,
-    ValuesProducerDirectoryNotFound,
 }
 
 internal readonly record struct RepositoryRoot
@@ -107,10 +105,6 @@ internal sealed class RepositoryAccessor
             File.Exists(Path.Combine(root, "lakefile.toml")),
         RepositoryRootCriterion.FileMapDirectoryNotFound =>
             File.Exists(Path.Combine(root, "Meta", "FILEMAP.toml")),
-        RepositoryRootCriterion.ValuesDataDirectoryNotFound =>
-            File.Exists(Path.Combine(root, "Golden", "values-kernels.toml")),
-        RepositoryRootCriterion.ValuesProducerDirectoryNotFound =>
-            File.Exists(Path.Combine(root, "D5", "X_Frontier", "ValuesProducer.lean")),
         _ => throw new ArgumentOutOfRangeException(nameof(criterion)),
     };
 

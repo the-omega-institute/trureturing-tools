@@ -37,8 +37,6 @@ internal static partial class FileMapPolicy
         "tools/StrataLint.Scribe/Projection/StatementProjection.cs";
     private const string GateAuthorityRootCatalogLoaderPath =
         "tools/StrataLint.Cli/GateAuthority/GateAuthorityRootCatalogLoader.cs";
-    private const string ValuesKernelLoaderPath =
-        "tools/StrataLint.Scribe/Values/ValuesKernelDataLoader.cs";
     private const string YamlSubsetParserPath =
         "tools/Trureturing.Truth/YamlSubsetParser.cs";
     private const string RepositoryPathPolicyPath =
@@ -71,7 +69,6 @@ internal static partial class FileMapPolicy
             ["ScribeCompiler"] = ScribeProjectPath,
             ["SnapshotDecoder"] = SnapshotDecoderPath,
             ["StatementProjectionFixtureLoader"] = StatementProjectionFixtureLoaderPath,
-            ["ValuesKernelDataLoader"] = ValuesKernelLoaderPath,
             ["YamlSubsetParser"] = YamlSubsetParserPath,
         };
 

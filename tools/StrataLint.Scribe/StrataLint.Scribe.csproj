@@ -17,7 +17,6 @@
     <EmbeddedResource Include="Vendor/Katex/katex.min.js" LogicalName="katex.min.js" />
     <PackageReference Include="Jint" />
     <PackageReference Include="QuestPDF" />
-    <PackageReference Include="Tomlyn" />
     <AdditionalFiles Include="../Architecture/BannedSymbols.txt" />
     <AdditionalFiles Include="../Architecture/BannedSymbols.Determinism.txt" />
     <AdditionalFiles Include="../Architecture/BannedSymbols.Guid.txt" />
