@@ -43,6 +43,8 @@ internal interface ICliEnvironment
 
 
 
+    ExplicitCommandResult TruthRelease(IReadOnlyList<string> arguments);
+
     CommandResult CleanLanes(IReadOnlyList<string> arguments);
 
     CommandResult Worktree(IReadOnlyList<string> arguments);
@@ -113,6 +115,8 @@ internal static class CliApplication
                 RenderCommand(environment.SelfTest(tail), console),
             ["topology"] = static (environment, tail, console) =>
                 RenderTopology(environment.Topology(tail), console),
+            ["truth-release"] = static (environment, tail, console) =>
+                RenderExplicit(environment.TruthRelease(tail), console),
             ["worktree"] = static (environment, tail, console) =>
                 RenderCommand(environment.Worktree(tail), console),
         }.ToImmutableDictionary(StringComparer.Ordinal);

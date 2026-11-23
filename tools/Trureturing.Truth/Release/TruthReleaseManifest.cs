@@ -37,7 +37,7 @@ public sealed record TruthReleaseArtifacts(
     TruthReleaseArtifact BlueprintIndex);
 
 /// <summary>
-/// The parsed, shape-validated <c>release-manifest.v1.json</c> (schema "truth-release"). This is a
+/// The parsed, shape-validated <c>release-manifest.v1.json</c> for a historical or scheduled release. This is a
 /// plain READ model — parsing it proves nothing about provenance; it only records what the producer
 /// listed. Authority still comes from independently re-deriving the bundle from <see cref="TruthReleaseSource"/>.
 /// </summary>
@@ -47,20 +47,23 @@ public sealed record TruthReleaseManifest(
     TruthReleaseProducer Producer,
     TruthReleaseArtifacts Artifacts,
     string Sha256SumsDigest,
-    string ProducedAt);
+    string ProducedAt)
+{
+    public string Schema { get; init; } = TruthReleaseManifestReader.Schema;
+}
 
 /// <summary>
-/// Fail-closed reader for <c>release-manifest.v1.json</c>. It enforces the truth-release schema shape
-/// exactly: the schema tag, the required fields and their patterns, <c>additionalProperties:false</c> on
-/// every object, <c>producer.read_only == true</c>, and a nonempty set of uniquely named checks each with
-/// conclusion "success". It never repairs or defaults a malformed manifest. Shape only — it does NOT judge
-/// provenance (that a commit is really on protected dev, that the checks are really green); that is
-/// re-established independently against GitHub.
+/// Reads historical and scheduled release manifests. Both schemas require unique names and a successful
+/// conclusion for each declared check. Only a scheduled release can declare an empty check list.
+/// The reader checks the shape of the producer's claims. Provenance is established independently.
 /// </summary>
 public static class TruthReleaseManifestReader
 {
-    /// <summary>The manifest schema tag; the reader accepts no other tag.</summary>
+    /// <summary>The historical schema requires at least one successful check.</summary>
     public const string Schema = "truth-release";
+
+    /// <summary>The scheduled publisher can issue a release without running checks.</summary>
+    public const string ScheduledSchema = "truth-release-scheduled";
 
     private static readonly ImmutableArray<string> RootKeys = ImmutableArray.Create(
         "schema", "source", "trust", "producer", "artifacts", "sha256sums_digest", "produced_at");
@@ -103,9 +106,10 @@ public static class TruthReleaseManifestReader
         {
             var root = RequireObject(document.RootElement, "release-manifest");
             RequireKeys(root, RootKeys, ImmutableArray<string>.Empty, "release-manifest");
-            if (RequireString(root, "schema") != Schema)
+            var schema = RequireString(root, "schema");
+            if (schema != Schema && schema != ScheduledSchema)
             {
-                throw new FormatException($"release-manifest schema tag is not {Schema}.");
+                throw new FormatException($"unsupported release-manifest schema tag '{schema}'.");
             }
 
             var sourceElement = RequireObject(RequireProperty(root, "source"), "source");
@@ -122,7 +126,7 @@ public static class TruthReleaseManifestReader
             RequireKeys(trustElement, TrustRequiredKeys, TrustOptionalKeys, "trust");
             var trust = new TruthReleaseTrust(
                 RequireBool(trustElement, "commit_on_protected_dev"),
-                ReadRequiredChecks(trustElement),
+                ReadRequiredChecks(trustElement, requireEvidence: schema == Schema),
                 OptionalString(trustElement, "blessed_by"));
 
             var producerElement = RequireObject(RequireProperty(root, "producer"), "producer");
@@ -152,11 +156,14 @@ public static class TruthReleaseManifestReader
                 producer,
                 artifacts,
                 RequireDigest(root, "sha256sums_digest"),
-                RequireString(root, "produced_at"));
+                RequireString(root, "produced_at"))
+            {
+                Schema = schema,
+            };
         }
     }
 
-    private static ImmutableArray<TruthReleaseRequiredCheck> ReadRequiredChecks(JsonElement trust)
+    private static ImmutableArray<TruthReleaseRequiredCheck> ReadRequiredChecks(JsonElement trust, bool requireEvidence)
     {
         var checks = ImmutableArray.CreateBuilder<TruthReleaseRequiredCheck>();
         var names = new HashSet<string>(StringComparer.Ordinal);
@@ -183,13 +190,11 @@ public static class TruthReleaseManifestReader
             checks.Add(new TruthReleaseRequiredCheck(name, conclusion));
         }
 
-        if (names.Count == 0)
+        if (requireEvidence && checks.Count == 0)
         {
             throw new FormatException("required_checks must contain at least one successful named check.");
         }
 
-        // Completeness against the installed protection policy is a provenance obligation,
-        // not a property of this producer-declared manifest.
         return checks.ToImmutable();
     }
 

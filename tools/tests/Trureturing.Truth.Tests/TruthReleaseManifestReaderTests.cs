@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json.Nodes;
 using Trureturing.Truth;
 using Xunit;
 
@@ -219,6 +220,19 @@ public sealed class TruthReleaseManifestReaderTests
         var bad = ValidManifest.Replace("\"current\"", "\"" + otherCheck + "\"", StringComparison.Ordinal);
 
         Assert.Equal(otherCheck, TruthReleaseManifestReader.Read(bad).Trust.RequiredChecks[1].Name);
+    }
+
+    [Fact]
+    public void OnlyScheduledManifestsAcceptAnEmptyCheckList()
+    {
+        var manifest = JsonNode.Parse(ValidManifest)!.AsObject();
+        manifest["trust"]!["required_checks"] = new JsonArray();
+        Assert.Throws<FormatException>(() => TruthReleaseManifestReader.Read(manifest.ToJsonString()));
+
+        manifest["schema"] = "truth-release-scheduled";
+        var scheduled = TruthReleaseManifestReader.Read(manifest.ToJsonString());
+        Assert.Equal("truth-release-scheduled", scheduled.Schema);
+        Assert.Empty(scheduled.Trust.RequiredChecks);
     }
 
     [Fact]

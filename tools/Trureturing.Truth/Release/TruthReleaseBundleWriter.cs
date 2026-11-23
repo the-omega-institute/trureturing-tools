@@ -13,7 +13,10 @@ public sealed record TruthReleaseBundleInput(
     TruthReleaseSource Source,
     TruthReleaseTrust Trust,
     TruthReleaseProducer Producer,
-    string ProducedAt);
+    string ProducedAt)
+{
+    public string ManifestSchema { get; init; } = TruthReleaseManifestReader.Schema;
+}
 
 /// <summary>
 /// The package-owned write authority for a truth-release bundle. It assigns every wire filename,
@@ -80,7 +83,10 @@ public static class TruthReleaseBundleWriter
                 Artifact(TruthExportFileName),
                 Artifact(BlueprintIndexFileName)),
             releaseDigest,
-            input.ProducedAt);
+            input.ProducedAt)
+        {
+            Schema = input.ManifestSchema,
+        };
         var manifestBytes = TruthReleaseManifestJsonWriter.Write(manifest);
         File.WriteAllBytes(Path.Combine(outputDirectory, ManifestFileName), manifestBytes.ToArray());
 
