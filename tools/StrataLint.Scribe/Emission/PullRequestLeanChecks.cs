@@ -100,7 +100,8 @@ internal static class PullRequestLeanChecks
                 targets.Add(LeanImportClosure.ModuleName(mirror.Path));
         }
         if (changed.Count > 0)
-            AddAffectedModules(snapshot, changed, targets, programs);
+            AddAffectedModules(snapshot, changed, targets, programs,
+                includeInternal: paths.Any(path => path.StartsWith("src/", StringComparison.Ordinal) && Module(path) is not null));
         var selected = ScribeDefinitionSelector.Select(
             path => snapshot.TryGetFile(path, out var file) ? file.RawBytes.ToArray() : null, scribePaths);
         if (!selected.IsSuccess) throw new InvalidDataException(selected.Failure);
@@ -116,12 +117,13 @@ internal static class PullRequestLeanChecks
     }
 
     internal static void AddAffectedModules(RepositorySnapshot snapshot, HashSet<string> changed,
-        HashSet<string> targets, HashSet<string> programs)
+        HashSet<string> targets, HashSet<string> programs, bool includeInternal)
     {
         var consumers = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         var sources = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var file in snapshot.Files.Values)
         {
+            if (!includeInternal && file.Path.Value.StartsWith("src/", StringComparison.Ordinal)) continue;
             if (Module(file.Path.Value) is not { } name) continue;
             sources.Add(name, file.Path.Value);
             IEnumerable<string> dependencies = LeanSourceCatalog.ParseFileImports(file);
