@@ -169,20 +169,7 @@ public static class RouteEngine
         string scope;
         string coordinates;
         Stratum? stratum = null;
-        if (syntax.Domain == "values")
-        {
-            scope = "values";
-            if (syntax.Module != "values"
-                || syntax.Selector != "result"
-                || artifactId.Value != "json")
-            {
-                throw new FormatException(
-                    "values route requires module=values, selector=result, and artifact=json");
-            }
-
-            coordinates = syntax.Module;
-        }
-        else if (syntax.Domain == "experiments")
+        if (syntax.Domain == "experiments")
         {
             scope = "experiments";
             if (!ExperimentPattern.IsMatch(syntax.Module)) throw new FormatException("experiment id is not canonical");
@@ -208,9 +195,7 @@ public static class RouteEngine
                 $"artifact kind {artifactId.Value} does not allow selector {syntax.Selector} in scope {scope}");
         }
 
-        return syntax.Domain == "values"
-            ? ("D5/E/values--json", stratum)
-            : ($"D5/E/{coordinates}.{syntax.Selector}--{artifactId.Value}", stratum);
+        return ($"D5/E/{coordinates}.{syntax.Selector}--{artifactId.Value}", stratum);
     }
 
     private static (string Gid, Stratum? Stratum) Chronicle(ManifestSyntax syntax)
@@ -341,7 +326,7 @@ public static class RouteEngine
         }
 
         if (syntax.Plane is "F" or "B"
-            || syntax.Plane == "E" && syntax.Domain is not ("values" or "experiments" or "kernels"))
+            || syntax.Plane == "E" && syntax.Domain is not ("experiments" or "kernels"))
         {
             return;
         }

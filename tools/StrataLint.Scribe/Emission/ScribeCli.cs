@@ -5,13 +5,11 @@ namespace StrataLint.Scribe;
 
 public static class ScribeCli
 {
-    private static readonly ImmutableHashSet<string> EmissionCommands =
-        ImmutableHashSet.Create(StringComparer.Ordinal, "emit", "emit-values", "filemap");
-
     public static ImmutableArray<string> ImplementedCommands { get; } =
     [
         "content-check",
-        .. EmissionCommands.Order(StringComparer.Ordinal),
+        "emit",
+        "filemap",
         "lean-inputs",
         "resources",
         "resources release",
@@ -151,11 +149,7 @@ public static class ScribeCli
             return 2;
         }
 
-        var check = arguments.Count == 2
-            && string.Equals(arguments[1], "--check", StringComparison.Ordinal);
-        if (arguments.Count is < 1 or > 2
-            || !EmissionCommands.Contains(command)
-            || (arguments.Count == 2 && !check))
+        if (arguments is not (["filemap"] or ["filemap", "--check"]))
         {
             error.WriteLine(Usage);
             return 2;
@@ -163,19 +157,7 @@ public static class ScribeCli
 
         try
         {
-            var repositoryRoot = FindRepositoryRoot(workingDirectory);
-            if (command == "emit-values")
-            {
-                return ValuesEmitter.Emit(repositoryRoot, check, output, error);
-            }
-
-            if (command == "filemap")
-            {
-                return FileMapEmitter.Emit(repositoryRoot, check, output, error);
-            }
-
-            error.WriteLine(Usage);
-            return 2;
+            return FileMapEmitter.Emit(FindRepositoryRoot(workingDirectory), arguments.Count == 2, output, error);
         }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException or ArgumentException)
@@ -187,7 +169,7 @@ public static class ScribeCli
 
     private const string Usage =
         "usage: dotnet run --project tools/StrataLint.Scribe -- "
-        + "emit-values|filemap [--check] | lean-inputs [--affected] --paths-from <file|-> [--base <revision>] | emit --paths-from <file|-> [--scoped] [--check] "
+        + "filemap [--check] | lean-inputs [--affected] --paths-from <file|-> [--base <revision>] | emit --paths-from <file|-> [--scoped] [--check] "
         + "| content-check --scoped [--report <file>] --targets-from <file> --paths-from <file> "
         + "| resources pack --out <file> | resources verify --pack <file> "
         + "| resources release --out <directory> "

@@ -136,9 +136,6 @@ public sealed partial class MakeWorkflowTests
         Assert.Contains("lean-inputs --paths-from", script, StringComparison.Ordinal);
         Assert.Contains("make lean-report-scoped", script, StringComparison.Ordinal);
         Assert.DoesNotContain("CHECK_ARGS=()", script, StringComparison.Ordinal);
-        Assert.Contains("emit|emit-values) run_scribe \"$1\"", script, StringComparison.Ordinal);
-        Assert.Contains("generators=(emit emit-values)", script, StringComparison.Ordinal);
-        Assert.Contains("for generator in \"${generators[@]}\"", script, StringComparison.Ordinal);
     }
 
     [Fact]

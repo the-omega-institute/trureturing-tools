@@ -56,7 +56,7 @@ internal static class PullRequestLeanChecks
         var changes = SemanticChanges(RawChangeSet.Create(ExpandReleasePaths(root, paths, baseRevision)));
         var needImports = changes.Paths.Any(path => Module(path.Value) is not null || FrozenStatePath.IsUnderRoot(path.Value));
         var raw = GitRepositorySnapshotReader.ReadCurrent(root, readContents: path =>
-            needImports && Module(path) is not null || path == ValuesKernelBindingValidator.RelativePath
+            needImports && Module(path) is not null
             || path == ReportProducerScope.InputManifest || path.StartsWith("Meta/", StringComparison.Ordinal)
             || path.StartsWith("Golden/Projection/", StringComparison.Ordinal));
         var snapshot = SnapshotDecoder.Decode(raw) switch
@@ -109,20 +109,10 @@ internal static class PullRequestLeanChecks
         targets.UnionWith(definitions.Values.SelectMany(static roots => roots));
         if (StatementProjectionReconciliation.IsAffectedBy(snapshot, changes))
             targets.UnionWith(StatementProjectionFixtureLoader.LoadStatements(root).Keys.Select(LeanImportClosure.ModuleName));
-        AddRuleEvidence(snapshot, paths, targets);
-        return new([.. targets.Order(StringComparer.Ordinal)], [.. programs.Order(StringComparer.Ordinal)],
-            selected.Paths, definitions);
-    }
-
-    internal static void AddRuleEvidence(RepositorySnapshot snapshot, ImmutableArray<string> paths, HashSet<string> targets)
-    {
-        if (paths.Any(path => path == ValuesKernelBindingValidator.RelativePath
-                || FrozenLedgerDeltaPredicate.IsEnvironmentInput(path))
-            && snapshot.TryGetFile(ValuesKernelBindingValidator.RelativePath, out var values))
-            targets.UnionWith(ValuesKernelBindingValidator.ModulePaths(values.Text)
-                .Where(snapshot.Files.ContainsKey).Select(LeanImportClosure.ModuleName));
         if (targets.Count > 0 && snapshot.TryGetFile(RepositoryRules.AxiomDebtPath, out var debt))
             targets.Add(LeanImportClosure.ModuleName(debt.Path));
+        return new([.. targets.Order(StringComparer.Ordinal)], [.. programs.Order(StringComparer.Ordinal)],
+            selected.Paths, definitions);
     }
 
     internal static void AddAffectedModules(RepositorySnapshot snapshot, HashSet<string> changed,

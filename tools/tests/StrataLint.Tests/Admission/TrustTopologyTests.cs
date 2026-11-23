@@ -51,7 +51,6 @@ public sealed class TrustTopologyTests
     {
         "Meta/BACKFILL.yaml",
         "Meta/FILEMAP.toml",
-        "Golden/values-kernels.toml",
         "tools/tests/StrataLint.Tests/Rules/TestFileMap.cs",
         "Library/queries.yaml",
     };
@@ -137,10 +136,10 @@ public sealed class TrustTopologyTests
     {
         var descriptors = RuleCatalog.Default.Descriptors;
 
-        Assert.Equal(28, descriptors.Length);
-        Assert.Equal(28, descriptors.Select(item => item.Id).Distinct().Count());
+        Assert.Equal(27, descriptors.Length);
+        Assert.Equal(27, descriptors.Select(item => item.Id).Distinct().Count());
         Assert.Equal(
-            Enumerable.Range(1, 23).Except([5, 16]).Select(RuleId.CreateKnown)
+            Enumerable.Range(1, 23).Except([5, 16, 18]).Select(RuleId.CreateKnown)
                 .Append(RuleId.CreateKnown(25))
                 .Append(RuleId.CreateKnown(26))
                 .Append(RuleId.CreateKnown(28))
