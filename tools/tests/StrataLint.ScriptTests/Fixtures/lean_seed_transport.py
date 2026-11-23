@@ -32,7 +32,7 @@ class ReleaseTransportCases(PartitionFixture):
               '{"modules":[],"schema":"stratalint-raw-lean-report-v3"}\n')
         write(self.bin / "make", '''#!/bin/sh
 printf "%s\\n" "$*" >> "$FAKE_BUILD_LOG"
-if [ "$1" = "lean" ] && [ "${FAKE_BUILD_EXIT:-0}" = "0" ] && [ "${FAKE_COMPILER_PRESERVE:-0}" != "1" ]; then
+if [ "$1" = "--build-release" ] && [ "${FAKE_BUILD_EXIT:-0}" = "0" ] && [ "${FAKE_COMPILER_PRESERVE:-0}" != "1" ]; then
     mkdir -p .lake/build/lib/lean/D5
     test -f .lake/build/lib/lean/Trureturing.olean || echo fixture > .lake/build/lib/lean/Trureturing.olean
     test -f .lake/build/lib/lean/D5/A.olean || printf locally-produced-olean > .lake/build/lib/lean/D5/A.olean
@@ -42,6 +42,8 @@ exit "${FAKE_BUILD_EXIT:-0}"
         write(self.bin / "gh", FAKE_GH)
         helper_dir = self.root / "tools/scripts/worktree"
         helper_dir.mkdir(parents=True, exist_ok=True)
+        # The transport fixture records the Release compiler invocation and its exit code.
+        write(helper_dir / "lean-cache-run.sh", '#!/bin/sh\nexec make "$@"\n')
         # Exercise the production shell entry point with its declared transport
         # dependencies in the fixture repository.
         for name in ("lean-cache-publish.sh", "cache_material.py", "lean_cache.py", "lean_cache_release.py", "lean_cache_release_io.py", "lean_cache_topology.py", "lean_actions.py",

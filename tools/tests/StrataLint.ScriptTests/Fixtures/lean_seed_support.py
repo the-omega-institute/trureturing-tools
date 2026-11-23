@@ -13,7 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[4]
 INPUT = ROOT / "tools/scripts/worktree/lean-cache-input.sh"
 REV = "0123456789abcdef0123456789abcdef01234567"
 OTHER = "f" * 40
-COMPILER_BUILD = "lean FULL_BUILD=1"
+COMPILER_BUILD = "--build-release"
 PUBLISH = ROOT / "tools/scripts/worktree/lean-cache-publish.sh"
 
 
