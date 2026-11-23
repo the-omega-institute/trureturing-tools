@@ -18,16 +18,26 @@ module_path = re.compile(r"(?:[A-Z][A-Za-z0-9_]*/)*[A-Z][A-Za-z0-9_]*\.lean")
 paths = []
 if state.is_symlink() or state.exists() and not state.is_dir():
     raise SystemExit(f"FROZEN_REFRESH_INVALID state root {state}")
-for entry in sorted(state.rglob("*")):
-    if entry.is_dir() and not entry.is_symlink():
-        continue
-    module = entry.relative_to(state).as_posix().removesuffix(".json")
-    if (entry.is_symlink() or not entry.is_file() or entry.suffix != ".json"
-            or not module_path.fullmatch(module)):
-        raise SystemExit(f"FROZEN_REFRESH_INVALID state path {entry}")
-    if not Path(module).is_file():
-        raise SystemExit(f"FROZEN_REFRESH_INVALID missing source {module}")
-    paths.append(module)
+
+def fail_walk(error):
+    raise SystemExit(f"FROZEN_REFRESH_INVALID {error}")
+
+if state.is_dir():
+    for directory, subdirectories, files in os.walk(state, onerror=fail_walk):
+        for name in subdirectories:
+            entry = Path(directory) / name
+            if entry.is_symlink():
+                raise SystemExit(f"FROZEN_REFRESH_INVALID state path {entry}")
+        for name in files:
+            entry = Path(directory) / name
+            module = entry.relative_to(state).as_posix().removesuffix(".json")
+            if (entry.is_symlink() or not entry.is_file() or entry.suffix != ".json"
+                    or not module_path.fullmatch(module)):
+                raise SystemExit(f"FROZEN_REFRESH_INVALID state path {entry}")
+            if not Path(module).is_file():
+                raise SystemExit(f"FROZEN_REFRESH_INVALID missing source {module}")
+            paths.append(module)
+paths.sort()
 if not paths:
     print("FROZEN_REFRESH_OK selectors=0")
     raise SystemExit(0)

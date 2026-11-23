@@ -12,7 +12,7 @@ public theorem typeOnly (h : Claim) : Claim := h
 public theorem axiomFree : ∀ (p : Prop), p → p := fun _ h => h
 
 -- True occurs in the type, while the imported private proof reaches Mathlib.
-public theorem mathlibProof : True := Exists.elim mathlibHelper (fun _ _ => True.intro)
+public theorem mathlibProof : True := mathlibHelper
 
 public theorem oneAxiom : True = True := propext Iff.rfl
 

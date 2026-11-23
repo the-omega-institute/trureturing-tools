@@ -8,6 +8,49 @@ The tools repository builds the CLI and runs its unit tests, integration fixture
 compiler rejection checks, and selftests before it packages a release. Tests that
 need a consumer checkout install the candidate archive in a pinned trureturing fixture.
 
+### Frozen declaration measurements
+
+Each declaration in a frozen state record can carry two optional arrays.
+`libraries` lists the sorted roots of libraries reached by that declaration.
+An omitted array means unmeasured, and `[]` records an empty measured set.
+`axioms` lists a measured proper subset of the standard Lean axioms
+`Classical.choice`, `Quot.sound`, and `propext`. Omission gives the full set
+as an upper bound. An explicit `[]` records a verified zero-axiom closure.
+
+The Inspector follows compiled type and value dependencies, including private
+proofs and opaque bodies. The library walk also follows kernel projection owners,
+the `Nat` and `String` types of literals, constructors, and recursor reduction
+rules. It classifies each reached constant by the first component of its owning
+compiled module name. It walks through `D5`, `Reg`, and the `Trureturing`
+root module as local code and retains the foreign roots they reach. Other roots
+are visible, including `Init`, `Lean`, `Mathlib`, third-party roots, and
+`OmegaInit` and `OmegaMath` from the same Lake package. A module imported for
+elaboration contributes a library only when the compiled declaration reaches
+one of its constants. The library walk starts from the declaration itself.
+The axiom measurement uses the report's existing axiom closure semantics.
+
+A measured library set contained in `{OmegaInit, OmegaMath}` together with
+`axioms: []` is evidence for an axiom-free declaration with an Omega-only
+compiled dependency closure. The empty measured library set also satisfies
+that subset test. Strict module replay in an Omega-only import environment
+requires its own build and kernel check.
+
+`ledger-align --add MODULE --candidate-lean-report FILE` measures new members
+from Lean's prebuilt scoped artifacts. For existing members,
+`ledger-align --refresh-annotations --selector MODULE --candidate-lean-report FILE`
+requires the current declaration inventory and statement pin to match. The
+consumer Makefile can invoke `tools/scripts/agent/frozen-refresh.sh` with zero
+arguments from the repository root after installing its pinned tools release.
+The script refreshes existing members in batches of 32, skips byte-identical
+results, and exits on the first failure. Earlier successful batches remain
+valid and a rerun can resume by processing the same inventory. Consumer-local
+library sources participating in scoped reports belong in the consumer's
+`dependency_sources` selection, including `src/**/*.lean` for the Omega libraries.
+Ordinary validation continues to check inventory and pins while accepting aged
+or absent measurements. Legacy records encode to their original bytes.
+
+### Consumer verification
+
 The consumer owns its ordinary `ci-current.yml` workflow, its cache and Scribe
 publication workflows, and the selection contract in `Meta/ci-units.json`.
 Its `detect` job verifies the event commit and change range and selects FILEMAP

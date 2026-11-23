@@ -29,6 +29,27 @@ def run(*args, succeed=True):
     return result.stdout
 
 
+def check_independent_reader(directory, states, count):
+    checkout = directory / "reader"
+    checkout.mkdir()
+    git = ["git", "-C", checkout, "-c", "user.name=Fixture", "-c", "user.email=fixture@invalid"]
+    run(*git, "init", "--quiet")
+    run(*git, "commit", "--quiet", "--allow-empty", "-m", "base")
+    run(*git, "update-ref", "refs/remotes/origin/dev", "HEAD")
+    source = checkout / MODULE
+    source.parent.mkdir(parents=True)
+    shutil.copyfile(MODULE, source)
+    state = checkout / RECORD
+    state.parent.mkdir(parents=True)
+    reader = "tools/scripts/agent/deposit-evidence/facts.py"
+    for record in states:
+        state.write_bytes(record)
+        run(*git, "add", ".")
+        run(*git, "commit", "--quiet", "-m", "frozen state")
+        output = run("python3", "-B", reader, checkout)
+        assert f"Included declarations: {count}" in output
+
+
 def write_record(record):
     RECORD.write_text(json.dumps(record, separators=(",", ":")) + "\n", encoding="utf-8")
 
@@ -79,13 +100,15 @@ def exercise(directory):
     assert list(STATE.rglob("*.json")) == [RECORD]
 
     for index, row in enumerate(record["declarations"]):
-        row.pop("libraries")
-        if index % 2 == 0:
+        if index % 2 == 0 and row != rows["fullAxioms"]:
+            row.pop("libraries")
             row.pop("axioms", None)
         else:
+            row["libraries"] = ["Init"]
             row["axioms"] = ["propext"]
     write_record(record)
     run("dotnet", CLI, "ledger-frozen", "--target", MODULE)
+    check_independent_reader(directory, (deposited, RECORD.read_bytes()), len(rows))
     run(REFRESH)
     assert RECORD.read_bytes() == deposited
     timestamp = RECORD.stat().st_mtime_ns

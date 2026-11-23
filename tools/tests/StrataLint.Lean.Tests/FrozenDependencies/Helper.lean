@@ -4,9 +4,10 @@ public import OmegaMath.FrozenDependencyFixture
 
 namespace FrozenFixture
 
-private theorem hidden : Nat.Prime 2 := Nat.prime_two
+private theorem hidden : True :=
+  Exists.elim (show ∃ n : Nat, n.Prime from ⟨2, Nat.prime_two⟩) (fun _ _ => True.intro)
 
-public theorem mathlibHelper : ∃ n : Nat, n.Prime := ⟨2, hidden⟩
+public theorem mathlibHelper : True := hidden
 public theorem omegaHelper : Claim := claim
 
 end FrozenFixture

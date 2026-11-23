@@ -79,6 +79,7 @@ internal static class DagLedgerAlignWriter
                         throw new InvalidOperationException($"module {file.Path.Value} still imports retired registration {retired.Value}");
             }
             (measure ?? FrozenDependencyMeasurement.Attach)(root, measurementReports, planned);
+            using var writeGuard = FrozenStateWriter.AcquireWriteGuard(root);
             foreach (var (path, previous) in backups)
             {
                 var actual = FrozenStateWriter.ReadCurrentBytes(root, path);
