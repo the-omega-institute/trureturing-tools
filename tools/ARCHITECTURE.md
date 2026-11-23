@@ -21,18 +21,17 @@ The Inspector follows compiled type and value dependencies, including private
 proofs and opaque bodies. The library walk also follows kernel projection owners,
 the `Nat` and `String` types of literals, constructors, and recursor reduction
 rules. It classifies each reached constant by the first component of its owning
-compiled module name. It walks through `D5`, `Reg`, and the `Trureturing`
-root module as local code and retains the foreign roots they reach. Other roots
+compiled module name. It walks through the project roots `D5`, `Reg`, `Trureturing` and
+`OmegaChecks` as local code and retains the foreign roots they reach. Other roots
 are visible, including `Init`, `Lean`, `Mathlib`, third-party roots, and
 `OmegaInit` and `OmegaMath` from the same Lake package. A module imported for
 elaboration contributes a library only when the compiled declaration reaches
 one of its constants. The library walk starts from the declaration itself.
 The axiom measurement uses the report's existing axiom closure semantics.
 
-A measured library set contained in `{OmegaInit, OmegaMath}` together with
+A nonempty measured library set contained in `{OmegaInit, OmegaMath}` together with
 `axioms: []` is evidence for an axiom-free declaration with an Omega-only
-compiled dependency closure. The empty measured library set also satisfies
-that subset test. Strict module replay in an Omega-only import environment
+compiled dependency closure. An empty measured library set records a proof without a library root. Strict module replay in an Omega-only import environment
 requires its own build and kernel check.
 
 `ledger-align --add MODULE --candidate-lean-report FILE` measures new members

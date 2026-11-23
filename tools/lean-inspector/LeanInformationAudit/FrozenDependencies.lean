@@ -32,7 +32,7 @@ def collect (store : RawArtifacts.Store) (cache : IO.Ref CompiledAxioms.AxiomClo
     let some owner := store.owners.find? info.name
       | throw <| IO.userError s!"frozen.dependencies.missing_owner:{info.name}"
     let root := owner.getRoot
-    return if root == `D5 || root == `Reg || owner == `Trureturing then none else some root
+    return if root == `D5 || root == `Reg || root == `OmegaChecks || root == `Trureturing then none else some root
   ) cache constant
 
 end LeanInformationAudit.FrozenDependencies

@@ -58,7 +58,7 @@ def exercise(directory):
     lakefile = Path("lakefile.toml")
     libraries = {lib["name"] for lib in tomllib.loads(lakefile.read_text())["lean_lib"]}
     with lakefile.open("a", encoding="utf-8") as config:
-        for name in ("OmegaInit", "OmegaMath"):
+        for name in ("OmegaInit", "OmegaMath", "OmegaChecks"):
             if name not in libraries:
                 config.write(f'\n[[lean_lib]]\nname = "{name}"\nsrcDir = "src"\n')
     inputs = Path("lean-report-inputs.json")
@@ -70,6 +70,7 @@ def exercise(directory):
     files = {
         "Prelude.lean": Path("src/OmegaInit/FrozenDependencyFixture.lean"),
         "Bridge.lean": Path("src/OmegaMath/FrozenDependencyFixture.lean"),
+        "OmegaConsumer.lean": Path("src/OmegaChecks/FrozenDependencyFixture.lean"),
         "Helper.lean": MODULE.with_name("Helper.lean"),
         "Mixed.lean": MODULE,
     }
