@@ -108,7 +108,8 @@ def exercise(directory):
             row["axioms"] = ["propext"]
     write_record(record)
     run("dotnet", CLI, "ledger-frozen", "--target", MODULE)
-    check_independent_reader(directory, (deposited, RECORD.read_bytes()), len(rows))
+    with tempfile.TemporaryDirectory(prefix="frozen-reader-") as reader:
+        check_independent_reader(Path(reader), (deposited, RECORD.read_bytes()), len(rows))
     run(REFRESH)
     assert RECORD.read_bytes() == deposited
     timestamp = RECORD.stat().st_mtime_ns
