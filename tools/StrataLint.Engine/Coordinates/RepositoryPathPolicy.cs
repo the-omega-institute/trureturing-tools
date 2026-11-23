@@ -170,6 +170,7 @@ internal static partial class RepositoryPathPolicy
             or PublicationVerificationWorkflowPath
             or AnalysisFixturesWorkflowPath
             or ".github/CODEOWNERS"
+            || value.StartsWith("src/", StringComparison.Ordinal)
             || value.StartsWith("tools/", StringComparison.Ordinal)
             || FileMapDocuments.IsPolicyPath(value)
             || ProblemPoolPaths.IsCanonicalPath(value)
