@@ -236,15 +236,17 @@ public static class CanonicalDagWriter
 
     private static void AppendCodeSpan(StringBuilder builder, string text)
     {
-        var delimiterLength = 1;
-        var runLength = 0;
-        foreach (var character in text)
+        if (!text.Contains('`'))
         {
-            runLength = character == '`' ? runLength + 1 : 0;
-            delimiterLength = Math.Max(delimiterLength, runLength + 1);
+            builder.Append('`').Append(text).Append('`');
+            return;
         }
 
-        builder.Append('`', delimiterLength).Append(text).Append('`', delimiterLength);
+        // Character references keep arbitrary backtick runs and punctuation literal in GFM.
+        builder.Append("<code>");
+        foreach (var rune in text.EnumerateRunes())
+            builder.Append("&#").Append(rune.Value.ToString(CultureInfo.InvariantCulture)).Append(';');
+        builder.Append("</code>");
     }
 
     private static int MaxDepth(TruthDagProjection dag, ImmutableArray<TruthProjectionNode> nodes) =>
