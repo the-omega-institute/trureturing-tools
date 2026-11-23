@@ -72,6 +72,51 @@ public sealed class FrozenStateContractTests
         Assert.Equal($"{{\"statement_id\":\"{Pin}\",\"declarations\":[]}}\n", wire);
     }
 
+    [Fact]
+    public void LegacyAndMeasuredDeclarationsRoundTripWithDistinctEmptyAndOmittedSets()
+    {
+        var text = $"{{\"statement_id\":\"{Pin}\",\"declarations\":["
+            + "{\"declaration_name_key\":\"ns(n0,1:a)\",\"kind\":\"theorem\"},"
+            + "{\"declaration_name_key\":\"ns(n0,1:b)\",\"kind\":\"theorem\",\"libraries\":[],\"axioms\":[]},"
+            + "{\"declaration_name_key\":\"ns(n0,1:c)\",\"kind\":\"theorem\",\"libraries\":[\"Init\",\"Mathlib\"],\"axioms\":[\"propext\"]}]}\n";
+        var record = FrozenStateRecordLoader.Load(File(text));
+        Assert.Null(record.Declarations[0].Libraries);
+        Assert.Null(record.Declarations[0].Axioms);
+        Assert.Empty(record.Declarations[1].Libraries!.Value);
+        Assert.Empty(record.Declarations[1].Axioms!.Value);
+        Assert.Equal(Encoding.UTF8.GetBytes(text), FrozenStateRecord.Encode(record.StatementId, record.Declarations).ToArray());
+    }
+
+    [Theory]
+    [InlineData("\"libraries\":null")]
+    [InlineData("\"libraries\":[\"OmegaInit\",\"OmegaInit\"]")]
+    [InlineData("\"libraries\":[\"OmegaMath\",\"OmegaInit\"]")]
+    [InlineData("\"libraries\":[0]")]
+    [InlineData("\"axioms\":[\"Classical.choice\",\"Quot.sound\",\"propext\"]")]
+    [InlineData("\"axioms\":[\"sorryAx\"]")]
+    [InlineData("\"axioms\":[],\"libraries\":[]")]
+    public void RejectsNoncanonicalAnnotations(string optional)
+    {
+        var text = $"{{\"statement_id\":\"{Pin}\",\"declarations\":[{{\"declaration_name_key\":\"ns(n0,1:a)\",\"kind\":\"theorem\",{optional}}}]}}\n";
+        Assert.Throws<FormatException>(() => FrozenStateRecordLoader.Load(File(text)));
+    }
+
+    [Fact]
+    public void CurrentStateAllowsAgedMeasurements()
+    {
+        var fixture = new RuleFixture();
+        const string module = "D5/S0/Carrier/Probe.lean";
+        fixture.Files[module] = "theorem probe : True := by trivial\n";
+        var report = new LeanFileReport([], [new LeanDeclaration("probe", "theorem", "True", ["propext"])
+            { NameKey = "ns(n0,5:probe)" }]);
+        fixture.Reports[module] = report;
+        var pin = FrozenContentAddress.ComputeModuleStatementId(RepoPath.CreateKnown(module), report);
+        fixture.Files[Path] = Encoding.UTF8.GetString(FrozenStateRecord.Encode(pin,
+            [new("ns(n0,5:probe)", "theorem", ["Mathlib"], [])]).AsSpan());
+        Assert.Empty(RuleCatalog.Default.EvaluateSingle(RuleId.CreateKnown(8),
+            fixture.Build(RawChangeSet.Create([Path]))).Diagnostics);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

@@ -245,7 +245,24 @@ public sealed class LedgerAlignWriterTests
             RawLeanReportArtifact.WriteFile(fullReport, snapshot, report);
             Repository = new FakeRepositoryGateway(RawChangeSet.Create([]), raw, null);
         }
-        internal CommandResult Invoke(string[] arguments) => DagLedgerAlignWriter.Align(temporary.Path, Repository, arguments);
+        internal CommandResult Invoke(string[] arguments) => DagLedgerAlignWriter.Align(temporary.Path, Repository, arguments,
+            static (_, reports, records) =>
+            {
+                foreach (var (path, report) in reports)
+                {
+                    var axioms = report.Declarations.ToDictionary(static declaration => declaration.NameKey,
+                        static declaration => declaration.Axioms);
+                    var record = records[path];
+                    records[path] = record with
+                    {
+                        Declarations = record.Declarations.Select(declaration => declaration with
+                        {
+                            Libraries = [],
+                            Axioms = axioms[declaration.DeclarationNameKey],
+                        }).ToImmutableArray(),
+                    };
+                }
+            });
         internal CommandResult Align(params string[] options) =>
             Invoke(options.Any(static option => option is "--selector" or "--add")
                 ? [.. options, "--candidate-lean-report", ReportPath(scoped: true, options)] : options);

@@ -8,6 +8,7 @@ import Lean.Elab.Term
 import LeanInformationAudit.RawArtifacts
 import LeanInformationAudit.CompiledAxioms
 import LeanInformationAudit.ArtifactAssessment
+import LeanInformationAudit.FrozenDependencies
 
 namespace LeanInformationAudit.InspectorProducer
 
@@ -565,7 +566,43 @@ private unsafe def produceCompiled (reportOutput materialSpool : System.FilePath
   if let some path := generatedIndex then
     IO.FS.writeFile path (toJson (← generated.get).toArray).compress
 
+private unsafe def frozenDependencies (request destination : System.FilePath) : IO Unit := do
+  initSearchPath (← findSysroot)
+  let modules : Array String ← IO.ofExcept (Json.parse (← IO.FS.readFile request) >>= fromJson?)
+  let state ← IO.mkRef ({} : RawArtifacts.Store)
+  for name in modules do RawArtifacts.loadModule name.toName state
+  let store ← state.get
+  let shared ← IO.mkRef ({} : AxiomClosureState)
+  let report ← modules.mapM fun name => do
+    let target := name.toName
+    let data ← store.getModule target
+    let (current, generated, provenance) ←
+      if RawArtifacts.hasTypedInputs data then do
+        RawArtifacts.loadModule `LeanInformationAudit.TemplateEnrollment state
+        let (assessment, _) ← ArtifactAssessment.assess (← state.get) target
+        pure (assessment.store, assessment.generated.filter (·.2 == target) |>.map Prod.fst,
+          ← IO.mkRef ({} : AxiomClosureState))
+      else pure (store, #[], shared)
+    let axioms ← IO.mkRef ({ closure := current.metadata.axioms } : AxiomClosureState)
+    let names := data.constNames ++ generated.filter (!data.constNames.contains ·)
+    let rows ← names.filterMapM fun constant => do
+      if let .str _ "__information_registration_diagnostic" := constant then return none
+      let info ← RawArtifacts.getConstant current.constants.find? constant
+      unless includeInStatement constant info do return none
+      let libraries ← FrozenDependencies.collect current provenance constant
+      let actualAxioms ← collectAxiomsShared current.constants.find? axioms constant
+      let address := "sha256:" ++ Sha256.hex ("trureturing:statement:v1\x00" ++ encodeStatement info).toUTF8
+      return some <| Json.mkObj [
+        ("nameKey", toJson (encodeName constant)), ("kind", toJson (kindOf info)),
+        ("statementTypeAddress", toJson address),
+        ("libraries", toJson (libraries.map Name.toString)),
+        ("axioms", toJson (actualAxioms.map Name.toString))]
+    return Json.mkObj [("module", toJson name), ("declarations", toJson rows)]
+  IO.FS.writeFile destination (toJson report).compress
+
 unsafe def main (args : List String) : IO Unit := do
+  if let ["--frozen-dependencies-v1", request, destination] := args then
+    return ← frozenDependencies request destination
   let args ← match args with
     | ["--request-file", path] =>
         IO.ofExcept (Json.parse (← IO.FS.readFile path) >>= fromJson? (α := List String))
