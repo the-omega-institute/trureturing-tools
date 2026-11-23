@@ -5,6 +5,28 @@ namespace StrataLint.FileMap.Tests;
 
 public sealed partial class FileMapPolicyTests
 {
+    [Theory]
+    [InlineData("src/**/*.lean", "src/OmegaMath.lean")]
+    [InlineData("src/**/*.lean", "src/OmegaMath/Projective/Basic.lean")]
+    [InlineData("src/OmegaChecks/**/*.py", "src/OmegaChecks/Nested/check.py")]
+    [InlineData("src/**/*.md", "src/README.md")]
+    public void SourceFilesAcceptAUniqueFileMapGlob(string pattern, string value)
+    {
+        var policy = SyntheticPolicy(pattern);
+        Assert.Null(RepositoryPathPolicy.Validate(RepoPath.CreateKnown(value), policy.Policy));
+    }
+
+    [Theory]
+    [InlineData("src/**/*.lean", "src/OmegaMath/input.json", "matches=0")]
+    [InlineData("src-old/**/*.lean", "src-old/OmegaMath.lean", "unknown top-level artifact")]
+    public void SourceGlobAdmissionIsLimitedToRegisteredFilesUnderSrc(string pattern, string value, string reason)
+    {
+        var policy = SyntheticPolicy(pattern);
+        var issue = Assert.IsType<RepositoryPathIssue>(
+            RepositoryPathPolicy.Validate(RepoPath.CreateKnown(value), policy.Policy));
+        Assert.Contains(reason, issue.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ReportLicensesAreAdmittedByRepositoryPathPolicy()
     {
