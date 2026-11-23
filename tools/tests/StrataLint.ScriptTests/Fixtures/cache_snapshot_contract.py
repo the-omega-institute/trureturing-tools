@@ -762,11 +762,12 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
     def test_pr_looks_up_only_the_base_seed(self):
         own_ref = "refs/pull/42/merge"
         row = self.cache_row("123-1")
-        values, receipt, opened = self.lookup_keys([self.cache_page(), self.cache_page([row, self.cache_row("200-1", ref=own_ref)])],
-            GITHUB_EVENT_NAME="pull_request", GITHUB_REF=own_ref, GITHUB_BASE_REF="dev")
+        values, receipt, opened = self.lookup_keys(
+            [self.cache_page(), self.cache_page([row, self.cache_row("200-1", ref=own_ref)]), self.cache_page()],
+            GITHUB_EVENT_NAME="pull_request", GITHUB_REF=own_ref, GITHUB_BASE_REF="dev", GITHUB_HEAD_REF="feature")
         self.assertEqual(row["key"], values["project_restore_key"])
         self.assertEqual("refs/heads/dev", receipt["base_ref"])
-        self.assertEqual(2, opened.call_count)
+        self.assertEqual(3, opened.call_count)
 
     def test_pr_lookup_failure_does_not_mistake_an_unreadable_scope_for_an_empty_scope(self):
         opened = self.assert_lookup_fallback([OSError("unavailable PR listing")],
