@@ -54,10 +54,17 @@ def read_pin(revision):
     return data["sha"], json.loads(base64.b64decode(data["content"]))
 
 
+def artifact_fields(pin):
+    for key in ("previous_pin", "workflow_sha"):
+        if key in pin and (not isinstance(pin[key], str) or not re.fullmatch(SHA, pin[key])):
+            raise ValueError(f"Invalid {key} in consumer pin")
+    return {key: value for key, value in pin.items() if key not in {"previous_pin", "workflow_sha"}}
+
+
 def contains(repo, source, tip):
     return source == tip or api(repo, f"compare/{source}...{tip}?per_page=1")["merge_base_commit"]["sha"] == source
 
 
 def tools_dev_pull(pull):
     return (pull["base"]["ref"] == "dev" and pull["base"]["repo"]["full_name"] == TOOLS
-            and (pull["head"]["repo"] or {}).get("full_name") == TOOLS and not pull["draft"])
+            and not pull["draft"])

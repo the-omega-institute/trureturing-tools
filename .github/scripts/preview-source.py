@@ -16,7 +16,11 @@ def api(path):
 def source_head(source):
     pull = re.fullmatch(r"pr/([1-9][0-9]*)", source)
     if pull:
-        head = api(f"pulls/{pull[1]}")["head"]
+        pr = api(f"pulls/{pull[1]}")
+        if (pr["base"]["repo"]["id"] != int(os.environ["GITHUB_REPOSITORY_ID"])
+                or not pr["head"]["repo"]):
+            sys.exit("Expected a PR in the canonical tools repository")
+        head = pr["head"]
         return head["sha"], f"pr.{pull[1]}", head["ref"], head["repo"]["id"]
     ref = f"refs/heads/{source}"
     subprocess.run(["git", "check-ref-format", ref], check=True)
@@ -36,6 +40,44 @@ def attempt_artifact(run):
         return matches[0]["id"]
 
 
+def ci_jobs(workflow):
+    return json.loads(subprocess.check_output(
+        ["ruby", "-ryaml", "-rjson", "-e", "puts JSON.generate(YAML.safe_load(STDIN.read).fetch('jobs'))"],
+        input=workflow,
+    ))
+
+
+def ci_contract():
+    jobs = ci_jobs(Path(__file__).resolve().parents[1].joinpath("workflows/ci.yml").read_bytes())
+    required = {}
+    pending = ["package"]
+    while pending:
+        key = pending.pop()
+        if key not in required:
+            required[key] = jobs[key]
+            needs = jobs[key].get("needs", [])
+            pending.extend([needs] if isinstance(needs, str) else needs)
+    return required
+
+
+def verified_artifact(run, contract):
+    sha = run["head_sha"]
+    expected = set()
+    for key, job in contract.items():
+        matrix = job.get("strategy", {}).get("matrix")
+        if matrix:
+            if set(matrix) != {"shard"} or "${{ matrix.shard }}" not in job["name"]:
+                sys.exit("Unsupported matrix in the trusted tools CI contract")
+            expected.update(job["name"].replace("${{ matrix.shard }}", str(shard)) for shard in matrix["shard"])
+        else:
+            expected.add(job.get("name", key))
+    run_id, attempt = run["id"], run["run_attempt"]
+    jobs = api(f"actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")["jobs"]
+    succeeded = {job["name"] for job in jobs if job["conclusion"] == "success" and job["head_sha"] == sha}
+    if expected <= succeeded:
+        return attempt_artifact(run)
+
+
 def completed_dev_ci(event, repo_id):
     run = event["workflow_run"]
     if (event["action"] != "completed" or run["status"] != "completed" or run["conclusion"] != "success"
@@ -43,27 +85,26 @@ def completed_dev_ci(event, repo_id):
             or run["repository"]["id"] != repo_id or (run["head_repository"] or {}).get("id") != repo_id
             or run["workflow_id"] != api("actions/workflows/ci.yml")["id"]):
         sys.exit("Expected successful same-repository dev CI")
-    # The dev CI package job depends on verify and the complete consumer matrix.
-    artifact = attempt_artifact(run)
+    artifact = verified_artifact(run, ci_contract())
     if artifact is None:
         sys.exit("Expected one unexpired archive from the completed CI attempt")
     return run["head_sha"], artifact
 
 
-def tested_archive(sha, branch, repo_id):
+def tested_archive(sha, branch, repo_id, pull_number=None):
     runs = api(f"actions/workflows/ci.yml/runs?head_sha={sha}&status=success&per_page=100")
-    expected_jobs = {"verify", "package", *(f"Consumer fixture {i}" for i in range(4))}
+    contract = ci_contract()
     for run in runs["workflow_runs"]:
         if (run["event"] not in {"push", "pull_request", "workflow_dispatch"}
                 or run["head_sha"] != sha or run["head_branch"] != branch
-                or (run["head_repository"] or {}).get("id") != repo_id):
+                or (run["head_repository"] or {}).get("id") != repo_id
+                or run["status"] != "completed" or run["conclusion"] != "success"):
             continue
-        run_id = run["id"]
-        jobs = api(f"actions/runs/{run_id}/jobs?filter=latest&per_page=100")["jobs"]
-        succeeded = {job["name"] for job in jobs if job["conclusion"] == "success"}
-        if not expected_jobs <= succeeded:
+        if run["event"] == "pull_request" and pull_number and run["pull_requests"] and not any(
+                pull["number"] == pull_number
+                for pull in run["pull_requests"]):
             continue
-        artifact = attempt_artifact(run)
+        artifact = verified_artifact(run, contract)
         if artifact is not None:
             return artifact
     sys.exit(f"No successful tools CI archive for {branch} at {sha}. "
@@ -80,7 +121,8 @@ def main():
         tag = f"v{series}-dev.g{sha}"
     else:
         sha, channel, branch, repo_id = source_head(os.environ["SOURCE"])
-        artifact = tested_archive(sha, branch, repo_id)
+        pull_number = int(channel.removeprefix("pr.")) if channel.startswith("pr.") else None
+        artifact = tested_archive(sha, branch, repo_id, pull_number)
         tag = (f"v{series}-dev.g{sha}" if channel == "dev"
                else f"v{series}-{channel}.{os.environ['GITHUB_RUN_NUMBER']}.g{sha[:12]}")
     if not re.fullmatch(r"[0-9a-f]{40}", sha):

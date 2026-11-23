@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 from pin import REPOSITORY, release_pin
-from paired import BASE_TRAILER, CONSUMER, PR_PREVIEW, branch_tip, read_pin, tag_source
+from paired import BASE_TRAILER, CONSUMER, PR_PREVIEW, artifact_fields, branch_tip, read_pin, tag_source
 
 REPO_URL = f"https://github.com/{REPOSITORY}"
 PULLS = """
@@ -60,10 +60,7 @@ def source_pr(lockfile):
         pin = gh_json(f"repos/{CONSUMER}/contents/Meta/tools-release.json?ref={adoption}",
                       "-H", "Accept: application/vnd.github.raw+json")
         provenance = f"The [consumer dev lock](https://github.com/{CONSUMER}/blob/{adoption}/Meta/tools-release.json)"
-    if "workflow_sha" in pin:
-        workflow = pin.pop("workflow_sha")
-        if not isinstance(workflow, str) or not re.fullmatch("[0-9a-f]{40}", workflow):
-            raise ValueError("Invalid workflow_sha in consumer pin")
+    pin = artifact_fields(pin)
     tag = pin["version"]
     if release_pin(tag) != pin:
         raise ValueError(f"Consumer pin differs from the published {tag} archive")

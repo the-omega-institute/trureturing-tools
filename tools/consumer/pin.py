@@ -11,7 +11,10 @@ import re
 import subprocess
 import tempfile
 
-from paired import ACTIONS_BOT, ASSET, PR_PREVIEW, SHA, TOOLS as REPOSITORY, VERSION, api, base_trailers, tag_source
+from paired import (
+    ACTIONS_BOT, ASSET, CONSUMER, PIN, PR_PREVIEW, SHA, TOOLS as REPOSITORY, VERSION,
+    api, artifact_fields, base_trailers, branch_tip, read_pin, tag_source,
+)
 
 
 def release_pin(version, *, published_by=None):
@@ -46,13 +49,22 @@ def digest(path):
 
 def pin_release(root, version):
     pin = release_pin(version)
-    lockfile = root / "Meta/tools-release.json"
-    mode = lockfile.stat().st_mode & 0o777
+    lockfile = root / PIN
     cache = root / "build/tools-releases"
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / (pin["sha256"] + ".tar.gz")
     with (cache / "install.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        baseline, _ = read_pin(branch_tip(CONSUMER))
+        data = lockfile.read_bytes()
+        current = json.loads(data)
+        blob = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
+        same_release = artifact_fields(current) == pin
+        unchanged = same_release and blob == baseline
+        if (not unchanged and "source_sha" in pin
+                and base_trailers(pin["source_sha"]) != [baseline]):
+            raise ValueError("tools pin conflict: prepare, test and publish this tools PR against the current consumer pin")
+        unchanged |= same_release and current.get("previous_pin") == baseline
         if not target.is_file() or digest(target) != pin["sha256"]:
             with tempfile.TemporaryDirectory(dir=cache) as temporary:
                 subprocess.run(["gh", "release", "download", version, "--repo", REPOSITORY,
@@ -61,11 +73,12 @@ def pin_release(root, version):
                 if digest(download) != pin["sha256"]:
                     raise ValueError("downloaded tools archive differs from its published SHA-256")
                 download.replace(target)
-        with tempfile.TemporaryDirectory(dir=lockfile.parent) as temporary:
-            replacement = Path(temporary) / lockfile.name
-            replacement.write_text(json.dumps(pin, indent=2) + "\n")
-            os.chmod(replacement, mode)
-            replacement.replace(lockfile)
+        if not unchanged:
+            with tempfile.TemporaryDirectory(dir=lockfile.parent) as temporary:
+                replacement = Path(temporary) / lockfile.name
+                replacement.write_text(json.dumps(pin | {"previous_pin": baseline}, indent=2) + "\n")
+                os.chmod(replacement, lockfile.stat().st_mode & 0o777)
+                replacement.replace(lockfile)
     print(f"Pinned {version} (sha256 {pin['sha256']})")
     if "source_sha" in pin:
         print(f"Submit the pin to consumer dev first. After it merges, tools PR #{PR_PREVIEW.fullmatch(version)[1]} is eligible.")
