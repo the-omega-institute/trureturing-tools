@@ -51,6 +51,38 @@ public sealed class LedgerAlignWriterTests
         Assert.Equal(after, fixture.Image());
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OrdinaryAlignmentRetainsAnnotationsOnlyForTheSamePin(bool changesPin)
+    {
+        var baseline = Module("A");
+        var current = changesPin ? baseline with { StatementMaterial = "True = True" } : baseline;
+        using var fixture = new AlignFixture(current);
+        fixture.Install(BuildCatalog(baseline));
+        var path = fixture.StateFile("A");
+        var record = JsonNode.Parse(File.ReadAllText(path))!;
+        var declaration = record["declarations"]![0]!;
+        declaration["libraries"] = new JsonArray("Init");
+        declaration["axioms"] = new JsonArray("propext");
+        var annotated = record.ToJsonString() + "\n";
+        File.WriteAllText(path, annotated);
+
+        var result = fixture.Align("--selector", PathFor("A"));
+
+        Assert.True(result.Success, result.Error);
+        if (changesPin)
+        {
+            var expected = Assert.Single(StateFiles(BuildCatalog(current)));
+            Assert.Equal(expected.RawBytes.AsSpan().ToArray(), File.ReadAllBytes(path));
+        }
+        else
+        {
+            Assert.Equal(annotated, File.ReadAllText(path));
+            Assert.Contains("changed=0", result.Output, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void DifferentModulesHaveDisjointWriteSets()
     {
@@ -128,8 +160,32 @@ public sealed class LedgerAlignWriterTests
         Assert.Contains("added=1", result.Output, StringComparison.Ordinal);
         var expected = StateFiles(BuildCatalog(a, b, c)).Single(file => file.Path ==
             FrozenStatePath.FromModulePath(RepoPathFor("A")));
-        Assert.Equal(expected.RawBytes.ToArray(), File.ReadAllBytes(fixture.StateFile("A")));
+        var original = FrozenStateRecordLoader.Load(expected);
+        var bytes = File.ReadAllBytes(fixture.StateFile("A")).ToImmutableArray();
+        var measured = FrozenStateRecordLoader.Load(new(expected.Path, bytes, Encoding.UTF8.GetString(bytes.AsSpan())));
+        Assert.Equal(original.StatementId, measured.StatementId);
+        Assert.True(original.HasInventory(measured.Declarations));
+        Assert.All(measured.Declarations, declaration =>
+        {
+            Assert.Empty(declaration.Libraries!.Value);
+            Assert.Empty(declaration.Axioms!.Value);
+        });
         Assert.Equal(expected.Path.Value, Assert.Single(fixture.Image()).Key);
+    }
+
+    [Fact]
+    public void RefreshRejectsMissingMembershipAndChangedPinBeforeWriting()
+    {
+        var baseline = Module("A");
+        var changed = baseline with { StatementMaterial = "True = True" };
+        using var fixture = new AlignFixture(changed, Module("B"));
+        fixture.Install(BuildCatalog(baseline));
+        var before = fixture.Image();
+        var missing = fixture.Align("--refresh-annotations", "--selector", PathFor("B"));
+        Assert.Contains("not a registered frozen-state member", missing.Error, StringComparison.Ordinal);
+        var mismatch = fixture.Align("--refresh-annotations", "--selector", PathFor("A"));
+        Assert.Contains("pin or declaration inventory does not match", mismatch.Error, StringComparison.Ordinal);
+        Assert.Equal(before, fixture.Image());
     }
 
     [Theory]
@@ -245,7 +301,24 @@ public sealed class LedgerAlignWriterTests
             RawLeanReportArtifact.WriteFile(fullReport, snapshot, report);
             Repository = new FakeRepositoryGateway(RawChangeSet.Create([]), raw, null);
         }
-        internal CommandResult Invoke(string[] arguments) => DagLedgerAlignWriter.Align(temporary.Path, Repository, arguments);
+        internal CommandResult Invoke(string[] arguments) => DagLedgerAlignWriter.Align(temporary.Path, Repository, arguments,
+            static (_, reports, records) =>
+            {
+                foreach (var (path, report) in reports)
+                {
+                    var axioms = report.Declarations.ToDictionary(static declaration => declaration.NameKey,
+                        static declaration => declaration.Axioms);
+                    var record = records[path];
+                    records[path] = record with
+                    {
+                        Declarations = record.Declarations.Select(declaration => declaration with
+                        {
+                            Libraries = [],
+                            Axioms = axioms[declaration.DeclarationNameKey],
+                        }).ToImmutableArray(),
+                    };
+                }
+            });
         internal CommandResult Align(params string[] options) =>
             Invoke(options.Any(static option => option is "--selector" or "--add")
                 ? [.. options, "--candidate-lean-report", ReportPath(scoped: true, options)] : options);

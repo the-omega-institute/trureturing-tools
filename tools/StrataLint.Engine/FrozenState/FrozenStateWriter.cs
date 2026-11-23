@@ -4,6 +4,13 @@ namespace StrataLint.Engine;
 
 internal static class FrozenStateWriter
 {
+    internal static FileStream AcquireWriteGuard(string root)
+    {
+        var directory = Directory.CreateDirectory(Path.Combine(root, ".lake"));
+        return new FileStream(Path.Combine(directory.FullName, "frozen-state-write.lock"),
+            FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+    }
+
     internal static bool Write(string root, RepoPath modulePath, StatementId statementId, ImmutableArray<FrozenDeclaration> declarations = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);

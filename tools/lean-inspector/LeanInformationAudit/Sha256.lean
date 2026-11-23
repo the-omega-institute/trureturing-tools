@@ -45,11 +45,11 @@ private def smallSigma0 (word : UInt32) : UInt32 :=
 private def smallSigma1 (word : UInt32) : UInt32 :=
   rotateRight word 17 ^^^ rotateRight word 19 ^^^ (word >>> 10)
 
-private def padded (input : ByteArray) : ByteArray := Id.run do
-  let mut result := input.push 0x80
+private def padded (tail : ByteArray) (size : Nat) : ByteArray := Id.run do
+  let mut result := tail.push 0x80
   while result.size % 64 != 56 do
     result := result.push 0
-  let bitLength := UInt64.ofNat input.size * 8
+  let bitLength := UInt64.ofNat size * 8
   for shift in [0:8] do
     let amount := UInt64.ofNat ((7 - shift) * 8)
     result := result.push ((bitLength >>> amount).toUInt8)
@@ -94,12 +94,34 @@ private def compress (state words : Array UInt32) : Array UInt32 := Id.run do
   pure #[state[0]! + a, state[1]! + b, state[2]! + c, state[3]! + d,
     state[4]! + e, state[5]! + f, state[6]! + g, state[7]! + h]
 
-/-- Compute the SHA-256 digest bytes of an arbitrary byte array. -/
-def digest (input : ByteArray) : ByteArray := Id.run do
-  let input := padded input
-  let mut state := initial
+private def compressBlocks (state : Array UInt32) (input : ByteArray) : Array UInt32 := Id.run do
+  let mut state := state
   for block in [:input.size / 64] do
     state := compress state (schedule input (block * 64))
+  return state
+
+/-- Incremental SHA-256 with only the last partial block carried between writes. -/
+structure Context where
+  private words : Array UInt32 := initial
+  private tail : ByteArray := ByteArray.empty
+  private size : Nat := 0
+
+def Context.update (context : Context) (input : ByteArray) : Context := Id.run do
+  let mut offset := 0
+  let mut words := context.words
+  if !context.tail.isEmpty then
+    offset := min (64 - context.tail.size) input.size
+    let block := input.copySlice 0 context.tail context.tail.size offset false
+    if block.size < 64 then
+      return { context with tail := block, size := context.size + input.size }
+    words := compress words (schedule block 0)
+  let blocks := (input.size - offset) / 64
+  for block in [:blocks] do
+    words := compress words (schedule input (offset + block * 64))
+  return ⟨words, input.extract (offset + blocks * 64) input.size, context.size + input.size⟩
+
+def Context.digest (context : Context) : ByteArray := Id.run do
+  let state := compressBlocks context.words (padded context.tail context.size)
   let mut result := ByteArray.empty
   for word in state do
     result := result.push (word >>> 24).toUInt8
@@ -108,13 +130,20 @@ def digest (input : ByteArray) : ByteArray := Id.run do
     result := result.push word.toUInt8
   pure result
 
+/-- Compute the SHA-256 digest bytes of an arbitrary byte array. -/
+def digest (input : ByteArray) : ByteArray :=
+  (({} : Context).update input).digest
+
 private def hexDigit (value : Nat) : Char :=
   if value < 10 then Char.ofNat ('0'.toNat + value)
   else Char.ofNat ('a'.toNat + value - 10)
 
+def Context.hex (context : Context) : String :=
+  String.ofList <| context.digest.toList.flatMap fun byte =>
+    [hexDigit (byte.toNat / 16), hexDigit (byte.toNat % 16)]
+
 /-- Compute a 64-character lowercase hexadecimal SHA-256 digest. -/
 def hex (input : ByteArray) : String :=
-  String.ofList <| (digest input).toList.flatMap fun byte =>
-    [hexDigit (byte.toNat / 16), hexDigit (byte.toNat % 16)]
+  (({} : Context).update input).hex
 
 end LeanInformationAudit.Sha256

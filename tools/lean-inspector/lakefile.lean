@@ -475,6 +475,25 @@ script compileReportModules args do
     return mixModuleJobs (← modules.mapM (·.leanArts.fetch))
   return 0
 
+/-- Read dependencies while the prebuilt cache reader holds its guard. Lake
+checks the current target compiler artifacts and Inspector before use. -/
+script frozenDependencies args do
+  let [request, output] := args
+    | throw <| IO.userError "frozenDependencies requires request and output paths"
+  let names : Array String ← IO.ofExcept <| Lean.fromJson? (← readJson request)
+  let ws ← getWorkspace
+  let modules ← names.mapM fun name => do
+    let some mod := ws.findTargetModule? name.toName
+      | throw <| IO.userError s!"frozenDependencies: unknown Lean module {name}"
+    return mod
+  let exe ← runBuild (cfg := {outLv := .error, noBuild := true}) do
+    let exports ← modules.mapM (·.exportInfo.fetch)
+    return (← reportInspector.fetch).add (mixModuleJobs exports)
+  return ← IO.Process.spawn {
+    cmd := exe.toString, args := #["--frozen-dependencies-v1", request, output],
+    cwd := some (← repositoryDir ws.root), env := ws.augmentedEnvVars
+  } >>= (·.wait)
+
 private def collectNativeReports (pkg : Package) (config : Json) :
     FetchM (Job (Array ReportArtifact)) := do
   let reportState ← (← fetch <| pkg.facet `reportBatch).await

@@ -8,7 +8,14 @@ namespace StrataLint.Engine;
 
 internal sealed record FrozenDeclaration(
     [property: JsonPropertyName("declaration_name_key")] string DeclarationNameKey,
-    [property: JsonPropertyName("kind")] string Kind);
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("libraries"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ImmutableArray<string>? Libraries = null,
+    [property: JsonPropertyName("axioms"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    ImmutableArray<string>? Axioms = null)
+{
+    internal (string NameKey, string Kind) Identity => (DeclarationNameKey, Kind);
+}
 
 internal sealed record FrozenStateRecord(StatementId StatementId, ImmutableArray<FrozenDeclaration> Declarations)
 {
@@ -20,6 +27,10 @@ internal sealed record FrozenStateRecord(StatementId StatementId, ImmutableArray
 
     internal static FrozenStateRecord FromReport(RepoPath path, LeanFileReport report) => new(
         FrozenContentAddress.ComputeModuleStatementId(path, report), Project(report));
+
+    internal bool HasInventory(ImmutableArray<FrozenDeclaration> declarations) =>
+        Declarations.Select(static declaration => declaration.Identity)
+            .SequenceEqual(declarations.Select(static declaration => declaration.Identity));
 
     internal static ImmutableArray<byte> Encode(StatementId statementId,
         ImmutableArray<FrozenDeclaration> declarations = default)
@@ -41,6 +52,14 @@ internal sealed record FrozenStateRecord(StatementId StatementId, ImmutableArray
             if (!IsCanonicalNameKey(declaration.DeclarationNameKey)
                 || !TruthExportValidation.DeclarationKinds.Contains(declaration.Kind))
                 throw new FormatException("declarations must contain canonical declaration_name_key and report kind");
+            if (declaration.Libraries is { } libraries)
+                ValidateSet(libraries, "libraries");
+            if (declaration.Axioms is { } axioms)
+            {
+                ValidateSet(axioms, "axioms");
+                if (axioms.Length >= LeanAxiomFacts.StandardAxioms.Count || axioms.Any(axiom => !LeanAxiomFacts.IsStandard(axiom)))
+                    throw new FormatException("axioms must be a proper subset of the standard Lean axioms");
+            }
             if (previous is not null)
             {
                 var nameOrder = StringComparer.Ordinal.Compare(previous.DeclarationNameKey, declaration.DeclarationNameKey);
@@ -48,6 +67,19 @@ internal sealed record FrozenStateRecord(StatementId StatementId, ImmutableArray
                     throw new FormatException("declarations must be Ordinal sorted and unique by name key and kind");
             }
             previous = declaration;
+        }
+    }
+
+    private static void ValidateSet(ImmutableArray<string> values, string label)
+    {
+        if (values.IsDefault) throw new FormatException(label + " must be an array");
+        string? previous = null;
+        foreach (var value in values)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl)
+                || (previous is not null && StringComparer.Ordinal.Compare(previous, value) >= 0))
+                throw new FormatException(label + " must be an Ordinal sorted unique array of nonempty strings");
+            previous = value;
         }
     }
 
@@ -94,11 +126,12 @@ internal static class FrozenStateRecordLoader
             var declarations = ImmutableArray.CreateBuilder<FrozenDeclaration>();
             foreach (var item in array.EnumerateArray())
             {
-                RequireKeys(item, ["declaration_name_key", "kind"], "declaration");
+                RequireKeys(item, ["declaration_name_key", "kind"], "declaration", ["libraries", "axioms"]);
                 if (item.GetProperty("declaration_name_key").ValueKind is not JsonValueKind.String
                     || item.GetProperty("kind").ValueKind is not JsonValueKind.String)
                     throw new FormatException("declaration fields must be strings");
-                declarations.Add(new(item.GetProperty("declaration_name_key").GetString()!, item.GetProperty("kind").GetString()!));
+                declarations.Add(new(item.GetProperty("declaration_name_key").GetString()!, item.GetProperty("kind").GetString()!,
+                    OptionalSet(item, "libraries"), OptionalSet(item, "axioms")));
             }
             var record = new FrozenStateRecord(StatementId.Create(value), declarations.ToImmutable());
             if (!bytes.SequenceEqual(FrozenStateRecord.Encode(record.StatementId, record.Declarations).AsSpan()))
@@ -111,14 +144,26 @@ internal static class FrozenStateRecordLoader
         }
     }
 
-    private static void RequireKeys(JsonElement element, string[] keys, string label)
+    private static ImmutableArray<string>? OptionalSet(JsonElement element, string key)
+    {
+        if (!element.TryGetProperty(key, out var value)) return null;
+        if (value.ValueKind != JsonValueKind.Array)
+            throw new FormatException(key + " must be an array");
+        return value.EnumerateArray().Select(item => item.ValueKind == JsonValueKind.String
+            ? item.GetString()! : throw new FormatException(key + " must contain strings")).ToImmutableArray();
+    }
+
+    private static void RequireKeys(JsonElement element, string[] keys, string label, string[]? optional = null)
     {
         if (element.ValueKind is not JsonValueKind.Object)
             throw new FormatException(label + " must be a JSON object");
         var properties = element.EnumerateObject().Select(static property => property.Name).ToArray();
-        if (properties.Length != keys.Length || properties.Distinct(StringComparer.Ordinal).Count() != keys.Length
-            || !properties.ToHashSet(StringComparer.Ordinal).SetEquals(keys))
-            throw new FormatException(label + " keys must be exactly {" + string.Join(", ", keys) + "}");
+        var present = properties.ToHashSet(StringComparer.Ordinal);
+        if (present.Count != properties.Length || !keys.All(present.Contains)
+            || !present.IsSubsetOf(keys.Concat(optional ?? [])))
+            throw new FormatException(optional is null
+                ? label + " keys must be exactly {" + string.Join(", ", keys) + "}"
+                : label + " has missing, duplicate, or unexpected keys");
     }
 }
 
