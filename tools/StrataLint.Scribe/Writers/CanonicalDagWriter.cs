@@ -1,7 +1,9 @@
 using System.Collections.Immutable;
 using System.Globalization;
+using System.Net;
 using System.Text;
 using StrataLint.Engine;
+using Trureturing.Truth;
 
 namespace StrataLint.Scribe;
 
@@ -19,7 +21,9 @@ public static class CanonicalDagWriter
 {
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
-    public static ImmutableArray<byte> Write(TruthDagProjection dag)
+    public static ImmutableArray<byte> Write(TruthDagProjection dag) => Write(dag, null);
+
+    internal static ImmutableArray<byte> Write(TruthDagProjection dag, TruthGraphSection? graph)
     {
         ArgumentNullException.ThrowIfNull(dag);
 
@@ -32,7 +36,10 @@ public static class CanonicalDagWriter
         AppendPreamble(builder, dag, nodes);
         AppendGraph(builder, dag, nodes, identifiers);
         AppendBlockers(builder, dag);
-        AppendNodesByDepth(builder, dag, nodes);
+        var markedDeclarations = graph?.Nodes.Where(static node => node.OmegaOnlyAxiomFreeDeclarations is not null)
+            .ToDictionary(static node => node.RepoPath, static node => node.OmegaOnlyAxiomFreeDeclarations!.Value,
+                StringComparer.Ordinal);
+        AppendNodesByDepth(builder, dag, nodes, markedDeclarations);
         return ImmutableArray.CreateRange(StrictUtf8.GetBytes(builder.ToString()));
     }
 
@@ -130,7 +137,8 @@ public static class CanonicalDagWriter
     private static void AppendNodesByDepth(
         StringBuilder builder,
         TruthDagProjection dag,
-        ImmutableArray<TruthProjectionNode> nodes)
+        ImmutableArray<TruthProjectionNode> nodes,
+        IReadOnlyDictionary<string, ImmutableArray<TruthGraphDeclaration>>? markedDeclarations)
     {
         builder.Append("## Nodes by depth\n\n");
         if (nodes.IsEmpty)
@@ -156,6 +164,17 @@ public static class CanonicalDagWriter
                     .Append(" — ")
                     .Append(node.Gid is null ? "no GID" : "`" + node.Gid.Value + "`")
                     .Append('\n');
+                if (markedDeclarations is not null && markedDeclarations.TryGetValue(node.RepoPath.Value, out var declarations))
+                {
+                    foreach (var declaration in declarations)
+                    {
+                        var name = CanonicalLeanNameDecoder.DecodePrefix(declaration.DeclarationNameKey, 0, out _);
+                        builder.Append("  - <code>")
+                            .Append(WebUtility.HtmlEncode(name).Replace("\r", "&#13;", StringComparison.Ordinal)
+                                .Replace("\n", "&#10;", StringComparison.Ordinal))
+                            .Append("</code> (").Append(declaration.Kind).Append(") 「仅 Omega · 零公理」\n");
+                    }
+                }
             }
 
             builder.Append('\n');

@@ -26,14 +26,7 @@ public static class TruthGraphJsonWriter
             },
             truth = new
             {
-                nodes = model.Truth.Nodes.Select(static node => new
-                {
-                    repo_path = node.RepoPath,
-                    gid = node.Gid,
-                    state = node.State,
-                    module_name = node.ModuleName,
-                    depth = node.Depth,
-                }),
+                nodes = model.Truth.Nodes,
                 edges = model.Truth.Edges.Select(static edge => new
                 {
                     dependency = edge.Dependency,
@@ -204,13 +197,29 @@ public static class TruthGraphJsonReader
 
     private static TruthGraphNode ReadNode(JsonElement element)
     {
-        RequireProperties(element, ["depth", "gid", "module_name", "repo_path", "state"], "truth node");
+        const string marker = "omega_only_axiom_free_declarations";
+        RequireProperties(element, ["depth", "gid", "module_name", "repo_path", "state"], "truth node", marker);
         return new TruthGraphNode(
             String(element, "repo_path"),
             NullableString(element, "gid"),
             String(element, "state"),
             NullableString(element, "module_name"),
-            Integer(element, "depth"));
+            Integer(element, "depth"))
+        {
+            OmegaOnlyAxiomFreeDeclarations = element.TryGetProperty(marker, out _)
+                ? Array(element, marker).EnumerateArray().Select(ReadDeclaration).ToImmutableArray()
+                : null,
+        };
+    }
+
+    private static TruthGraphDeclaration ReadDeclaration(JsonElement element)
+    {
+        RequireProperties(element, ["declaration_name_key", "kind", "statement_id"], "truth declaration");
+        var declaration = new TruthGraphDeclaration(
+            String(element, "declaration_name_key"), String(element, "kind"), String(element, "statement_id"));
+        TruthExportValidation.RequireKind(declaration.Kind);
+        TruthExportValidation.RequireSha256Id(declaration.StatementId, "statement_id");
+        return declaration;
     }
 
     private static TruthGraphEdge ReadEdge(JsonElement element)
@@ -338,6 +347,14 @@ public static class TruthGraphJsonReader
 
         foreach (var node in model.Truth.Nodes)
         {
+            if (node.OmegaOnlyAxiomFreeDeclarations is { } declarations)
+            {
+                if (declarations.IsEmpty || node.State != "closed")
+                    throw new FormatException("Truth graph declaration markers require a nonempty list on a closed node.");
+                RequireStrictOrder(declarations.Select(static declaration => declaration.DeclarationNameKey
+                    + "\0" + declaration.StatementId), "declaration markers");
+            }
+
             var dependencies = model.Truth.Edges.Where(edge => edge.Dependent == node.RepoPath).ToArray();
             var expected = dependencies.Length == 0
                 ? 0
@@ -404,7 +421,8 @@ public static class TruthGraphJsonReader
             ? result
             : throw new FormatException($"Truth graph {name} must be a non-negative integer.");
 
-    private static void RequireProperties(JsonElement element, IReadOnlyCollection<string> expected, string context)
+    private static void RequireProperties(JsonElement element, IReadOnlyCollection<string> expected, string context,
+        string? optional = null)
     {
         if (element.ValueKind != JsonValueKind.Object)
         {
@@ -412,6 +430,8 @@ public static class TruthGraphJsonReader
         }
 
         var actual = element.EnumerateObject().Select(static property => property.Name).ToArray();
+        if (optional is not null && actual.Count(name => name == optional) == 1)
+            actual = actual.Where(name => name != optional).ToArray();
         if (actual.Length != expected.Count
             || !actual.Order(StringComparer.Ordinal).SequenceEqual(expected.Order(StringComparer.Ordinal)))
         {

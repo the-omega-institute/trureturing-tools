@@ -56,6 +56,17 @@ Ordinary validation continues to check inventory and pins while accepting aged
 or absent measurements. Ordinary alignment clears annotations when a statement
 pin changes. Legacy records encode to their original bytes.
 
+Truth Release copies the frozen arrays when the module statement pin and the
+declaration's name key and kind match the current compiled statement inventory.
+The export omits unavailable arrays and adds `omega_only_axiom_free: true` only
+for declarations with a nonempty Omega-only library set and explicit `axioms: []`.
+These annotations describe the frozen measurement. The current node axiom closure
+and module-import graph remain independent. In `truth-graph.v1.json`, a node's
+optional `omega_only_axiom_free_declarations` list carries each qualifying
+declaration's name key, kind, and statement ID for presentation. Bundle
+verification checks the graph list against Truth Export, and `DAG.md` displays
+「仅 Omega · 零公理」 alongside each qualifying declaration's Lean name.
+
 ### Consumer verification
 
 The consumer owns its ordinary `ci-current.yml` workflow, its cache and Scribe
