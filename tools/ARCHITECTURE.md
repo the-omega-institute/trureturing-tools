@@ -20,16 +20,20 @@ as an upper bound. An explicit `[]` records a verified zero-axiom closure.
 The Inspector follows compiled type and value dependencies, including private
 proofs and opaque bodies. The library walk also follows kernel projection owners,
 the `Nat` and `String` types of literals, constructors, and recursor reduction
-rules. It classifies each reached constant by the first component of its owning
-compiled module name. It walks through the project roots `D5`, `Reg`, `Trureturing` and
+rules. It classifies each reached constant by the module that supplied the selected
+private kernel entry, using the first component of that module's name. It walks
+through the project roots `D5`, `Reg`, `Trureturing` and
 `OmegaChecks` as local code and retains the foreign roots they reach. Other roots
 are visible, including `Init`, `Lean`, `Mathlib`, third-party roots, and
 `OmegaInit` and `OmegaMath` from the same Lake package. A module imported for
 elaboration contributes a library only when the compiled declaration reaches
 one of its constants. The library walk starts from the declaration itself.
-The Inspector loads each target in its own import closure. The measurement
-checks the compiled statement address and axiom set against every declaration
-in the report, including hidden declarations used to determine `Closed`.
+The Inspector loads each target in its own import closure. It collects actual
+axioms from the selected kernel entries. Compatible duplicate theorems can make
+these axioms differ from the compiler's name-keyed export summaries. The
+measurement checks the compiled statement address and axiom set against every
+declaration in the report, including hidden declarations used to determine `Closed`,
+and rejects any disagreement.
 Library sets are measured for the included declarations.
 
 A nonempty measured library set contained in `{OmegaInit, OmegaMath}` together with

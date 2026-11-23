@@ -589,7 +589,9 @@ private def statementAddress (info : ConstantInfo) : IO String := do
       let (assessment, _) ← ArtifactAssessment.assess (← state.get) target
       pure (assessment.store, assessment.generated.filter (·.2 == target) |>.map Prod.fst)
     else pure (store, #[])
-  let axioms ← IO.mkRef ({ closure := current.metadata.axioms } : AxiomClosureState)
+  -- Export summaries can describe a different proof of an imported theorem,
+  -- including through declarations that used that theorem when exporting.
+  let axioms ← IO.mkRef ({} : AxiomClosureState)
   let provenance ← IO.mkRef ({} : AxiomClosureState)
   let names := data.constNames ++ generated.filter (!data.constNames.contains ·)
   out.putStr ("{\"module\":" ++ (toJson name).compress ++ ",\"declarations\":[")

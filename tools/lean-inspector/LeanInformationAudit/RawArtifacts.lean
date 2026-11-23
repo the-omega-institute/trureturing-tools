@@ -12,6 +12,9 @@ structure Store where
   modules : NameMap ModuleData := {}
   constants : SMap Name ConstantInfo := {}
   owners : SMap Name Name := {}
+  -- Like Lean's module index, `owners` records the first import. A compatible
+  -- later declaration can replace the term without changing that index.
+  selectedOwnerOverrides : NameMap Name := {}
   moduleOrder : Array Name := #[]
   moduleIndices : Std.TreeMap Name Nat Name.quickCmp := {}
   protectedModules : Std.TreeMap Name Bool Name.quickCmp := {}
@@ -23,6 +26,16 @@ structure Store where
 in Lean's existing persistent hash stage. No Environment is constructed. -/
 def Store.fork (base : Store) : Store :=
   { base with constants := base.constants.switch, owners := base.owners.switch, regions := #[] }
+
+def Store.selectedOwner? (store : Store) (name : Name) : Option Name :=
+  (store.selectedOwnerOverrides.find? name).orElse fun _ => store.owners.find? name
+
+/-- Assessment can replace compiled entries with generated report declarations. -/
+def Store.insertGenerated (store : Store) (owner : Name) (info : ConstantInfo) : Store :=
+  { store with
+    constants := store.constants.insert info.name info
+    owners := store.owners.insert info.name owner
+    selectedOwnerOverrides := store.selectedOwnerOverrides.erase info.name }
 
 def mapSize {α : Type} (map : SMap Name α) : Nat :=
   map.map₂.foldl (fun count name _ => if map.map₁.contains name then count else count + 1) map.map₁.size
@@ -174,10 +187,15 @@ unsafe def loadModule (name : Name) (store : IO.Ref Store) : IO Unit := do
   let (data, regions) ← readOwn name
   store.modify fun s => { s with regions := s.regions ++ regions }
   for item in data.imports do loadModule item.module store
-  let mut constants ← store.modifyGet fun s => (s.constants, { s with constants := {} })
+  let (constants, overrides) ← store.modifyGet fun s =>
+    ((s.constants, s.selectedOwnerOverrides), { s with constants := {}, selectedOwnerOverrides := {} })
+  let mut constants := constants
+  let mut overrides := overrides
   for info in data.constants do
     if let some previous := constants.find? info.name then
-      if subsumes constants info previous then constants := constants.insert info.name info
+      if subsumes constants info previous then
+        constants := constants.insert info.name info
+        overrides := overrides.insert info.name name
       else unless subsumes constants previous info do
         throw <| IO.userError s!"raw.conflicting_constant:{name}:{info.name}"
     else constants := constants.insert info.name info
@@ -185,6 +203,7 @@ unsafe def loadModule (name : Name) (store : IO.Ref Store) : IO Unit := do
     let moduleIndices := s.moduleIndices.insert name s.moduleOrder.size
     { s with
     constants := constants
+    selectedOwnerOverrides := overrides
     owners := data.constNames.foldl (fun owners constant => if owners.contains constant then owners else owners.insert constant name) s.owners
     modules := s.modules.insert name data
     moduleIndices

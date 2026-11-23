@@ -58,18 +58,42 @@ def write_record(record):
 
 def check_duplicate_theorems(directory):
     direct, classical = "DuplicateDirect", "DuplicateClassical"
-    for name, proof in ((direct, "fun _ h => h"),
-                        (classical, "Classical.choice ⟨fun _ h => h⟩")):
-        source = MODULE.with_name(name + ".lean")
-        source.write_text(f"module\n\npublic theorem frozenDuplicate : ∀ (p : Prop), p → p := {proof}\n",
+    omega_init = "OmegaInit.FrozenDuplicateOwner"
+    omega_math = "OmegaMath.FrozenDuplicateOwner"
+    proposition = "∀ (p : Prop), p → p"
+
+    def target(name):
+        return ".".join(MODULE.with_name(name).with_suffix("").parts)
+
+    def write_theorem(source, theorem, proof):
+        source.write_text(f"module\n\npublic theorem {theorem} : {proposition} := {proof}\n",
                           encoding="utf-8")
-        run("python3", "-B", INSPECTOR, "prepare", "--targets", ".".join(source.with_suffix("").parts))
+
+    write_theorem(MODULE.with_name(direct + ".lean"), "frozenDuplicate", "fun _ h => h")
+    write_theorem(MODULE.with_name(classical + ".lean"), "frozenDuplicate",
+                  "Classical.choice ⟨fun _ h => h⟩")
+    write_theorem(Path("src/OmegaInit/FrozenDuplicateOwner.lean"), "frozenDuplicateOwner", "fun _ h => h")
+    write_theorem(Path("src/OmegaMath/FrozenDuplicateOwner.lean"), "frozenDuplicateOwner",
+                  "fun p h => (fun (_ : Prop) => h) p")
+
+    for name, first, last in (("MergedForward", direct, classical), ("MergedReverse", classical, direct)):
+        owners = (omega_init, omega_math) if first == direct else (omega_math, omega_init)
+        source = MODULE.with_name(name + ".lean")
+        # Import the compiled theorems directly. Their exported axiom forms
+        # have a variable-headed proposition and fail Lean's cheap Prop check.
+        source.write_text(
+            f"module\nimport all {target(first)}\nimport all {target(last)}\n"
+            + "".join(f"import all {owner}\n" for owner in owners)
+            + f"\npublic opaque frozenAxioms : {proposition} := frozenDuplicate\n"
+            + f"public theorem frozenOwner : {proposition} := frozenDuplicateOwner\n", encoding="utf-8")
+    targets = (direct, classical, "MergedForward", "MergedReverse")
+    run("python3", "-B", INSPECTOR, "prepare", "--targets", " ".join(map(target, targets)))
 
     request = directory / "request.json"
     response = directory / "response.json"
 
     def measure(*names):
-        modules = [".".join(MODULE.with_name(name).with_suffix("").parts) for name in names]
+        modules = [target(name) for name in names]
         request.write_text(json.dumps(modules), encoding="utf-8")
         run(MEASURE, request, response)
         rows = json.loads(response.read_bytes())
@@ -85,6 +109,30 @@ def check_duplicate_theorems(directory):
     assert b["libraries"] == ["Init"] and b["axioms"] == ["Classical.choice"], b
     assert measure(direct, classical) == [direct_row, classical_row]
     assert measure(classical, direct) == [classical_row, direct_row]
+
+    merged = measure("MergedForward", "MergedReverse")
+    expected = ((b, "OmegaMath", []), (a, "OmegaInit", ["Classical.choice"]))
+    for row, (chosen, owner, report_axioms) in zip(merged, expected, strict=True):
+        declarations = {d["nameKey"]: d for d in row["declarations"]}
+        axioms = declarations["ns(n0,12:frozenAxioms)"]
+        provenance = declarations["ns(n0,11:frozenOwner)"]
+        assert axioms["kind"] == "opaque" and axioms["includeInStatement"], axioms
+        assert axioms["axioms"] == chosen["axioms"] and axioms["libraries"] == chosen["libraries"], axioms
+        assert provenance["libraries"] == [owner] and provenance["axioms"] == [], provenance
+
+        module = row["module"]
+        source = Path(module.replace(".", "/") + ".lean")
+        report = directory / (source.stem + ".json")
+        run("bash", "tools/scripts/report/lean-report-scoped.sh", "--targets", module, "--output", report)
+        compiled = json.loads(report.read_bytes())
+        report_module, = [m for m in compiled["modules"] if m["module"] == module]
+        report_row, = [d for d in report_module["declarations"] if d["name_key"] == axioms["nameKey"]]
+        assert report_row["axioms"] == report_axioms, report_row
+        output = run("dotnet", CLI, "ledger-align", "--add", source,
+                     "--candidate-lean-report", report, succeed=False)
+        assert f"measured declaration does not match current report: {module}:{axioms['nameKey']}" in output
+        assert not (STATE / (str(source) + ".json")).exists()
+        assert list(STATE.rglob("*.json")) == [RECORD]
 
 
 def check_stale_hidden_axioms(report, deposited):
