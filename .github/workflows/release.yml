@@ -20,7 +20,7 @@ jobs:
     if: >-
       github.ref == 'refs/heads/dev' &&
       (github.event_name == 'workflow_dispatch' ||
-       (github.event.workflow_run.event == 'push' &&
+       ((github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_repository.id == github.event.repository.id))
     runs-on: ubuntu-24.04
