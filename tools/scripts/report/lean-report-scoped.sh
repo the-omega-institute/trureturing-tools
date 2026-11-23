@@ -19,5 +19,8 @@ done
   || { echo 'lean-report-scoped: explicit nonempty --targets are required' >&2; exit 2; }
 ARGS=("$COMMAND" --repository "$ROOT" --report "$OUTPUT" --targets "$TARGETS")
 [[ -z "$LOG_DIR" ]] || ARGS+=(--log-dir "$LOG_DIR")
+if [[ "$COMMAND" == prepare-and-produce ]]; then
+  exec python3 -B "$ROOT/tools/lean-inspector/scoped.py" "${ARGS[@]}"
+fi
 exec "$ROOT/tools/scripts/report/report-supervisor.sh" --role lean-producer --lean-slot -- \
   python3 -B "$ROOT/tools/lean-inspector/scoped.py" "${ARGS[@]}"

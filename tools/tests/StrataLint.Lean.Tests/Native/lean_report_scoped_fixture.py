@@ -166,7 +166,15 @@ class ScopedContracts(unittest.TestCase):
                 materials.canonical_json(producer.capture(self.root, self.scope)))
             (directory / 'logs' / 'utility.stdout.log').write_text('[]')
             self.fixture.write('D5/A.lean', 'def a := 3\n')
+        def supervise(command, **kwargs):
+            self.assertEqual(command[:4], [self.root.resolve() / 'tools/scripts/report/report-supervisor.sh',
+                                           '--role', 'lean-producer', '--lean-slot'])
+            prepared = Path(command[command.index('--prepared-directory') + 1])
+            self.assertTrue((prepared / 'prepared-inputs.json').is_file())
+            with patch.object(sys, 'argv', [str(arg) for arg in command[command.index('produce') - 1:]]):
+                producer.main()
         with patch.object(build_inputs, 'prepare_scope', side_effect=prepare), \
+                patch.object(subprocess, 'run', side_effect=supervise), \
                 patch.object(producer.Entry, 'phase', side_effect=AssertionError('scope was rediscovered')), \
                 patch.object(sys, 'argv', ['scoped.py', 'prepare-and-produce', '--repository', str(self.root),
                                          '--report', str(report), '--targets', 'D5.A']), \
