@@ -18,6 +18,7 @@ internal static class PullRequestLeanChecks
         if (LeanClosureValidator.IsReportLean(path)) return path[..^5].Replace('/', '.');
         if (!path.EndsWith(".lean", StringComparison.Ordinal) || path.EndsWith("/lakefile.lean", StringComparison.Ordinal))
             return null;
+        if (path.StartsWith("src/", StringComparison.Ordinal)) return path[4..^5].Replace('/', '.');
         var prefix = path.StartsWith(Inspector, StringComparison.Ordinal) ? Inspector : Interface;
         return path.StartsWith(prefix, StringComparison.Ordinal) ? path[prefix.Length..^5].Replace('/', '.') : null;
     }
@@ -26,7 +27,7 @@ internal static class PullRequestLeanChecks
     {
         var raw = GitRepositorySnapshotReader.ReadCurrent(root, readContents: path => Module(path) is not null
             || FrozenStatePath.IsUnderRoot(path) || path == ReportProducerScope.InputManifest,
-            pathspecs: ["D5", "Reg", "Trureturing.lean", Inspector, Interface, "Golden/Frozen/state",
+            pathspecs: ["D5", "Reg", "src", "Trureturing.lean", Inspector, Interface, "Golden/Frozen/state",
                 ReportProducerScope.InputManifest, ":(glob)Meta/*"]);
         return SnapshotDecoder.Decode(raw) switch
         {
