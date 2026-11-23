@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text.Json.Serialization;
 
 namespace Trureturing.Truth;
 
@@ -12,11 +13,21 @@ public sealed record TruthGraphProvenance(
 }
 
 public sealed record TruthGraphNode(
-    string RepoPath,
-    string? Gid,
-    string State,
-    string? ModuleName,
-    int Depth);
+    [property: JsonPropertyName("repo_path")] string RepoPath,
+    [property: JsonPropertyName("gid")] string? Gid,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("module_name")] string? ModuleName,
+    [property: JsonPropertyName("depth")] int Depth)
+{
+    [JsonPropertyName("omega_only_axiom_free_declarations"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ImmutableArray<TruthGraphDeclaration>? OmegaOnlyAxiomFreeDeclarations { get; init; }
+}
+
+/// A positive declaration marker anchored to the containing truth node and a truth-export statement.
+public sealed record TruthGraphDeclaration(
+    [property: JsonPropertyName("declaration_name_key")] string DeclarationNameKey,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("statement_id")] string StatementId);
 
 public sealed record TruthGraphEdge(string Dependency, string Dependent);
 

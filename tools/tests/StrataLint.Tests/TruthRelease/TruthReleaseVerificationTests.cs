@@ -226,6 +226,41 @@ public sealed class TruthReleaseVerificationTests
         AssertCompositionRejected(() => BuildBundle(truthExport: Utf8.GetBytes("{}")));
 
     [Fact]
+    public void RejectsACorrectlyHashedExportMarkerThatContradictsItsAnnotations()
+    {
+        var original = Utf8.GetString(TruthExportBytes(Commit, Tree));
+        var tampered = StructuredCanonicalWriter.WriteJson(original.Replace("\"declaration_name_key\":",
+            "\"libraries\": [\"OmegaMath\"], \"omega_only_axiom_free\": true, \"declaration_name_key\":",
+            StringComparison.Ordinal));
+        AssertCompositionRejected(() => BuildBundle(truthExport: tampered.ToArray()));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("sha256:2222222222222222222222222222222222222222222222222222222222222222")]
+    public void RejectsADigestBoundGraphWithMissingOrMismatchedDeclarationMarkers(string? statementId)
+    {
+        var export = TruthExportJsonReader.Read(TruthExportBytes(Commit, Tree));
+        var node = Assert.Single(export.Nodes);
+        var declaration = Assert.Single(node.Declarations) with
+        {
+            Libraries = ["OmegaMath"], Axioms = [], OmegaOnlyAxiomFree = true,
+        };
+        var exportBytes = TruthExportJsonWriter.Write(export with { Nodes = [node with { Declarations = [declaration] }] });
+        var graph = TruthGraphJsonReader.Read(MinimalTruthGraphBytes());
+        var graphNode = new TruthGraphNode(node.RepoPath, null, "closed", null, 0)
+        {
+            OmegaOnlyAxiomFreeDeclarations = statementId is null ? null
+                : [new TruthGraphDeclaration(declaration.DeclarationNameKey, declaration.Kind, statementId)],
+        };
+        var graphBytes = TruthGraphJsonWriter.Write(graph with
+        {
+            Truth = graph.Truth with { Nodes = [graphNode], StateCounts = new(1, 0, 0, 0) },
+        });
+        AssertCompositionRejected(() => BuildBundle(truthGraph: graphBytes.ToArray(), truthExport: exportBytes.ToArray()));
+    }
+
+    [Fact]
     public void RejectsAnExpectedDigestThatDoesNotMatchTheBundle()
     {
         var (directory, _) = BuildBundle();

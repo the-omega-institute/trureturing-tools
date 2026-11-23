@@ -77,6 +77,21 @@ public static class TruthGraphModelBuilder
             ["digestion"]);
     }
 
+    internal static TruthGraphExportModel WithDeclarationMarkers(TruthGraphExportModel graph, TruthExportModel export)
+    {
+        var byPath = export.Nodes.ToDictionary(static node => node.RepoPath, StringComparer.Ordinal);
+        var nodes = graph.Truth.Nodes.Select(node =>
+        {
+            if (!byPath.TryGetValue(node.RepoPath, out var exported)) return node;
+            var markers = exported.Declarations.Where(static declaration => declaration.OmegaOnlyAxiomFree is true)
+                .Select(static declaration => new TruthGraphDeclaration(
+                    declaration.DeclarationNameKey, declaration.Kind, declaration.StatementId))
+                .ToImmutableArray();
+            return markers.IsEmpty ? node : node with { OmegaOnlyAxiomFreeDeclarations = markers };
+        }).ToImmutableArray();
+        return graph with { Truth = graph.Truth with { Nodes = nodes } };
+    }
+
     private static string StateName(TruthState state) => state switch
     {
         TruthState.Closed => "closed",

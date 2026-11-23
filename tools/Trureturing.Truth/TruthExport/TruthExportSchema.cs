@@ -1,12 +1,24 @@
 using System.Collections.Immutable;
+using System.Text.Json.Serialization;
 
 namespace Trureturing.Truth;
 
 /// One declaration inside a proven node: its name key, kind, and content-addressed statement id.
 public sealed record TruthExportDeclaration(
-    string DeclarationNameKey,
-    string Kind,
-    string StatementId);
+    [property: JsonPropertyName("declaration_name_key")] string DeclarationNameKey,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("statement_id")] string StatementId)
+{
+    // Frozen observations at the recorded statement pin. Null means unmeasured or omitted.
+    [JsonPropertyName("libraries"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ImmutableArray<string>? Libraries { get; init; }
+
+    [JsonPropertyName("axioms"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ImmutableArray<string>? Axioms { get; init; }
+
+    [JsonPropertyName("omega_only_axiom_free"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? OmegaOnlyAxiomFree { get; init; }
+}
 
 /// One current Closed node projected to plain wire fields. <see cref="NodeAxiomClosure"/>
 /// is the node-level closure (the union over the node's declarations), distinct from any single

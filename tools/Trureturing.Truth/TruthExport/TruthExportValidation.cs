@@ -80,6 +80,11 @@ public static class TruthExportValidation
         }
     }
 
+    public static bool IsOmegaOnlyAxiomFree(ImmutableArray<string>? libraries, ImmutableArray<string>? axioms) =>
+        libraries is { IsDefaultOrEmpty: false } measuredLibraries
+        && axioms is { IsDefault: false, IsEmpty: true }
+        && measuredLibraries.All(static library => library is "OmegaInit" or "OmegaMath");
+
     internal static void RequireValidModel(TruthExportModel model)
     {
         ArgumentNullException.ThrowIfNull(model);
@@ -132,6 +137,19 @@ public static class TruthExportValidation
 
                 RequireSha256Id(declaration.StatementId, "statement_id");
                 RequireKind(declaration.Kind);
+                RequireAnnotation(declaration.Libraries, "libraries");
+                RequireAnnotation(declaration.Axioms, "axioms");
+                if (declaration.OmegaOnlyAxiomFree != (IsOmegaOnlyAxiomFree(declaration.Libraries, declaration.Axioms)
+                        ? true : (bool?)null))
+                {
+                    throw new FormatException("Truth export omega_only_axiom_free disagrees with its declaration annotations.");
+                }
+
+                if (node.FreezeStatus != "frozen" && (declaration.Libraries is not null || declaration.Axioms is not null))
+                {
+                    throw new FormatException("Truth export declaration annotations require frozen membership.");
+                }
+
                 if (previousDeclaration is not null
                     && CompareDeclarations(previousDeclaration, declaration) >= 0)
                 {
@@ -165,6 +183,15 @@ public static class TruthExportValidation
         }
 
         RequireAcyclic(model.Nodes);
+    }
+
+    private static void RequireAnnotation(ImmutableArray<string>? annotation, string field)
+    {
+        if (annotation is not { } values)
+            return;
+        if (values.IsDefault || values.Any(static value => string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl)))
+            throw new FormatException($"Truth export {field} must be an array of nonempty strings.");
+        RequireStrictOrder(values, field);
     }
 
     private static void RequireAcyclic(ImmutableArray<TruthExportNode> nodes)

@@ -23,12 +23,7 @@ public static class TruthExportJsonWriter
                 freeze_status = node.FreezeStatus,
                 frozen_node_id = node.FrozenNodeId,
                 node_axiom_closure = node.NodeAxiomClosure,
-                declarations = node.Declarations.Select(static declaration => new
-                {
-                    declaration_name_key = declaration.DeclarationNameKey,
-                    kind = declaration.Kind,
-                    statement_id = declaration.StatementId,
-                }),
+                declarations = node.Declarations,
                 prerequisite_frozen_node_ids = node.PrerequisiteFrozenNodeIds,
             }),
         });
@@ -123,12 +118,24 @@ public static class TruthExportJsonReader
         RequireProperties(
             element,
             ["declaration_name_key", "kind", "statement_id"],
-            "truth export declaration");
+            "truth export declaration",
+            ["libraries", "axioms", "omega_only_axiom_free"]);
+        var hasMarker = element.TryGetProperty("omega_only_axiom_free", out var marker);
+        if (hasMarker && marker.ValueKind != JsonValueKind.True)
+            throw new FormatException("Truth export omega_only_axiom_free must be true when present.");
         return new TruthExportDeclaration(
             String(element, "declaration_name_key"),
             String(element, "kind"),
-            String(element, "statement_id"));
+            String(element, "statement_id"))
+        {
+            Libraries = OptionalStringArray(element, "libraries"),
+            Axioms = OptionalStringArray(element, "axioms"),
+            OmegaOnlyAxiomFree = hasMarker ? true : null,
+        };
     }
+
+    private static ImmutableArray<string>? OptionalStringArray(JsonElement parent, string name) =>
+        parent.TryGetProperty(name, out _) ? ReadStringArray(parent, name) : null;
 
     private static ImmutableArray<string> ReadStringArray(JsonElement parent, string name) =>
         Array(parent, name)
@@ -153,16 +160,18 @@ public static class TruthExportJsonReader
             ? result
             : throw new FormatException($"Truth export {name} must be a non-negative integer.");
 
-    private static void RequireProperties(JsonElement element, IReadOnlyCollection<string> expected, string context)
+    private static void RequireProperties(JsonElement element, IReadOnlyCollection<string> expected, string context,
+        IReadOnlyCollection<string>? optional = null)
     {
         if (element.ValueKind != JsonValueKind.Object)
         {
             throw new FormatException($"Truth export {context} must be an object.");
         }
 
-        var actual = element.EnumerateObject().Select(static property => property.Name).ToArray();
-        if (actual.Length != expected.Count
-            || !actual.Order(StringComparer.Ordinal).SequenceEqual(expected.Order(StringComparer.Ordinal)))
+        var actual = new HashSet<string>(StringComparer.Ordinal);
+        if (element.EnumerateObject().Any(property => !actual.Add(property.Name))
+            || !actual.IsSupersetOf(expected)
+            || !actual.IsSubsetOf(expected.Concat(optional ?? [])))
         {
             throw new FormatException($"Truth export {context} has unexpected fields.");
         }

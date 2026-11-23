@@ -37,15 +37,18 @@ internal static class TruthReleaseCommand
 
             var truth = prepared.Truth;
             var sourceTree = Bare(identity.TreeOid);
-            var truthExportBytes = TruthExportJsonWriter.Write(TruthExportProjection.Project(
+            var truthExport = TruthExportProjection.Project(
                 prepared.Catalog.ClosedNodes,
-                prepared.Frozen.Selectors.ToImmutableHashSet(),
+                prepared.Frozen,
                 identity.Revision,
-                sourceTree));
+                sourceTree);
+            var truthExportBytes = TruthExportJsonWriter.Write(truthExport);
             var projection = TruthDagProjectionAssembler.Build(truth.Snapshot, truth.Lean, prepared.States);
-            var dagMarkdownBytes = CanonicalDagWriter.Write(projection);
-            var truthGraphBytes = AssembleTruthGraph(
+            var truthGraph = AssembleTruthGraph(
                 contentHashes, truth, projection, rawLeanReportBytes, suppliedDefinitions, out var unresolvedReferences);
+            truthGraph = TruthGraphModelBuilder.WithDeclarationMarkers(truthGraph, truthExport);
+            var truthGraphBytes = TruthGraphJsonWriter.Write(truthGraph);
+            var dagMarkdownBytes = CanonicalDagWriter.Write(projection, truthGraph.Truth);
             var blueprintIndexBytes = BlueprintIndexAssembler.Assemble(snapshot);
             var sourceSnapshot = SourceSnapshotAssembler.Assemble(
                 snapshot,
@@ -122,7 +125,7 @@ internal static class TruthReleaseCommand
         FrozenStateCatalog Frozen,
         FrozenMaterialCatalog Catalog);
 
-    private static ImmutableArray<byte> AssembleTruthGraph(
+    private static TruthGraphExportModel AssembleTruthGraph(
         IReadOnlyDictionary<string, ReadOnlyMemory<byte>> contentHashes,
         TruthContext truth,
         TruthDagProjection projection,
@@ -134,13 +137,12 @@ internal static class TruthReleaseCommand
                 contentHashes,
                 suppliedDefinitions.Select(static definition => definition.RelativePath.Value)),
             RawLeanReportArtifact.ContentAddress(rawLeanReportBytes.AsSpan()));
-        return TruthGraphJsonWriter.Write(
-            TruthGraphModelBuilder.Create(
-                projection,
-                provenance,
-                suppliedDefinitions,
-                DeclarationCatalog.Create(truth.Report),
-                out unresolvedReferences));
+        return TruthGraphModelBuilder.Create(
+            projection,
+            provenance,
+            suppliedDefinitions,
+            DeclarationCatalog.Create(truth.Report),
+            out unresolvedReferences);
     }
 
     internal static bool IsReleaseInput(string path) =>

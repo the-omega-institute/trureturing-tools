@@ -2,7 +2,6 @@ using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
 using System.Security.Cryptography;
-using System.Text.RegularExpressions;
 using StrataLint.Cli;
 using StrataLint.Engine;
 using StrataLint.Scribe;
@@ -50,6 +49,7 @@ public sealed partial class TruthReleaseCommandTests
         Assert.Equal(ProducerCommit, verified.Manifest.Producer.PackageCommit);
         Assert.Equal(fixture.ReportBytes.ToArray(), File.ReadAllBytes(
             Path.Combine(output.Path, TruthReleaseBundleWriter.RawLeanReportFileName)));
+        Assert.Equal(fixture.UnannotatedDag.ToArray(), File.ReadAllBytes(dagPath));
         Assert.Equal(5, verified.Manifest.Artifacts.GetType().GetProperties().Length);
         Assert.False(File.Exists(Path.Combine(output.Path, "echo-residual-summary.md")));
         Assert.False(File.Exists(Path.Combine(output.Path, "frozen-ledger-head.json")));
@@ -92,12 +92,72 @@ public sealed partial class TruthReleaseCommandTests
         Assert.True(exitCode == 0, console.Error);
         var publication = TruthReleasePublicationReader.Read(File.ReadAllBytes(
             Path.Combine(output.Path, TruthReleaseBundleWriter.PublicationFileName)));
-        var export = TruthReleasePublicationVerification.Verify(output.Path, publication).ReadTruthExport();
+        var verified = TruthReleasePublicationVerification.Verify(output.Path, publication);
+        var export = verified.ReadTruthExport();
         var dependency = Assert.Single(export.Nodes, node => node.RepoPath == PathFor("Dependency"));
         Assert.Equal("frozen", dependency.FreezeStatus);
         var declaration = Assert.Single(dependency.Declarations);
         Assert.Equal(Declaration("dependency").NameKey, declaration.DeclarationNameKey);
         Assert.NotEqual("sha256:" + new string('0', 64), declaration.StatementId);
+        Assert.Null(declaration.Libraries);
+        Assert.Null(declaration.Axioms);
+        Assert.Null(declaration.OmegaOnlyAxiomFree);
+        Assert.All(verified.ReadTruthGraph().Truth.Nodes, node => Assert.Null(node.OmegaOnlyAxiomFreeDeclarations));
+    }
+
+    [Fact]
+    public void PublicationProjectsMatchingFrozenAnnotationsAndMarksOnlyQualifiedDeclarations()
+    {
+        using var fixture = CreateFixture(annotatedFrozenState: true);
+        using var output = new TemporaryDirectory();
+        using var dagDirectory = new TemporaryDirectory();
+        var dagPath = Path.Combine(dagDirectory.Path, "DAG.md");
+        var (exitCode, console) = Run(fixture, output.Path, [.. GreenTrustArguments(), "--dag-output", dagPath]);
+
+        Assert.True(exitCode == 0, console.Error);
+        var publication = TruthReleasePublicationReader.Read(File.ReadAllBytes(
+            Path.Combine(output.Path, TruthReleaseBundleWriter.PublicationFileName)));
+        var verified = TruthReleasePublicationVerification.Verify(output.Path, publication);
+        var export = verified.ReadTruthExport();
+        var node = Assert.Single(export.Nodes, node => node.RepoPath == BlueprintGid + ".lean");
+        Assert.Contains("propext", node.NodeAxiomClosure);
+        Assert.Single(node.PrerequisiteFrozenNodeIds);
+        var rows = node.Declarations.ToDictionary(row => row.DeclarationNameKey);
+        var omega = Row("qualified");
+        Assert.Equal(new[] { "OmegaInit", "OmegaMath" }, omega.Libraries!.Value);
+        Assert.Empty(omega.Axioms!.Value);
+        Assert.True(omega.OmegaOnlyAxiomFree);
+        Assert.Equal(new[] { "OmegaMath" }, Row("axiomatic").Libraries!.Value);
+        Assert.Equal(new[] { "propext" }, Row("axiomatic").Axioms!.Value);
+        Assert.Equal(new[] { "Mathlib", "OmegaMath" }, Row("external").Libraries!.Value);
+        Assert.Empty(Row("external").Axioms!.Value);
+        Assert.Empty(Row("bare").Libraries!.Value);
+        Assert.Empty(Row("bare").Axioms!.Value);
+        Assert.Equal(new[] { "OmegaMath" }, Row("libraries_only").Libraries!.Value);
+        Assert.Null(Row("libraries_only").Axioms);
+        Assert.Null(Row("axioms_only").Libraries);
+        Assert.Empty(Row("axioms_only").Axioms!.Value);
+        foreach (var name in new[] { "golden_spectral_marker", "wrong_kind" })
+        {
+            Assert.Null(Row(name).Libraries);
+            Assert.Null(Row(name).Axioms);
+        }
+        Assert.Equal(8, rows.Count);
+        Assert.Equal(omega, Assert.Single(rows.Values, row => row.OmegaOnlyAxiomFree is true));
+
+        var graph = verified.ReadTruthGraph();
+        Assert.Equal("module-import", graph.Provenance.DependencyGranularity);
+        Assert.Single(graph.Truth.Edges);
+        var graphNode = Assert.Single(graph.Truth.Nodes, node => node.RepoPath == BlueprintGid + ".lean");
+        Assert.Equal(new TruthGraphDeclaration(omega.DeclarationNameKey, omega.Kind, omega.StatementId),
+            Assert.Single(graphNode.OmegaOnlyAxiomFreeDeclarations!.Value));
+        var markdown = File.ReadAllLines(dagPath);
+        Assert.Contains("「仅 Omega · 零公理」 reflects the last frozen measurement for the declaration and statement pin. "
+            + "A later proof edit can retain that pin.", markdown);
+        Assert.Equal("  - `qualified` (theorem) 「仅 Omega · 零公理」",
+            Assert.Single(markdown, line => line.EndsWith("「仅 Omega · 零公理」", StringComparison.Ordinal)));
+
+        TruthExportDeclaration Row(string name) => rows[Declaration(name).NameKey];
     }
 
     [Fact]
@@ -240,7 +300,8 @@ public sealed partial class TruthReleaseCommandTests
     ];
 
     private static Fixture CreateFixture(bool receiptIntegrityMismatch = false, bool productionVerifier = false,
-        bool additionalLocalSource = false, bool largeDigestionBodies = false, bool mismatchedFrozenState = false)
+        bool additionalLocalSource = false, bool largeDigestionBodies = false, bool mismatchedFrozenState = false,
+        bool annotatedFrozenState = false)
     {
         var repositoryRoot = TestRepositoryLayout.FindRoot();
         var blueprintSourcePath = $"Blueprint/{BlueprintGid}.scribe.cs";
@@ -286,6 +347,16 @@ public sealed partial class TruthReleaseCommandTests
                 ["D5.S0.Carrier.Dependency"],
                 [Declaration("golden_spectral_marker")]),
         };
+        if (annotatedFrozenState)
+        {
+            files[formalPath] = "import D5.S0.Carrier.Dependency\n" + files[formalPath];
+            reports[formalPath] = reports[formalPath] with
+            {
+                Declarations = [.. reports[formalPath].Declarations,
+                    Declaration("qualified"), Declaration("axiomatic"), Declaration("external"), Declaration("bare"),
+                    Declaration("libraries_only"), Declaration("axioms_only"), Declaration("wrong_kind")],
+            };
+        }
         if (receiptIntegrityMismatch)
         {
             AddReceiptIntegrityMismatch(files);
@@ -345,7 +416,28 @@ public sealed partial class TruthReleaseCommandTests
         if (mismatchedFrozenState)
         {
             var statePath = FrozenStatePath.FromModulePath(RepoPathFor("Dependency")).Value;
-            files[statePath] = Regex.Replace(files[statePath], "sha256:[0-9a-f]{64}", "sha256:" + new string('0', 64));
+            files[statePath] = Encoding.UTF8.GetString(FrozenStateRecord.Encode(StatementId.Create("sha256:" + new string('0', 64)),
+                [new FrozenDeclaration(Declaration("dependency").NameKey, "theorem", ["OmegaMath"], [])]).AsSpan());
+        }
+        if (annotatedFrozenState)
+        {
+            var material = Assert.Single(realCatalog.ClosedNodes, node => node.RepoPath.Value == formalPath);
+            FrozenDeclaration Annotation(string name, ImmutableArray<string>? libraries, ImmutableArray<string>? axioms,
+                string kind = "theorem") => new(Declaration(name).NameKey, kind, libraries, axioms);
+            var annotations = new[]
+            {
+                Annotation("qualified", ["OmegaInit", "OmegaMath"], []),
+                Annotation("axiomatic", ["OmegaMath"], ["propext"]),
+                Annotation("external", ["Mathlib", "OmegaMath"], []),
+                Annotation("bare", [], []),
+                Annotation("libraries_only", ["OmegaMath"], null),
+                Annotation("axioms_only", null, []),
+                Annotation("golden_spectral_marker", null, null),
+                Annotation("wrong_kind", ["OmegaMath"], [], kind: "def"),
+                Annotation("orphan", ["OmegaMath"], []),
+            }.OrderBy(row => row.DeclarationNameKey, StringComparer.Ordinal).ToImmutableArray();
+            files[FrozenStatePath.FromModulePath(material.RepoPath).Value] = Encoding.UTF8.GetString(
+                FrozenStateRecord.Encode(material.StatementId, annotations).AsSpan());
         }
         WriteFiles(gitRoot, files.Where(static pair => FrozenStatePath.IsUnderRoot(pair.Key)));
         CommitAll(gitRoot, "fixture frozen state");
@@ -376,6 +468,7 @@ public sealed partial class TruthReleaseCommandTests
             mutableSource,
             reportPath,
             reportBytes,
+            CanonicalDagWriter.Write(dag),
             sourceCommit,
             sourceTree);
     }
@@ -475,6 +568,7 @@ public sealed partial class TruthReleaseCommandTests
         FakeLeanReportSource mutableLeanReportSource,
         string reportPath,
         ImmutableArray<byte> reportBytes,
+        ImmutableArray<byte> unannotatedDag,
         string sourceCommit,
         string sourceTree) : IDisposable
     {
@@ -492,6 +586,8 @@ public sealed partial class TruthReleaseCommandTests
         internal string ReportPath { get; } = reportPath;
 
         internal ImmutableArray<byte> ReportBytes { get; } = reportBytes;
+
+        internal ImmutableArray<byte> UnannotatedDag { get; } = unannotatedDag;
 
         internal string SourceCommit { get; } = sourceCommit;
 

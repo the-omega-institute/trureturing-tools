@@ -102,11 +102,12 @@ public static class TruthReleaseVerification
         var truthGraphBytes = ReadVerifiedArtifactBytes(bundleDirectory, manifest.Artifacts.TruthGraph);
         var sourceSnapshot = SourceSnapshotJsonReader.Read(sourceSnapshotBytes);
         var truthExport = TruthExportJsonReader.Read(truthExportBytes);
-        _ = TruthGraphJsonReader.Read(truthGraphBytes);
+        var truthGraph = TruthGraphJsonReader.Read(truthGraphBytes);
         var computedTruthGraphDigest = "sha256:" + Sha256Sums.HashHex(truthGraphBytes);
         TruthReleaseCompositionValidator.Validate(
             sourceSnapshot,
             truthExport,
+            truthGraph,
             manifest,
             computedTruthGraphDigest);
 

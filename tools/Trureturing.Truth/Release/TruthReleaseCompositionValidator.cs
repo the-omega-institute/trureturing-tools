@@ -5,6 +5,7 @@ internal static class TruthReleaseCompositionValidator
     internal static void Validate(
         SourceSnapshotModel sourceSnapshot,
         TruthExportModel truthExport,
+        TruthGraphExportModel truthGraph,
         TruthReleaseManifest manifest,
         string computedTruthGraphDigest)
     {
@@ -64,6 +65,14 @@ internal static class TruthReleaseCompositionValidator
             throw new FormatException(
                 "Truth release declarations digest disagrees between source_snapshot and verified artifact bytes.");
         }
+
+        var exportMarkers = truthExport.Nodes.SelectMany(static node => node.Declarations
+            .Where(static declaration => declaration.OmegaOnlyAxiomFree is true)
+            .Select(declaration => (node.RepoPath, declaration.DeclarationNameKey, declaration.Kind, declaration.StatementId)));
+        var graphMarkers = truthGraph.Truth.Nodes.SelectMany(static node => (node.OmegaOnlyAxiomFreeDeclarations ?? [])
+            .Select(declaration => (node.RepoPath, declaration.DeclarationNameKey, declaration.Kind, declaration.StatementId)));
+        if (!exportMarkers.SequenceEqual(graphMarkers))
+            throw new FormatException("Truth release declaration markers disagree between truth_export and truth_graph.");
 
         // DagMdSha256 remains unbound because the bundle has no dag_md artifact. DAG.md is an external
         // derived document, so this field is self-asserted external provenance, not a bundle-coherence claim.

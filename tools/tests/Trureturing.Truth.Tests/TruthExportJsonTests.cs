@@ -151,6 +151,54 @@ public sealed class TruthExportJsonTests
     }
 
     [Fact]
+    public void HistoricalCanonicalBytesKeepDeclarationAnnotationsAbsent()
+    {
+        var bytes = DeclarationBytes("");
+        var model = TruthExportJsonReader.Read(bytes.AsSpan());
+        var declaration = Assert.Single(Assert.Single(model.Nodes).Declarations);
+        Assert.Null(declaration.Libraries);
+        Assert.Null(declaration.Axioms);
+        Assert.Null(declaration.OmegaOnlyAxiomFree);
+        Assert.True(bytes.AsSpan().SequenceEqual(TruthExportJsonWriter.Write(model).AsSpan()));
+    }
+
+    [Fact]
+    public void ExplicitlyEmptyAxiomsAndSingletonOmegaLibraryRoundTripWithMarker()
+    {
+        var bytes = DeclarationBytes("\"axioms\":[], \"libraries\":[\"OmegaInit\"], \"omega_only_axiom_free\":true, ");
+        var model = TruthExportJsonReader.Read(bytes.AsSpan());
+        var declaration = Assert.Single(Assert.Single(model.Nodes).Declarations);
+        Assert.Empty(declaration.Axioms!.Value);
+        Assert.Equal("OmegaInit", Assert.Single(declaration.Libraries!.Value));
+        Assert.True(declaration.OmegaOnlyAxiomFree);
+        Assert.True(bytes.AsSpan().SequenceEqual(TruthExportJsonWriter.Write(model).AsSpan()));
+    }
+
+    [Theory]
+    [InlineData("\"omega_only_axiom_free\":true, ")]
+    [InlineData("\"omega_only_axiom_free\":false, ")]
+    [InlineData("\"libraries\":[\"OmegaMath\"], \"omega_only_axiom_free\":true, ")]
+    [InlineData("\"axioms\":[], \"omega_only_axiom_free\":true, ")]
+    [InlineData("\"axioms\":[], \"libraries\":[\"OmegaMath\"], ")]
+    [InlineData("\"axioms\":[], \"libraries\":[], \"omega_only_axiom_free\":true, ")]
+    [InlineData("\"axioms\":[], \"libraries\":[\"Mathlib\", \"OmegaMath\"], \"omega_only_axiom_free\":true, ")]
+    [InlineData("\"axioms\":[\"propext\"], \"libraries\":[\"OmegaMath\"], \"omega_only_axiom_free\":true, ")]
+    [InlineData("\"axioms\":null, ")]
+    [InlineData("\"libraries\":[\"OmegaMath\", \"OmegaInit\"], ")]
+    [InlineData("\"libraries\":[\"OmegaMath\", \"OmegaMath\"], ")]
+    public void StrictReaderRejectsInvalidAnnotationsAndInconsistentMarkers(string fields) =>
+        Assert.Throws<FormatException>(() => TruthExportJsonReader.Read(DeclarationBytes(fields).AsSpan()));
+
+    private static ImmutableArray<byte> DeclarationBytes(string fields) => StructuredCanonicalWriter.WriteJson($$"""
+        {"dialect": "stratalint.truth-export.v2", "nodes": [
+          {"declarations": [{ {{fields}} "declaration_name_key": "nk-a", "kind": "theorem", "statement_id": "{{Id('1')}}" }],
+           "freeze_status": "frozen", "frozen_node_id": "{{Id('a')}}", "node_axiom_closure": ["propext"],
+           "prerequisite_frozen_node_ids": [], "repo_path": "D5/S0/Carrier/A.lean"}],
+         "producer": "TruthExportCommand", "schema": "stratalint.truth-export", "schema_version": 2,
+         "source_commit": "{{Commit}}", "source_tree": "{{Tree}}"}
+        """);
+
+    [Fact]
     public void StrictReaderRejectsUnsortedNodes()
     {
         // Hand-craft bytes whose nodes descend by repo_path; the writer would never emit this order,
