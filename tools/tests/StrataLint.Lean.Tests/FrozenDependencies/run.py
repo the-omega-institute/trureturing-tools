@@ -199,6 +199,8 @@ def exercise(directory):
             for item in record["declarations"]}
     assert rows["omegaProof"]["libraries"] == ["OmegaInit", "OmegaMath"], rows
     assert rows["omegaProof"]["axioms"] == [], rows
+    assert rows["diagonalHalf"]["libraries"] == ["OmegaInit", "OmegaMath"], rows
+    assert rows["diagonalHalf"]["axioms"] == [], rows
     assert rows["typeOnly"]["libraries"] == ["OmegaInit", "OmegaMath"], rows
     assert rows["axiomFree"]["libraries"] == rows["axiomFree"]["axioms"] == [], rows
     assert "Mathlib" in rows["mathlibProof"]["libraries"], rows
