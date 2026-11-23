@@ -104,8 +104,12 @@ def check(manifest, protected_base=None, scope_file=None, base=None):
             batch = directory / str(index)
             batch.mkdir()
             report = batch / "scoped-lean-report.json"
-            subprocess.run(["bash", "tools/scripts/report/lean-report-scoped.sh", "--prepare",
-                            "--targets", " ".join(targets), "--output", str(report)],
+            prepared = str(batch / "prepared")
+            roots_arg = " ".join(targets)
+            subprocess.run([sys.executable, "-B", "tools/lean-inspector/build_inputs.py", "prepare",
+                            "--targets", roots_arg, "--report-inputs", prepared], env=environment, check=True)
+            subprocess.run(["bash", "tools/scripts/report/lean-report-scoped.sh", "--targets", roots_arg,
+                            "--prepared-directory", prepared, "--output", str(report)],
                            env=dict(environment, STRATALINT_SCOPED_REPORT_THREADS="1"), check=True)
             reports.append(str(report))
             roots = batch / "roots"

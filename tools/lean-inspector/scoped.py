@@ -308,7 +308,7 @@ def produce(entry, output, scope, utilities, *, expected=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('targets', 'produce', 'prepare-and-produce', 'verify'))
+    parser.add_argument('command', choices=('targets', 'produce', 'verify'))
     parser.add_argument('--repository', type=Path, required=True)
     parser.add_argument('--report', type=Path)
     parser.add_argument('--targets', required=True)
@@ -332,7 +332,7 @@ def main():
         raise ValueError('scoped roots must be registered report modules')
     if args.command == 'verify':
         public._require_bundle_files(output)
-    elif args.command in ('produce', 'prepare-and-produce'):
+    elif args.command == 'produce':
         public.member(output, '.input.attestation').unlink(missing_ok=True)
     workspace = (nullcontext(args.prepared_directory) if args.prepared_directory is not None
                  else tempfile.TemporaryDirectory(prefix='stratalint-scoped-report.'))
@@ -341,31 +341,16 @@ def main():
         startup_logs = temporary / 'logs'
         if args.prepared_directory is None:
             startup_logs.mkdir()
+        entry = Entry(root, temporary, startup_logs)
+        entry.provision()
         expected = None
-        if args.command == 'prepare-and-produce':
-            import build_inputs
-
-            build_inputs.prepare_scope(' '.join(roots), temporary, repository=root, save_scope=True)
-            # The report slot and its deadline start after compilation. The caller's
-            # cumulative compute budget still covers preparation and publication.
-            command = [root / 'tools/scripts/report/report-supervisor.sh', '--role', 'lean-producer',
-                       '--lean-slot', '--', sys.executable, '-B', Path(__file__).resolve(), 'produce',
-                       '--repository', root, '--targets', ' '.join(roots), '--report', output,
-                       '--prepared-directory', temporary]
-            if args.log_dir is not None:
-                command.extend(['--log-dir', args.log_dir])
-            subprocess.run(command, cwd=root, check=True)
-            return
         if args.prepared_directory is not None:
             expected = public.read_json((temporary / 'prepared-inputs.json').read_bytes())
             scope = expected['scope']
             if scope['roots'] != roots:
                 raise ValueError('prepared roots do not match the requested report')
             utilities = public.read_json((startup_logs / 'utility.stdout.log').read_bytes())
-            entry = Entry(root, temporary, startup_logs)
         else:
-            entry = Entry(root, temporary, startup_logs)
-            entry.provision()
             scope, utilities = entry.discover(roots)
         if args.command == 'targets':
             print(' '.join(preparation_targets(scope)))

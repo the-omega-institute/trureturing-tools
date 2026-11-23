@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -160,24 +161,15 @@ class ScopedContracts(unittest.TestCase):
     def test_prepared_scope_rejects_changed_inputs_before_report_build(self):
         producer = api(self)
         report = self.bundle(producer)
-        def prepare(roots, directory, **kwargs):
-            self.assertEqual(roots, 'D5.A')
-            (directory / 'prepared-inputs.json').write_bytes(
-                materials.canonical_json(producer.capture(self.root, self.scope)))
-            (directory / 'logs' / 'utility.stdout.log').write_text('[]')
-            self.fixture.write('D5/A.lean', 'def a := 3\n')
-        def supervise(command, **kwargs):
-            self.assertEqual(command[:4], [self.root.resolve() / 'tools/scripts/report/report-supervisor.sh',
-                                           '--role', 'lean-producer', '--lean-slot'])
-            prepared = Path(command[command.index('--prepared-directory') + 1])
-            self.assertTrue((prepared / 'prepared-inputs.json').is_file())
-            with patch.object(sys, 'argv', [str(arg) for arg in command[command.index('produce') - 1:]]):
-                producer.main()
-        with patch.object(build_inputs, 'prepare_scope', side_effect=prepare), \
-                patch.object(subprocess, 'run', side_effect=supervise), \
+        directory = self.root / 'prepared'
+        (directory / 'logs').mkdir(parents=True)
+        (directory / 'prepared-inputs.json').write_bytes(materials.canonical_json(producer.capture(self.root, self.scope)))
+        (directory / 'logs' / 'utility.stdout.log').write_text('[]')
+        self.fixture.write('D5/A.lean', 'def a := 3\n')
+        with patch.object(producer.Entry, 'provision'), \
                 patch.object(producer.Entry, 'phase', side_effect=AssertionError('scope was rediscovered')), \
-                patch.object(sys, 'argv', ['scoped.py', 'prepare-and-produce', '--repository', str(self.root),
-                                         '--report', str(report), '--targets', 'D5.A']), \
+                patch.object(sys, 'argv', ['scoped.py', 'produce', '--repository', str(self.root),
+                    '--report', str(report), '--targets', 'D5.A', '--prepared-directory', str(directory)]), \
                 self.assertRaisesRegex(ValueError, 'inputs changed during report preparation'):
             producer.main()
         self.assertFalse(publication.member(report, '.input.attestation').exists())
@@ -429,11 +421,16 @@ os.execv(os.environ["FIXTURE_LAKE"], [os.environ["FIXTURE_LAKE"], *sys.argv[1:]]
         wrapper = self.root / 'bin/scope-lake'
         wrapper.chmod(0o755)
         env = dict(self.env, LAKE_BIN=str(wrapper), FIXTURE_LAKE=self.lake)
-        command = ['/bin/bash', str(self.root / 'tools/scripts/report/lean-report-scoped.sh'), '--prepare',
-                   '--targets', 'Fixture', '--output', str(self.output), '--log-dir', str(self.logs)]
-
         def run(expected):
-            result = self.guarded_command(command, cwd=self.root, env=env)
+            with tempfile.TemporaryDirectory() as directory:
+                prepared = str(Path(directory) / 'prepared')
+                result = self.guarded_command([sys.executable, '-B', 'tools/lean-inspector/build_inputs.py',
+                    'prepare', '--targets', 'Fixture', '--report-inputs', prepared], cwd=self.root, env=env)
+                if result.returncode == 0:
+                    report = self.guarded_command(['/bin/bash', 'tools/scripts/report/lean-report-scoped.sh',
+                        '--targets', 'Fixture', '--prepared-directory', prepared,
+                        '--output', str(self.output), '--log-dir', str(self.logs)], cwd=self.root, env=env)
+                    self.assertEqual(report.returncode, 0, report.stdout + report.stderr)
             self.assertEqual(result.returncode == 0, expected, result.stdout + result.stderr)
             prefix = 'LEAN_INSPECTOR_SCOPE_PREPARE '
             observations = [line[len(prefix):] for line in result.stdout.splitlines() if line.startswith(prefix)]
@@ -461,6 +458,11 @@ os.execv(os.environ["FIXTURE_LAKE"], [os.environ["FIXTURE_LAKE"], *sys.argv[1:]]
         self.write('Reg/Selected.lean', 'import D5.B\ndef namedRegInput := D5.hidden + 1\n')
         changed = run(True)
         self.assertEqual((changed['compiled_modules'], changed['compiled_module_names']), (1, ['Reg.Selected']))
+        source = self.root / 'D5/B.lean'
+        source.write_text(source.read_text() + '\ndef changedDependency : Nat := 7\n')
+        affected = run(True)
+        self.assertEqual(set(affected['compiled_module_names']), {'D5.B', 'D5.A', 'Fixture', 'Reg.Selected'})
+        self.output = self.root / 'reports/failed.json'
         self.write('Reg/Selected.lean', 'import D5.B\ndef namedRegInput : Nat := missingInput\n')
         failed = run(False)
         self.assertEqual((failed['status'], failed['compiled_modules'], failed['compiled_module_names']),

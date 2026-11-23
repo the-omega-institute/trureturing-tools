@@ -243,6 +243,13 @@ def main():
     if args.action == 'compile-scope-with-writer':
         compile_scope(args.targets, args.report_inputs)
         return
+    if args.report_inputs is not None:
+        if args.action != 'prepare' or not args.targets:
+            parser.error('capturing scoped preparation requires explicit targets')
+        args.report_inputs.mkdir()
+        (args.report_inputs / 'logs').mkdir()
+        prepare_scope(args.targets, args.report_inputs, save_scope=True)
+        return
     if args.action == 'prepare-cache' and (args.targets or os.environ.get('FULL_BUILD') != '1'):
         parser.error('preparing the project cache requires FULL_BUILD=1')
     with tempfile.TemporaryDirectory(prefix='lean-programs.') as logs:

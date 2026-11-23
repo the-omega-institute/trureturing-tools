@@ -113,7 +113,11 @@ class CheckTests(unittest.TestCase):
                         self.assertTrue(options["check"])
                         self.assertEqual(options["env"]["STRATALINT_LEAN_PRODUCER_DLL"], supplied or detected)
                     if command[:2] == ["bash", "tools/scripts/report/lean-report-scoped.sh"]:
-                        self.assertEqual(command[2:4], ["--prepare", "--targets"])
+                        self.assertEqual(command[2], "--targets")
+                        prepare = commands[-2]
+                        self.assertEqual(prepare[2:6], ["tools/lean-inspector/build_inputs.py", "prepare",
+                                                        "--targets", command[3]])
+                        self.assertEqual(prepare[-1], command[command.index("--prepared-directory") + 1])
                         report = Path(command[command.index("--output") + 1])
                         self.assertNotIn(report, built)
                         report.touch()
@@ -141,7 +145,7 @@ class CheckTests(unittest.TestCase):
                 self.assertEqual(len(probes), int(bool((targets or programs) and event and not supplied)))
                 self.assertEqual([cmd[6:] for cmd in commands if cmd[1] == "tools/scripts/worktree/lean-cache-run.sh"],
                                  [["+" + program for program in programs]] if programs else [])
-                self.assertEqual([cmd[4] for cmd in commands if cmd[:2] == ["bash", "tools/scripts/report/lean-report-scoped.sh"]],
+                self.assertEqual([cmd[3] for cmd in commands if cmd[:2] == ["bash", "tools/scripts/report/lean-report-scoped.sh"]],
                                  targets)
 
     def test_admission_plans_on_demand_and_forwards_release_scope_to_current(self):
@@ -171,7 +175,7 @@ class CheckTests(unittest.TestCase):
             changed, scope_file = Path(temp) / "changed", Path(temp) / "scope"
             contract.write_paths(changed, ["D5/A.lean"])
             scope_file.write_text(json.dumps({"programs": [], "targets": ["D5.A"], "paths": [], "definitions": {}}))
-            command = ["bash", "tools/scripts/report/lean-report-scoped.sh", "--prepare", "--targets", "D5.A"]
+            command = [sys.executable, "-B", "tools/lean-inspector/build_inputs.py", "prepare", "--targets", "D5.A"]
             with patch.dict(os.environ, STRATALINT_LEAN_PRODUCER_DLL="/caller/producer.dll"), \
                     patch.object(ci_pr_lean.subprocess, "run", side_effect=subprocess.CalledProcessError(7, command)) as run:
                 with self.assertRaises(subprocess.CalledProcessError) as error:
