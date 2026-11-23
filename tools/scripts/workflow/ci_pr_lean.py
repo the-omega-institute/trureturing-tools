@@ -107,7 +107,7 @@ def check(manifest, protected_base=None, scope_file=None, base=None):
             documents = batch / "documents"
             write_paths(roots, [name.replace(".", "/") + ".lean" for name in targets])
             write_paths(documents, selected_paths)
-            scribe_environment = os.environ.copy()
+            scribe_environment = environment.copy()
             if ("DOTNET_GCConserveMemory" not in scribe_environment
                     and "COMPlus_GCConserveMemory" not in scribe_environment):
                 scribe_environment["DOTNET_GCConserveMemory"] = "9"
@@ -120,9 +120,9 @@ def check(manifest, protected_base=None, scope_file=None, base=None):
         arguments = ["--changed-paths-from", str(manifest), "--scoped-reports-from", str(report_list)]
         scope_arguments = ["--scope-base", base] if base and "Meta/tools-release.json" in changed else []
         if protected_base is None:
-            return subprocess.run(["dotnet", CLI, "check-current", *arguments, *scope_arguments]).returncode
+            return subprocess.run(["dotnet", CLI, "check-current", *arguments, *scope_arguments], env=environment).returncode
         return subprocess.run(["dotnet", CLI, "check-current-and-delta", "--protected-base", protected_base,
-                               *arguments, *scope_arguments]).returncode
+                               *arguments, *scope_arguments], env=environment).returncode
 
 
 if __name__ == "__main__":

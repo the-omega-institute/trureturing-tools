@@ -103,6 +103,8 @@ class CheckTests(unittest.TestCase):
                 built, consumers, commands = [], [], []
                 def run(command, **options):
                     commands.append(command)
+                    if command[0] == "dotnet":
+                        self.assertEqual(options["env"].get("STRATALINT_LEAN_PRODUCER_DLL", ""), supplied or detected)
                     if command[1] == "tools/scripts/workflow/judge-lean-producer.sh":
                         self.assertEqual(command, ["bash", "tools/scripts/workflow/judge-lean-producer.sh",
                                                    "tools/StrataLint.Cli/bin/Release/net10.0"])
@@ -158,8 +160,10 @@ class CheckTests(unittest.TestCase):
                 prefix = (["check-current-and-delta", "--protected-base", protected_base] if protected_base
                           else ["check-current"])
                 report_list = command[command.index("--scoped-reports-from") + 1]
-                run.assert_called_once_with(["dotnet", checks.CLI, *prefix, "--changed-paths-from", str(changed),
-                                             "--scoped-reports-from", report_list, "--scope-base", scope_base])
+                run.assert_called_once()
+                self.assertEqual(command, ["dotnet", checks.CLI, *prefix, "--changed-paths-from", str(changed),
+                                           "--scoped-reports-from", report_list, "--scope-base", scope_base])
+                self.assertEqual(run.call_args.kwargs["env"]["FULL_BUILD"], "0")
 
     def test_failed_report_preparation_stops_analysis_and_admission(self):
         import ci_pr_lean

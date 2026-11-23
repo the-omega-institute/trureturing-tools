@@ -375,7 +375,7 @@ if __name__ == '__main__':
         main()
     except subprocess.CalledProcessError as error:
         print(f'lean-report-scoped: command failed with exit {error.returncode}', file=sys.stderr)
-        sys.exit(error.returncode if 0 < error.returncode < 126 else 1)
+        sys.exit(error.returncode if error.returncode > 0 else 128 - error.returncode)
     except (OSError, UnicodeError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:
         print(f'lean-report-scoped: {error}', file=sys.stderr)
         sys.exit(2)
