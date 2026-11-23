@@ -8,7 +8,8 @@ cd "$ROOT"
 # Full Release and report preparation keep full cache admission for their named targets.
 if [[ "$1" == --build-release ]]; then
   [[ "${FULL_BUILD:-0}" == 1 && $# == 1 ]] || { echo 'lean-cache-run: Release compilation requires FULL_BUILD=1' >&2; exit 2; }
-  set -- --build Trureturing Reg
+  set -- --build Trureturing
+  if [[ -f "$ROOT/Reg/lakefile.toml" ]]; then set -- "$@" Reg; fi
 elif [[ "$1" == --build-report-programs ]]; then
   [[ "${FULL_BUILD:-0}" == 1 && $# -gt 1 ]] || { echo 'lean-cache-run: full report programs require FULL_BUILD=1 and named targets' >&2; exit 2; }
   shift

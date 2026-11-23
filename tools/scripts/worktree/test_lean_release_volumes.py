@@ -96,6 +96,9 @@ class VolumeDownloads(unittest.TestCase):
                 self.assertTrue((interface / ".lake/build/lib/lean/LeanInformationAuditInterface.olean").exists())
                 self.assertFalse((root / "tools/lean-inspector/.lake/build").exists())
                 self.assertFalse((root / "tools/lean-inspector-reg/.lake/build").exists())
+                (root / "Reg").rename(root / "historical-registration")
+                self.assertEqual(release._main(), 0)
+                (root / "historical-registration").rename(root / "Reg")
                 shutil.copy2(scripts / "lean-cache-run.sh", wrapper)
                 ordinary = subprocess.run(["bash", str(wrapper / "lean-cache-run.sh"), "--build"], cwd=root,
                                           capture_output=True, text=True)
