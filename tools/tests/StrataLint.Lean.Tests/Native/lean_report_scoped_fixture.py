@@ -17,6 +17,8 @@ sys.path.insert(0, str(ROOT / 'tools/lean-inspector/tests'))
 sys.path.insert(0, str(ROOT / 'tools/lean-inspector'))
 import materials
 import publication
+import build_inputs
+import build_work
 from test_reuse import ReuseTests, EXECUTION
 from test_native_support import NativeDependencyTestSupport
 
@@ -154,6 +156,41 @@ class ScopedContracts(unittest.TestCase):
         self.assertEqual((logs / 'scope.stdout.log').read_text(), 'scope discovered\n')
         self.assertEqual((logs / 'report.exit.log').read_text(), '23\n')
         self.assertFalse(publication.member(report, '.input.attestation').exists())
+
+    def test_prepared_scope_rejects_changed_inputs_before_report_build(self):
+        producer = api(self)
+        report = self.bundle(producer)
+        def prepare(roots, directory, **kwargs):
+            self.assertEqual(roots, 'D5.A')
+            (directory / 'prepared-inputs.json').write_bytes(
+                materials.canonical_json(producer.capture(self.root, self.scope)))
+            (directory / 'logs' / 'utility.stdout.log').write_text('[]')
+            self.fixture.write('D5/A.lean', 'def a := 3\n')
+        with patch.object(build_inputs, 'prepare_scope', side_effect=prepare), \
+                patch.object(producer.Entry, 'phase', side_effect=AssertionError('scope was rediscovered')), \
+                patch.object(sys, 'argv', ['scoped.py', 'prepare-and-produce', '--repository', str(self.root),
+                                         '--report', str(report), '--targets', 'D5.A']), \
+                self.assertRaisesRegex(ValueError, 'inputs changed during report preparation'):
+            producer.main()
+        self.assertFalse(publication.member(report, '.input.attestation').exists())
+
+    def test_compile_observation_requires_complete_lake_output(self):
+        stdout = self.root / 'programs.stdout.log'
+        stderr = self.root / 'programs.stderr.log'
+        status = self.root / 'programs.exit.log'
+        status.write_text('0\n')
+        stderr.write_text('✔ [5/8] Built reg/Reg.Scoped (1.7s)\n')
+        stdout.write_text('✔ [1/8] Built D5.A (9ms)\n'
+                          '✔ [2/8] Replayed D5.B\n'
+                          '✔ [3/8] Built D5.B:c.o\n'
+                          '✔ [4/8] Built reportInspector:exe (1s)\n'
+                          '✔ [6/8] Built Inspector native production batch (1s)\n')
+        self.assertIsNone(build_work.built_modules(self.root, 'programs'))
+        with stdout.open('a') as stream:
+            stream.write('Build completed successfully (8 jobs).\n')
+        self.assertEqual(build_work.built_modules(self.root, 'programs'), ['D5.A', 'Reg.Scoped'])
+        status.write_text('1\n')
+        self.assertIsNone(build_work.built_modules(self.root, 'programs'))
 
     def test_scoped_bundle_checks_independent_membership_sources_and_materials(self):
         producer = api(self)
@@ -356,12 +393,71 @@ os.execv(os.environ["FIXTURE_LAKE"], [os.environ["FIXTURE_LAKE"], *sys.argv[1:]]
         discover, build = [json.loads(line) for line in (self.root / 'scope-commands').read_text().splitlines()]
         workspace = ['-d', str((self.root / 'tools/lean-inspector-reg').resolve())]
         self.assertEqual(discover[:5], [*workspace, 'script', 'run', 'leanInspector/reportScope'])
-        self.assertEqual(build[:4], [*workspace, '--log-level=error', 'build'])
-        self.assertEqual(set(build[4:]), {'+Fixture', '+External', 'leanInspector/inputDiscovery',
+        self.assertEqual(build[:5], [*workspace, '--log-level=error', '--no-ansi', 'build'])
+        self.assertEqual(set(build[5:]), {'+Fixture', '+External', 'leanInspector/inputDiscovery',
                                            'leanInspector/reportInspector'})
         self.scoped('Fixture')
         self.assertEqual(set(self.rows()), {'Fixture', 'D5.A', 'D5.B'})
         self.assertFalse((self.root / '.lake/build/lib/lean/D5/Alone.olean').exists())
+
+    def test_native_combined_scope_measures_compilation_and_reuses_discovery(self):
+        policy_path = self.root / 'lean-report-inputs.json'
+        policy = json.loads(policy_path.read_text())
+        policy['report_modules']['include'].append(dict(pattern='Reg/**/*.lean', optional=False))
+        policy_path.write_text(json.dumps(policy))
+        self.write('Reg/Selected.lean', 'import D5.B\ndef namedRegInput := D5.hidden\n')
+        self.write('Reg/Sibling.lean', 'this unrelated Reg sibling deliberately does not compile\n')
+        self.write('D5/Alone.lean', 'this unrelated D5 sibling deliberately does not compile\n')
+        self.write('scope-inputs.json', json.dumps([dict(modulePath='Fixture.lean', inputModules=['Reg.Selected'])]))
+        self.ensure()
+        self.restore_compiler()
+        self.write('bin/scope-lake', '''#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+if "leanInspector/reportScope" in sys.argv:
+    with Path("scope-calls").open("a") as stream: stream.write("scope\\n")
+os.execv(os.environ["FIXTURE_LAKE"], [os.environ["FIXTURE_LAKE"], *sys.argv[1:]])
+''')
+        wrapper = self.root / 'bin/scope-lake'
+        wrapper.chmod(0o755)
+        env = dict(self.env, LAKE_BIN=str(wrapper), FIXTURE_LAKE=self.lake)
+        command = ['/bin/bash', str(self.root / 'tools/scripts/report/lean-report-scoped.sh'), '--prepare',
+                   '--targets', 'Fixture', '--output', str(self.output), '--log-dir', str(self.logs)]
+
+        def run(expected):
+            result = self.guarded_command(command, cwd=self.root, env=env)
+            self.assertEqual(result.returncode == 0, expected, result.stdout + result.stderr)
+            prefix = 'LEAN_INSPECTOR_SCOPE_PREPARE '
+            observations = [line[len(prefix):] for line in result.stdout.splitlines() if line.startswith(prefix)]
+            self.assertEqual(len(observations), 1, result.stdout + result.stderr)
+            observation = json.loads(observations[0])
+            self.assertGreater(observation['elapsed_ns'], 0)
+            print(prefix + observations[0])
+            return observation
+
+        cold = run(True)
+        self.assertEqual(cold['status'], 'completed')
+        self.assertEqual(cold['compiled_modules'], len(cold['compiled_module_names']))
+        self.assertTrue({'Fixture', 'D5.A', 'D5.B', 'External', 'ClaimSupport', 'Reg.Selected'}
+                        <= set(cold['compiled_module_names']))
+        self.assertEqual(set(self.rows()), {'Fixture', 'D5.A', 'D5.B', 'Reg.Selected'})
+        self.assertNotIn('Reg.Sibling', cold['compiled_module_names'])
+        self.assertNotIn('D5.Alone', cold['compiled_module_names'])
+        self.assertEqual((self.root / 'scope-calls').read_text().splitlines(), ['scope'])
+        self.assertEqual((self.root / 'utility-calls').read_text().splitlines(), ['call'])
+        warm = run(True)
+        self.assertEqual((warm['status'], warm['compiled_modules'], warm['compiled_module_names']), ('completed', 0, []))
+        self.assertEqual((self.root / 'scope-calls').read_text().splitlines(), ['scope', 'scope'])
+        report_work = json.loads((self.logs / 'work.json').read_text())
+        self.assertEqual((report_work['compiled_modules'], report_work['extracted_modules']), (0, 0))
+        self.write('Reg/Selected.lean', 'import D5.B\ndef namedRegInput := D5.hidden + 1\n')
+        changed = run(True)
+        self.assertEqual((changed['compiled_modules'], changed['compiled_module_names']), (1, ['Reg.Selected']))
+        self.write('Reg/Selected.lean', 'import D5.B\ndef namedRegInput : Nat := missingInput\n')
+        failed = run(False)
+        self.assertEqual((failed['status'], failed['compiled_modules'], failed['compiled_module_names']),
+                         ('failed', None, None))
+        self.assertFalse(publication.member(self.output, '.input.attestation').exists())
 
     def test_native_explicit_module_preparation(self):
         request = self.root / 'requested modules.json'

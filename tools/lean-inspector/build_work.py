@@ -12,6 +12,31 @@ import tempfile
 
 BUILT = re.compile(r'^[^\s]+ \[[0-9]+/[0-9]+\](?: \(Optional\))? Built ([^\s:]+)')
 COMPLETED = re.compile(r'^Build completed successfully \([0-9]+ jobs?\)\.$', re.MULTILINE)
+# Lake registers leanArts jobs with the module name. Other native jobs name
+# their facet (e.g. :exe, :c.o, :report) or use a descriptive caption.
+BUILT_MODULE = re.compile(
+    r"^[^\s]+ \[[0-9]+/[0-9]+\](?: \(Optional\))? Built "
+    r"(?:[^\s/:()]+/)?([A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*)"
+    r"(?::lean)?(?: \([0-9]+(?:\.[0-9]+)?m?s\))?$")
+
+
+def built_modules(logs, phase):
+    """Return module names reported by a completed Lake invocation."""
+    try:
+        if (logs / (phase + '.exit.log')).read_text().strip() != '0':
+            return None
+        names, completed = set(), False
+        for stream in ('stdout', 'stderr'):
+            with (logs / (phase + '.' + stream + '.log')).open(encoding='utf-8', errors='replace') as output:
+                for line in output:
+                    line = line.rstrip('\n')
+                    if match := BUILT_MODULE.fullmatch(line):
+                        names.add(match[1])
+                    elif COMPLETED.fullmatch(line):
+                        completed = True
+        return sorted(names) if completed else None
+    except OSError:
+        return None
 
 
 def observations(logs, phases):

@@ -90,13 +90,13 @@ class CheckTests(unittest.TestCase):
 
     def test_admission_reuses_all_batches_and_runs_without_reports_for_source_changes(self):
         import ci_pr_lean
-        cases = [([], [], "push", "", "", 0, 3, 0),
-                 ([], ["LeanInformationAudit.Program"], "pull_request", "", "/judge/producer.dll", 0, 0, 0),
-                 (["D5.A", "D5.B"], ["LeanInformationAudit.Program"], "push", "", "/judge/producer.dll", 1, 0, 1),
-                 (["D5.A"], [], "pull_request", "", "", 0, 2, 2),
-                 (["D5.A"], [], "pull_request", "/caller/producer.dll", "", 0, 0, 0),
-                 (["D5.A"], [], "", "", "", 0, 0, 0)]
-        for targets, programs, event, supplied, detected, current_exit, delta_exit, expected in cases:
+        cases = [([], [], "push", "", "", 0),
+                 ([], ["LeanInformationAudit.Program"], "pull_request", "", "/judge/producer.dll", 0),
+                 (["D5.A", "D5.B"], ["LeanInformationAudit.Program"], "push", "", "/judge/producer.dll", 1),
+                 (["D5.A"], [], "pull_request", "", "", 2),
+                 (["D5.A"], [], "pull_request", "/caller/producer.dll", "", 0),
+                 (["D5.A"], [], "", "", "", 0)]
+        for targets, programs, event, supplied, detected, expected in cases:
             with self.subTest(targets=targets, programs=programs, event=event, supplied=supplied), tempfile.TemporaryDirectory() as temp:
                 changed = Path(temp) / "changed"
                 contract.write_paths(changed, ["some-file"])
@@ -107,23 +107,23 @@ class CheckTests(unittest.TestCase):
                         self.assertEqual(command, ["bash", "tools/scripts/workflow/judge-lean-producer.sh",
                                                    "tools/StrataLint.Cli/bin/Release/net10.0"])
                         return subprocess.CompletedProcess(command, 0, detected + "\n")
-                    if command[0] == "make" or command[1] == "tools/scripts/worktree/lean-cache-run.sh":
+                    if command[1] in ("tools/scripts/report/lean-report-scoped.sh", "tools/scripts/worktree/lean-cache-run.sh"):
                         self.assertTrue(options["check"])
                         self.assertEqual(options["env"]["STRATALINT_LEAN_PRODUCER_DLL"], supplied or detected)
-                    if command[:2] == ["make", "lean-report-scoped"]:
-                        self.assertEqual(commands[-2], ["make", "lean-report-prepare", command[2]])
-                        report = Path(options["env"]["LEAN_REPORT"])
+                    if command[:2] == ["bash", "tools/scripts/report/lean-report-scoped.sh"]:
+                        self.assertEqual(command[2:4], ["--prepare", "--targets"])
+                        report = Path(command[command.index("--output") + 1])
                         self.assertNotIn(report, built)
                         report.touch()
                         built.append(report)
-                    if command[2] in ("check-current", "check-delta"):
-                        consumers.append(command[2])
+                    if command[2].startswith("check-"):
+                        consumers.append(command[2:5])
                         manifest = Path(command[command.index("--changed-paths-from") + 1])
                         self.assertEqual(contract.read_changed(manifest), ["some-file"])
                         reports = Path(command[command.index("--scoped-reports-from") + 1])
                         self.assertEqual(reports.read_bytes(), b"".join(os.fsencode(p) + b"\0" for p in built))
                         self.assertTrue(all(path.is_file() for path in built))
-                        return subprocess.CompletedProcess(command, current_exit if command[2] == "check-current" else delta_exit)
+                        return subprocess.CompletedProcess(command, expected)
                     return subprocess.CompletedProcess(command, 0)
                 scope_file = Path(temp) / "scope"
                 scope_file.write_text(json.dumps({"programs": programs, "targets": targets, "paths": [],
@@ -133,14 +133,33 @@ class CheckTests(unittest.TestCase):
                         patch.object(ci_pr_lean.subprocess, "run", side_effect=run), \
                         patch.object(ci_pr_lean, "report_batches", return_value=[([target], []) for target in targets]):
                     self.assertEqual(ci_pr_lean.check(changed, "a" * 40, scope_file), expected)
-                self.assertEqual(consumers, ["check-current", "check-delta"])
+                self.assertEqual(consumers, [["check-current-and-delta", "--protected-base", "a" * 40]])
                 self.assertEqual(len(built), len(targets))
                 probes = [cmd for cmd in commands if cmd[1] == "tools/scripts/workflow/judge-lean-producer.sh"]
                 self.assertEqual(len(probes), int(bool((targets or programs) and event and not supplied)))
                 self.assertEqual([cmd[6:] for cmd in commands if cmd[1] == "tools/scripts/worktree/lean-cache-run.sh"],
                                  [["+" + program for program in programs]] if programs else [])
-                self.assertEqual([cmd[2] for cmd in commands if cmd[:2] == ["make", "lean-report-prepare"]],
-                                 ["LEAN_TARGETS=" + target for target in targets])
+                self.assertEqual([cmd[4] for cmd in commands if cmd[:2] == ["bash", "tools/scripts/report/lean-report-scoped.sh"]],
+                                 targets)
+
+    def test_admission_plans_on_demand_and_forwards_release_scope_to_current(self):
+        import ci_pr_lean
+        scope = {"programs": [], "targets": [], "paths": [], "definitions": {}}
+        scope_base = "b" * 40
+        for protected_base, expected in ((None, 1), ("a" * 40, 2)):
+            with self.subTest(protected_base=protected_base), tempfile.TemporaryDirectory() as temp:
+                changed = Path(temp) / "changed"
+                contract.write_paths(changed, ["Meta/tools-release.json"])
+                with patch.object(ci_pr_lean, "plan_scope", return_value=scope) as plan, \
+                        patch.object(ci_pr_lean.subprocess, "run", return_value=subprocess.CompletedProcess([], expected)) as run:
+                    self.assertEqual(ci_pr_lean.check(changed, protected_base, base=scope_base), expected)
+                plan.assert_called_once_with(changed, scope_base)
+                command = run.call_args.args[0]
+                prefix = (["check-current-and-delta", "--protected-base", protected_base] if protected_base
+                          else ["check-current"])
+                report_list = command[command.index("--scoped-reports-from") + 1]
+                run.assert_called_once_with(["dotnet", checks.CLI, *prefix, "--changed-paths-from", str(changed),
+                                             "--scoped-reports-from", report_list, "--scope-base", scope_base])
 
     def test_failed_report_preparation_stops_analysis_and_admission(self):
         import ci_pr_lean
@@ -148,13 +167,13 @@ class CheckTests(unittest.TestCase):
             changed, scope_file = Path(temp) / "changed", Path(temp) / "scope"
             contract.write_paths(changed, ["D5/A.lean"])
             scope_file.write_text(json.dumps({"programs": [], "targets": ["D5.A"], "paths": [], "definitions": {}}))
-            command = ["make", "lean-report-prepare", "LEAN_TARGETS=D5.A"]
+            command = ["bash", "tools/scripts/report/lean-report-scoped.sh", "--prepare", "--targets", "D5.A"]
             with patch.dict(os.environ, STRATALINT_LEAN_PRODUCER_DLL="/caller/producer.dll"), \
                     patch.object(ci_pr_lean.subprocess, "run", side_effect=subprocess.CalledProcessError(7, command)) as run:
                 with self.assertRaises(subprocess.CalledProcessError) as error:
                     ci_pr_lean.check(changed, "a" * 40, scope_file)
                 self.assertEqual(error.exception.returncode, 7)
-                self.assertEqual([call.args[0] for call in run.call_args_list], [command])
+                self.assertEqual([call.args[0][:len(command)] for call in run.call_args_list], [command])
 
     def test_real_process_exits_are_preserved(self):
         for raw in (0, 1, 2, 3, 124, 143):

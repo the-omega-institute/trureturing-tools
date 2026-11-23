@@ -27,6 +27,12 @@ internal sealed class StubCliEnvironment(
     public ExplicitCommandResult CheckDelta(IReadOnlyList<string> arguments) =>
         checkDelta ?? throw new NotSupportedException();
 
+    public ExplicitCommandResult CheckCurrentAndDelta(IReadOnlyList<string> arguments, Action<ExplicitCommandResult> writeCurrent)
+    {
+        writeCurrent(CheckCurrent(arguments));
+        return CheckDelta(arguments);
+    }
+
     public ExplicitCommandResult CheckSource(IReadOnlyList<string> arguments) =>
         throw new NotSupportedException();
 

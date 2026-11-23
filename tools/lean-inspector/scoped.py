@@ -269,36 +269,20 @@ class Entry:
         self.phase('scope', workspace('script', 'run', 'leanInspector/reportScope', str(request), str(output)))
         scope = public.read_json(output.read_bytes())
         check_scope(self.root, scope, roots)
-        self.environment['STRATALINT_INSPECTOR_SCOPE_FILE'] = str(output)
-        self.environment['STRATALINT_INSPECTOR_UTILITY_INPUT'] = str(utility_file)
         return scope, utilities
 
 
-def compiled_modules(root, logs):
-    """Actual successful Lean build captions, separate from report extraction."""
-    names = build_work.output_names(root / '.lake/build')
-    result = set()
-    # Match a complete target caption, not the first word of a compound job.
-    expression = re.compile(r'^[^\s]+ \[[0-9]+/[0-9]+\](?: \(Optional\))? Built ([^\s()]+)(?: \([^()]*\))?$')
-    for stream in ('stdout', 'stderr'):
-        for line in (logs / ('report.' + stream + '.log')).read_text().splitlines():
-            if match := expression.match(line):
-                target, _, facet = match[1].partition(':')
-                name = target.rsplit('/', 1)[-1]
-                if facet in ('', 'lean') and name in names:
-                    result.add(name)
-    return sorted(result)
-
-
-def produce(entry, output, scope, utilities):
+def produce(entry, output, scope, utilities, *, expected=None):
     before = capture(entry.root, scope, utilities)
+    if expected is not None and before != expected:
+        raise ValueError('scoped inputs changed during report preparation')
     shutil.copyfile(entry.temporary / 'selected-modules.json', entry.logs / 'selected-modules.json')
     for name in ('module-work.jsonl', 'native-work.jsonl', 'native-phases.jsonl'):
         (entry.logs / name).write_text('')
     entry.environment.update(STRATALINT_INSPECTOR_MODULE_WORK=str(entry.logs / 'module-work.jsonl'),
         STRATALINT_INSPECTOR_ACTIVITY=str(entry.logs / 'native-work.jsonl'),
         STRATALINT_INSPECTOR_PHASES=str(entry.logs / 'native-phases.jsonl'))
-    entry.phase('report', entry.guarded('build', ':moduleReports'))
+    entry.phase('report', entry.guarded('--no-ansi', 'build', ':moduleReports'))
     if capture(entry.root, scope, utilities) != before:
         raise ValueError('scoped inputs changed during report production')
     aggregate = entry.temporary / 'scoped-report.zip'
@@ -312,9 +296,10 @@ def produce(entry, output, scope, utilities):
     public.publish(report, output, validator=validator)
     work = [public.read_json(line) for line in (entry.logs / 'module-work.jsonl').read_text().splitlines()]
     extracted = sorted({row['module'] for row in work if row['operation'] == 'extract'})
-    compiled = compiled_modules(entry.root, entry.logs)
+    compiled = build_work.built_modules(entry.logs, 'report')
     observation = dict(selected_modules=len(scope['modules']), extracted_modules=len(extracted),
-        compiled_modules=len(compiled), extracted_module_names=extracted, compiled_module_names=compiled)
+        compiled_modules=None if compiled is None else len(compiled),
+        extracted_module_names=extracted, compiled_module_names=compiled)
     (entry.logs / 'work.json').write_bytes(materials.canonical_json(observation))
     print('LEAN_INSPECTOR_SCOPED_WORK ' + json.dumps(observation, sort_keys=True), flush=True)
     print(f'SCOPED_LEAN_REPORT path={output} sha256={public.digest(output)}', flush=True)
@@ -322,7 +307,7 @@ def produce(entry, output, scope, utilities):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('targets', 'produce', 'verify'))
+    parser.add_argument('command', choices=('targets', 'produce', 'prepare-and-produce', 'verify'))
     parser.add_argument('--repository', type=Path, required=True)
     parser.add_argument('--report', type=Path)
     parser.add_argument('--targets', required=True)
@@ -343,16 +328,26 @@ def main():
         raise ValueError('scoped roots must be registered report modules')
     if args.command == 'verify':
         public._require_bundle_files(output)
-    elif args.command == 'produce':
+    elif args.command in ('produce', 'prepare-and-produce'):
         public.member(output, '.input.attestation').unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix='stratalint-scoped-report.') as directory:
         temporary = Path(directory)
         startup_logs = temporary / 'logs'
         startup_logs.mkdir()
-        entry = Entry(root, temporary, startup_logs)
-        entry.provision()
-        # Keep scope discovery logs separate from publication and verification.
-        scope, utilities = entry.discover(roots)
+        expected = None
+        if args.command == 'prepare-and-produce':
+            import build_inputs
+
+            # Only this invocation can supply the scope used after preparation.
+            build_inputs.prepare_scope(' '.join(roots), temporary, repository=root, save_scope=True)
+            expected = public.read_json((temporary / 'prepared-inputs.json').read_bytes())
+            scope = expected['scope']
+            utilities = public.read_json((startup_logs / 'utility.stdout.log').read_bytes())
+            entry = Entry(root, temporary, startup_logs)
+        else:
+            entry = Entry(root, temporary, startup_logs)
+            entry.provision()
+            scope, utilities = entry.discover(roots)
         if args.command == 'targets':
             print(' '.join(preparation_targets(scope)))
         elif args.command == 'verify':
@@ -366,7 +361,13 @@ def main():
             for path in startup_logs.iterdir():
                 shutil.copyfile(path, logs / path.name)
             entry.logs = logs
-            produce(entry, output, scope, utilities)
+            entry.environment.update(
+                STRATALINT_INSPECTOR_SCOPE_FILE=str(temporary / 'selected-modules.json'),
+                STRATALINT_INSPECTOR_UTILITY_INPUT=str(startup_logs / 'utility.stdout.log'))
+            threads = entry.environment.get('STRATALINT_SCOPED_REPORT_THREADS')
+            if threads:
+                entry.environment['LEAN_NUM_THREADS'] = threads
+            produce(entry, output, scope, utilities, expected=expected)
 
 
 if __name__ == '__main__':

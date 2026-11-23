@@ -99,10 +99,9 @@ def check(manifest, protected_base=None, scope_file=None, base=None):
             batch = directory / str(index)
             batch.mkdir()
             report = batch / "scoped-lean-report.json"
-            pinned_targets = "LEAN_TARGETS=" + " ".join(targets)
-            subprocess.run(["make", "lean-report-prepare", pinned_targets], env=environment, check=True)
-            subprocess.run(["make", "lean-report-scoped", pinned_targets],
-                           env=dict(environment, LEAN_REPORT=str(report), LEAN_NUM_THREADS="1"), check=True)
+            subprocess.run(["bash", "tools/scripts/report/lean-report-scoped.sh", "--prepare",
+                            "--targets", " ".join(targets), "--output", str(report)],
+                           env=dict(environment, STRATALINT_SCOPED_REPORT_THREADS="1"), check=True)
             reports.append(str(report))
             roots = batch / "roots"
             documents = batch / "documents"
@@ -119,12 +118,11 @@ def check(manifest, protected_base=None, scope_file=None, base=None):
         report_list = directory / "reports"
         write_paths(report_list, reports)
         arguments = ["--changed-paths-from", str(manifest), "--scoped-reports-from", str(report_list)]
-        current = subprocess.run(["dotnet", CLI, "check-current", *arguments,
-                                  *(["--scope-base", base] if base and "Meta/tools-release.json" in changed else [])])
+        scope_arguments = ["--scope-base", base] if base and "Meta/tools-release.json" in changed else []
         if protected_base is None:
-            return current.returncode
-        delta = subprocess.run(["dotnet", CLI, "check-delta", "--protected-base", protected_base, *arguments])
-        return current.returncode or (0 if delta.returncode == 3 else delta.returncode)
+            return subprocess.run(["dotnet", CLI, "check-current", *arguments, *scope_arguments]).returncode
+        return subprocess.run(["dotnet", CLI, "check-current-and-delta", "--protected-base", protected_base,
+                               *arguments, *scope_arguments]).returncode
 
 
 if __name__ == "__main__":

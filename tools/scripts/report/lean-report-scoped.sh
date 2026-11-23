@@ -3,7 +3,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 TARGETS='' OUTPUT="${LEAN_REPORT:-$ROOT/.lake/build/stratalint/scoped-lean-report.json}"
 LOG_DIR="${STRATALINT_LEAN_REPORT_LOG_DIR:-}"
+COMMAND=produce
 while [[ $# -gt 0 ]]; do
+  if [[ "$1" == --prepare ]]; then COMMAND=prepare-and-produce; shift; continue; fi
   [[ $# -ge 2 ]] || { echo "lean-report-scoped: $1 requires a value" >&2; exit 2; }
   case "$1" in
     --targets) TARGETS="$2" ;;
@@ -15,7 +17,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$TARGETS" =~ [^[:space:]] && -n "$OUTPUT" ]] \
   || { echo 'lean-report-scoped: explicit nonempty --targets are required' >&2; exit 2; }
-ARGS=(produce --repository "$ROOT" --report "$OUTPUT" --targets "$TARGETS")
+ARGS=("$COMMAND" --repository "$ROOT" --report "$OUTPUT" --targets "$TARGETS")
 [[ -z "$LOG_DIR" ]] || ARGS+=(--log-dir "$LOG_DIR")
 exec "$ROOT/tools/scripts/report/report-supervisor.sh" --role lean-producer --lean-slot -- \
   python3 -B "$ROOT/tools/lean-inspector/scoped.py" "${ARGS[@]}"

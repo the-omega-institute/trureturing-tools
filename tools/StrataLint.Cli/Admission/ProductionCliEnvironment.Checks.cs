@@ -7,22 +7,45 @@ namespace StrataLint.Cli;
 
 internal sealed partial class ProductionCliEnvironment
 {
-    public ExplicitCommandResult CheckCurrent(IReadOnlyList<string> arguments) => CheckStage(arguments, delta: false);
+    public ExplicitCommandResult CheckCurrent(IReadOnlyList<string> arguments) =>
+        CheckStage(() => ParseCheckArguments(arguments), delta: false, new CheckInputs());
 
-    public ExplicitCommandResult CheckDelta(IReadOnlyList<string> arguments) => CheckStage(arguments, delta: true);
+    public ExplicitCommandResult CheckDelta(IReadOnlyList<string> arguments) =>
+        CheckStage(() => ParseCheckArguments(arguments), delta: true, new CheckInputs());
 
-    private ExplicitCommandResult CheckStage(IReadOnlyList<string> arguments, bool delta)
+    public ExplicitCommandResult CheckCurrentAndDelta(
+        IReadOnlyList<string> arguments, Action<ExplicitCommandResult> writeCurrent)
+    {
+        CheckArguments options;
+        try
+        {
+            options = ParseCheckArguments(arguments);
+            if (options.ProtectedBase is null || options.ChangedPaths is null)
+                throw CheckUsage();
+        }
+        catch (InvalidOperationException)
+        {
+            return new(2, "", "INFRASTRUCTURE_FAILURE USAGE: check-current-and-delta --protected-base SHA "
+                + "[--scope-base SHA] --changed-paths-from FILE [--scoped-reports-from FILE]\n");
+        }
+
+        var inputs = new CheckInputs();
+        writeCurrent(CheckStage(() => options with { ProtectedBase = null }, delta: false, inputs));
+        return CheckStage(() => options with { ScopeBase = null }, delta: true, inputs);
+    }
+
+    private ExplicitCommandResult CheckStage(Func<CheckArguments> parseOptions, bool delta, CheckInputs inputs)
     {
         var timing = new AdmissionCheckTiming(timeProvider);
         ImmutableArray<Diagnostic> planeObservations = [];
         try
         {
-            var options = ParseCheckArguments(arguments);
+            var options = parseOptions();
             if (delta != (options.ProtectedBase is not null) || options.ChangedPaths is null
                 || options.ScopeBase is not null && delta)
                 throw CheckUsage();
 
-            var raw = timing.Measure("repository-read", () => AdmissionRepositoryInputs.ReadCurrent(repository));
+            var raw = inputs.Raw ??= timing.Measure("repository-read", () => AdmissionRepositoryInputs.ReadCurrent(repository));
             var prepared = delta ? timing.Measure("repository-prepare", () => repository.Prepare(options.ProtectedBase)) : null;
             var baselineRaw = prepared is null ? null : timing.Measure("repository-read-base",
                 () => AdmissionRepositoryInputs.ReadBaseline(repository, prepared.Revision));
@@ -33,20 +56,19 @@ internal sealed partial class ProductionCliEnvironment
             if (planeFailure is not null)
                 return new(2, RenderPlaneObservations(planeObservations), planeFailure.Message + "\n");
 
-            var current = timing.Measure("snapshot-load", () => Decode(raw));
+            var current = inputs.Snapshot ??= timing.Measure("snapshot-load", () => Decode(raw));
             var scopeBase = options.ScopeBase is null ? prepared
                 : timing.Measure("scope-base", () => repository.Prepare(options.ScopeBase));
             var changes = ScopedAdmissionReports.ChangedPaths(repositoryRoot, options.ChangedPaths, scopeBase);
             var plan = timing.Measure("lean-scope", () => PullRequestLeanChecks.CreatePlan(
                 repositoryRoot, current, changes));
-            var report = timing.Measure("lean-report-load", () =>
-                ScopedAdmissionReports.Read(repositoryRoot, current, plan.Targets, options.ScopedReports));
+            var report = inputs.ReadReport(repositoryRoot, current, plan.Targets, options.ScopedReports, timing);
             var policy = timing.Measure("policy-load", () => RepositoryPolicyLoader.Load(current) switch
             {
                 PolicyLoadOutcome.Accepted accepted => accepted.Policy,
                 PolicyLoadOutcome.InfrastructureFailure failure => throw new InvalidDataException(failure.Message),
             });
-            var lean = timing.Measure("lean-closure", () => LeanClosureValidator.Validate(current, report!) switch
+            var lean = timing.Measure("lean-closure", () => LeanClosureValidator.Validate(current, report) switch
             {
                 LeanValidationOutcome.Accepted accepted => accepted.Capability,
                 LeanValidationOutcome.InfrastructureFailure failure => throw new InvalidDataException(failure.Message),
@@ -95,6 +117,25 @@ internal sealed partial class ProductionCliEnvironment
         ImmutableArray<RuleFinding> MeasureRule(RuleId ruleId, AdmissionEffect admissionEffect, Func<ImmutableArray<RuleFinding>> evaluate) =>
             timing.Measure("rule-" + ruleId.Value.ToLowerInvariant(), evaluate,
                 findings => findings.Any(finding => (finding.Effect ?? admissionEffect) is AdmissionEffect.Block));
+    }
+
+    private sealed class CheckInputs
+    {
+        internal RawRepositorySnapshot? Raw;
+        internal RepositorySnapshot? Snapshot;
+        private (string? Manifest, ImmutableArray<string> Targets, LeanAxiomReport Report)? verifiedReport;
+
+        internal LeanAxiomReport ReadReport(string root, RepositorySnapshot snapshot,
+            ImmutableArray<string> targets, string? manifest, AdmissionCheckTiming timing)
+        {
+            // Both phases validate their changed paths and derive their scope before reusing evidence.
+            if (verifiedReport is { } verified && verified.Manifest == manifest && verified.Targets.SequenceEqual(targets))
+                return verified.Report;
+
+            var report = timing.Measure("lean-report-load", () => ScopedAdmissionReports.Read(root, snapshot, targets, manifest));
+            verifiedReport = (manifest, targets, report);
+            return report;
+        }
     }
 
     private static string RenderPlaneObservations(ImmutableArray<Diagnostic> observations) =>

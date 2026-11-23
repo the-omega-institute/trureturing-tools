@@ -108,10 +108,13 @@ fi
 donor=()
 [[ -z "${STRATALINT_LEAN_CACHE_DONOR_REPOSITORY:-}" ]] || donor=(--donor-repository "$STRATALINT_LEAN_CACHE_DONOR_REPOSITORY")
 if [[ "$1" == --build-report-scope ]]; then
-  [[ $# == 2 && -n "$2" ]] || { echo 'lean-cache-run: scoped preparation requires report roots' >&2; exit 2; }
+  [[ ( $# == 2 || $# == 3 ) && -n "$2" ]] || { echo 'lean-cache-run: scoped preparation requires report roots' >&2; exit 2; }
+  report_inputs=()
+  if [[ $# == 3 ]]; then report_inputs=(--report-inputs "$3"); fi
   # One writer owns dependency admission, discovery and compilation for this scope.
   exec "${cli[@]}" with-cache-reader ${donor[@]+"${donor[@]}"} -- python3 -B \
-    "$ROOT/tools/lean-inspector/build_inputs.py" compile-scope-with-writer --targets "$2"
+    "$ROOT/tools/lean-inspector/build_inputs.py" compile-scope-with-writer --targets "$2" \
+    ${report_inputs[@]+"${report_inputs[@]}"}
 fi
 if [[ "$1" == --build-report-modules ]]; then
   exec "${cli[@]}" with-cache-reader ${donor[@]+"${donor[@]}"} -- lake --log-level=error \

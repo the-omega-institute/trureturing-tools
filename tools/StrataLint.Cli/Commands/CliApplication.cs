@@ -11,6 +11,8 @@ internal interface ICliEnvironment
 
     ExplicitCommandResult CheckDelta(IReadOnlyList<string> arguments);
 
+    ExplicitCommandResult CheckCurrentAndDelta(IReadOnlyList<string> arguments, Action<ExplicitCommandResult> writeCurrent);
+
     ExplicitCommandResult CheckSource(IReadOnlyList<string> arguments);
 
     AdmissionTopologyOutcome Topology(IReadOnlyList<string> arguments);
@@ -87,6 +89,8 @@ internal static class CliApplication
                 RenderExplicit(environment.CapacityAudit(tail), console),
             ["check-current"] = static (environment, tail, console) =>
                 RenderExplicit(environment.CheckCurrent(tail), console),
+            ["check-current-and-delta"] = static (environment, tail, console) =>
+                RenderCurrentAndDelta(environment, tail, console),
             ["check-delta"] = static (environment, tail, console) =>
                 RenderExplicit(environment.CheckDelta(tail), console, allowProtectedAnnotation: true),
             ["check-source"] = static (environment, tail, console) =>
@@ -135,9 +139,14 @@ internal static class CliApplication
         ArgumentNullException.ThrowIfNull(arguments);
         ArgumentNullException.ThrowIfNull(environment);
         ArgumentNullException.ThrowIfNull(console);
+        return RunWithOutputGuard(() => RunCore(arguments, environment, console), console);
+    }
+
+    private static int RunWithOutputGuard(Func<int> run, ICliConsole console)
+    {
         try
         {
-            return RunCore(arguments, environment, console);
+            return run();
         }
         catch (Exception exception)
         {
@@ -306,6 +315,15 @@ internal static class CliApplication
         }
 
         return exitCode;
+    }
+
+    private static int RenderCurrentAndDelta(ICliEnvironment environment, string[] arguments, ICliConsole console)
+    {
+        var currentExit = 0;
+        var delta = environment.CheckCurrentAndDelta(arguments, current =>
+            currentExit = RunWithOutputGuard(() => RenderExplicit(current, console), console));
+        var deltaExit = RunWithOutputGuard(() => RenderExplicit(delta, console, allowProtectedAnnotation: true), console);
+        return currentExit != 0 ? currentExit : deltaExit == 3 ? 0 : deltaExit;
     }
 
     private static int RenderExplicit(

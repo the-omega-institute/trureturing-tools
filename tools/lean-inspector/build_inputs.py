@@ -1,5 +1,6 @@
 """Prepare compiler inputs and module reports for Lean consumers."""
 import argparse
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -8,13 +9,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 
 import build_work
+import materials
 import publication
 
 ROOT = Path(__file__).resolve().parents[2]
-PRODUCER = ROOT / 'tools/StrataLint.Lean/bin/Release/net10.0/StrataLint.Lean.dll'
 TOOLS = ['leanInspector/inputDiscovery', 'leanInspector/reportInspector']
 
 
@@ -28,34 +30,50 @@ def selected_programs():
     return targets
 
 
-def prepare_producer():
+def prepare_producer(repository=ROOT):
     producer = os.environ.get('STRATALINT_LEAN_PRODUCER_DLL')
     if not producer:
         subprocess.run(['dotnet', 'build', 'tools/StrataLint.Lean/StrataLint.Lean.csproj',
-                        '-c', 'Release', '--nologo'], cwd=ROOT, check=True)
-        producer = str(PRODUCER)
+                        '-c', 'Release', '--nologo'], cwd=repository, check=True)
+        producer = str(repository / 'tools/StrataLint.Lean/bin/Release/net10.0/StrataLint.Lean.dll')
     if not Path(producer).is_absolute() or not Path(producer).is_file():
         raise ValueError('missing prebuilt Lean producer DLL: ' + producer)
     os.environ['STRATALINT_LEAN_PRODUCER_DLL'] = producer
     return producer
 
 
+def prepare_scope(roots, directory, *, repository=ROOT, save_scope=False):
+    start = time.monotonic_ns()
+    status = 'failed'
+    try:
+        prepare_producer(repository)
+        command = ['bash', 'tools/scripts/worktree/lean-cache-run.sh', '--build-report-scope', roots]
+        if save_scope:
+            command.append(str(directory))
+        run_preparation([command], directory, repository=repository)
+        status = 'completed'
+    finally:
+        elapsed = time.monotonic_ns() - start
+        names = build_work.built_modules(directory, 'programs') if status == 'completed' else None
+        print('LEAN_INSPECTOR_SCOPE_PREPARE ' + json.dumps(dict(
+            status=status, elapsed_ns=elapsed, compiled_modules=None if names is None else len(names),
+            compiled_module_names=names), sort_keys=True), flush=True)
+
+
 def prepare(roots, directory, need_inputs=True):
-    if not roots and os.environ.get('FULL_BUILD') != '1':
+    if roots:
+        prepare_scope(roots, directory)
+        return
+    if os.environ.get('FULL_BUILD') != '1':
         raise ValueError('full report preparation requires FULL_BUILD=1 or explicit LEAN_TARGETS')
-    programs = [] if roots else selected_programs()
+    programs = selected_programs()
     if not need_inputs and not programs:
         return
     producer = prepare_producer()
-    if roots:
-        commands = [['bash', 'tools/scripts/worktree/lean-cache-run.sh', '--build-report-scope', roots]]
-    else:
-        targets = programs
-        if need_inputs:
-            targets = [*targets, *TOOLS]
-        commands = [['bash', 'tools/scripts/worktree/lean-cache-run.sh', '--build-report-programs',
-                     *sorted(set(targets))]]
-    if not roots and need_inputs:
+    targets = [*programs, *TOOLS] if need_inputs else programs
+    commands = [['bash', 'tools/scripts/worktree/lean-cache-run.sh', '--build-report-programs',
+                 *sorted(set(targets))]]
+    if need_inputs:
         modules = publication.selection.Selection(ROOT).modules()
         reported_paths = set(modules.values())
         utilities = json.loads(subprocess.check_output(['dotnet', producer, 'lean-utility-input'], cwd=ROOT))
@@ -66,11 +84,15 @@ def prepare(roots, directory, need_inputs=True):
         manifest.write_text(json.dumps(sorted(required | modules.keys())))
         commands.append(['bash', 'tools/scripts/worktree/lean-cache-run.sh',
                          '--build-report-modules', str(manifest)])
+    run_preparation(commands, directory)
+
+
+def run_preparation(commands, directory, *, repository=ROOT):
     out = directory / 'programs.stdout.log'
     err = directory / 'programs.stderr.log'
     with out.open('w') as stdout, err.open('w') as stderr:
         for command in commands:
-            result = subprocess.run(command, cwd=ROOT, stdout=stdout, stderr=stderr)
+            result = subprocess.run(command, cwd=repository, stdout=stdout, stderr=stderr)
             if result.returncode:
                 break
     (directory / 'programs.exit.log').write_text(str(result.returncode) + '\n')
@@ -192,27 +214,34 @@ def prepare_cache(logs, regenerate):
     build_work.record(ROOT, logs, work_file, 'programs', 'report')
 
 
-def compile_scope(roots):
+def compile_scope(roots, report_inputs):
     # The scoped cache writer and common build lock cover discovery and compilation.
     import scoped
     roots = scoped.parse_targets(roots)
-    with tempfile.TemporaryDirectory(prefix='lean-scope-prepare.') as directory:
-        temporary = Path(directory)
-        entry = scoped.Entry(ROOT, temporary, temporary)
+    with ExitStack() as stack:
+        temporary = report_inputs or Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='lean-scope-prepare.')))
+        logs = temporary / 'logs' if report_inputs is not None else temporary
+        entry = scoped.Entry(ROOT, temporary, logs)
         entry.provision()
-        scope, _ = entry.discover(roots, writer_owned=True)
-        subprocess.run(entry.lake_workspace('--log-level=error', 'build', *TOOLS, *scoped.preparation_targets(scope)),
+        scope, utilities = entry.discover(roots, writer_owned=True)
+        if report_inputs is not None:
+            before = scoped.capture(ROOT, scope, utilities)
+        subprocess.run(entry.lake_workspace('--log-level=error', '--no-ansi', 'build',
+                       *TOOLS, *scoped.preparation_targets(scope)),
                        cwd=ROOT, env=entry.environment, check=True)
+        if report_inputs is not None:
+            (temporary / 'prepared-inputs.json').write_bytes(materials.canonical_json(before))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['prepare', 'prepare-cache', 'compile-scope-with-writer'])
     parser.add_argument('--targets', default='')
+    parser.add_argument('--report-inputs', type=Path)
     parser.add_argument('--regenerate', action='store_true')
     args = parser.parse_args()
     if args.action == 'compile-scope-with-writer':
-        compile_scope(args.targets)
+        compile_scope(args.targets, args.report_inputs)
         return
     if args.action == 'prepare-cache' and (args.targets or os.environ.get('FULL_BUILD') != '1'):
         parser.error('preparing the project cache requires FULL_BUILD=1')

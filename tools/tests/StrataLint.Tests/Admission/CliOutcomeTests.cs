@@ -55,6 +55,27 @@ public sealed class CliOutcomeTests
     }
 
     [Theory]
+    [InlineData(0, 0, 0)]
+    [InlineData(0, 1, 1)]
+    [InlineData(0, 2, 2)]
+    [InlineData(0, 3, 0)]
+    [InlineData(1, 2, 1)]
+    [InlineData(2, 1, 2)]
+    [InlineData(3, 3, 2)]
+    public void PairedChecksRenderBothStagesAndPreferCurrentFailure(int current, int delta, int expectedExit)
+    {
+        var console = new BufferedConsole();
+        var environment = new StubCliEnvironment(new AdmissionOutcome.InfrastructureFailure("unused check outcome"),
+            checkCurrent: new(current, "current output\n", "current error\n"),
+            checkDelta: new(delta, "delta output\n", "delta error\n"));
+
+        Assert.Equal(expectedExit, CliApplication.Run(["check-current-and-delta"], environment, console));
+        Assert.Equal(current == 3 ? "delta output\n" : "current output\ndelta output\n", console.Output);
+        Assert.Equal((current == 3 ? "INFRASTRUCTURE_FAILURE output: explicit command returned an invalid exit code\n"
+            : "current error\n") + "delta error\n", console.Error);
+    }
+
+    [Theory]
     [InlineData("check-delta", -1)]
     [InlineData("check-delta", 4)]
     [InlineData("check-delta", 255)]
