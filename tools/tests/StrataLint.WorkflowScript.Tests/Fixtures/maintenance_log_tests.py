@@ -386,14 +386,15 @@ class MaintenanceLogTests(unittest.TestCase):
             self.assertEqual(0, host.main(['clean', '--repository', str(self.main)]))
         self.assertEqual(self.rows('host-cleanup')[0]['run_id'], self.rows('inner')[0]['parent_run_id'])
         import lean_cache_release as release
-        binary = self.root / 'bin'
-        binary.mkdir()
-        (binary / 'make').write_text(child + 'sys.exit(19)\n')
-        (binary / 'make').chmod(0o700)
-        env = dict(self.environment, PATH=str(binary) + os.pathsep + os.environ['PATH'],
-                   TRURETURING_MAINTENANCE_SCRIPT='lean-cache-publish',
+        driver = self.root / 'driver'
+        driver.mkdir()
+        (driver / 'lean-cache-run.sh').write_text(
+            'test "$1" = --build-release || exit 2\n'
+            + shlex.join([sys.executable, str(self.root / 'child.py')]) + ' || exit $?\nexit 19\n')
+        env = dict(self.environment, TRURETURING_MAINTENANCE_SCRIPT='lean-cache-publish',
                    TRURETURING_MAINTENANCE_REPOSITORY=str(self.main))
-        with patch.dict(os.environ, env, clear=True), patch.object(release, '_main',
+        with patch.dict(os.environ, env, clear=True), \
+                patch.object(release, '__file__', str(driver / 'lean_cache_release.py')), patch.object(release, '_main',
                 side_effect=lambda: release.publish(self.main, None)):
             self.assertEqual(19, release.main())
         self.assertEqual(self.rows('lean-cache-publish')[0]['run_id'], self.rows('inner')[-1]['parent_run_id'])
