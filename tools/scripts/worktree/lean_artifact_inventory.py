@@ -111,7 +111,7 @@ def workspace_modules(root: Path) -> dict[str, Module]:
         packages[directory] = (config["name"], build.relative_to(PROJECT_BUILD))
     packages[INSPECTOR] = ("leanInspector", Path("lean-inspector/producer"))
     pin = root / "Meta/tools-release.json"
-    roots = ["D5", "Reg", "Trureturing.lean"]
+    roots = ["D5", "Reg", "src", "Trureturing.lean"]
     packaged = pin.is_file()
     if not packaged:
         roots.extend([INSPECTOR, INTERFACE])
@@ -127,7 +127,7 @@ def workspace_modules(root: Path) -> dict[str, Module]:
         source = Path(name)
         if source.suffix != ".lean" or source.name == "lakefile.lean" or not (root / source).is_file():
             continue
-        relative = source
+        relative = source.relative_to("src") if source.parts[0] == "src" else source
         owner = Path("Reg") if source.parts[0] == "Reg" else Path(".")
         if source.is_relative_to(INTERFACE):
             owner = INTERFACE

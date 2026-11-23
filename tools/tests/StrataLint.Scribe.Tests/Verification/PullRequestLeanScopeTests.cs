@@ -91,6 +91,23 @@ public sealed class PullRequestLeanScopeTests
     }
 
     [Fact]
+    public void InternalLibraryChangeSelectsItsDependentsAcrossSourceRoots()
+    {
+        var sources = RawRepositorySnapshot.Create([
+            RawRepositoryEntry.FromText("src/Example/Basic.lean", "module\nprelude\n"),
+            RawRepositoryEntry.FromText("src/Example/Topic.lean", "module\npublic import Example.Basic\n"),
+            RawRepositoryEntry.FromText("D5/Consumer.lean", "import Example.Topic\n"),
+            RawRepositoryEntry.FromText("src/Unrelated.lean", "module\nprelude\n"),
+        ]);
+        var snapshot = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(sources)).Snapshot;
+        var targets = new HashSet<string>(StringComparer.Ordinal);
+        var programs = new HashSet<string>(StringComparer.Ordinal);
+        PullRequestLeanChecks.AddAffectedModules(snapshot, ["Example.Basic"], targets, programs);
+        Assert.Equal(["Example.Basic", "Example.Topic"], programs.Order(StringComparer.Ordinal));
+        Assert.Equal("D5.Consumer", Assert.Single(targets));
+    }
+
+    [Fact]
     public void DeletedModuleReachesSurvivingImportersAndAuditorWithoutSelectingUnrelatedModules()
     {
         var sources = RawRepositorySnapshot.Create([
