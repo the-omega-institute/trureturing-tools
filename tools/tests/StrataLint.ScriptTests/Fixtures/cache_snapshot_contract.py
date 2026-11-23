@@ -736,12 +736,12 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
         self.assertEqual(self.next_page(2), opened.call_args_list[1].args[0].full_url)
         self.assertEqual(self.next_page(3), opened.call_args_list[2].args[0].full_url)
 
-    def test_project_lookup_queries_the_pr_base_after_its_own_ref_or_the_push_ref(self):
+    def test_project_lookup_queries_the_pr_base_or_the_push_ref(self):
         for event, ref, base, expected in (("pull_request", "refs/pull/12/merge", "feature/with space", "refs/heads/feature/with space"),
                 ("push", "refs/heads/integration-ci-tests", "ignored", "refs/heads/integration-ci-tests")):
             with self.subTest(event=event):
                 row = self.cache_row("123-1", ref=expected)
-                responses = ([self.cache_page()] if event == "pull_request" else []) + [self.cache_page([row])]
+                responses = [self.cache_page([row])]
                 values, receipt, opened = self.lookup_keys(responses,
                     GITHUB_EVENT_NAME=event, GITHUB_REF=ref, GITHUB_BASE_REF=base)
                 self.assertEqual(row["key"], values["project_restore_key"])
@@ -756,21 +756,66 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                 self.assertGreater(opened.call_args.kwargs["timeout"], 0)
                 self.assertNotIn("synthetic-token", json.dumps(receipt))
 
-    def test_pr_producer_seed_takes_precedence_over_the_base_seed(self):
+    def test_pr_looks_up_only_the_base_seed(self):
         own_ref = "refs/pull/42/merge"
-        row = self.cache_row("123-1", ref=own_ref)
-        values, receipt, opened = self.lookup_keys([self.cache_page([row])],
+        row = self.cache_row("123-1")
+        values, receipt, opened = self.lookup_keys([self.cache_page([row, self.cache_row("200-1", ref=own_ref)])],
             GITHUB_EVENT_NAME="pull_request", GITHUB_REF=own_ref, GITHUB_BASE_REF="dev")
         self.assertEqual(row["key"], values["project_restore_key"])
-        self.assertEqual(own_ref, receipt["base_ref"])
+        self.assertEqual("refs/heads/dev", receipt["base_ref"])
         opened.assert_called_once()
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(opened.call_args.args[0].full_url).query)
-        self.assertEqual([own_ref], query["ref"])
+        self.assertEqual(["refs/heads/dev"], query["ref"])
 
     def test_pr_lookup_failure_does_not_mistake_an_unreadable_scope_for_an_empty_scope(self):
         opened = self.assert_lookup_fallback([OSError("unavailable PR listing")],
             "lookup-request-failed", GITHUB_EVENT_NAME="pull_request", GITHUB_REF="refs/pull/42/merge", GITHUB_BASE_REF="dev")
         opened.assert_called_once()
+
+    def test_feature_pr_legacy_keys_require_an_exact_run_listed_on_base_or_dev(self):
+        owner = self.restore_owner()
+        base = "refs/heads/integration-b"
+        env = dict(GITHUB_EVENT_NAME="pull_request", GITHUB_BASE_REF="integration-b",
+                   GITHUB_HEAD_REF="feature-a", GITHUB_REF="refs/pull/7/merge")
+        with mock.patch.dict(os.environ, self.env | env, clear=True):
+            fresh = owner.actions_keys(self.root)
+        old = {layer: fresh[layer]["restore_keys"][-1].removeprefix("dev-") for layer in ("dependency", "project")}
+        dependency = self.cache_row("12-1", prefix=old["dependency"])
+        project = self.cache_row("11-1", ref=base, prefix=old["project"])
+        foreign = self.cache_row("99-1", ref="refs/heads/feature-a", prefix=old["dependency"])
+        values, _, requests = self.lookup_keys([self.cache_page(), self.cache_page([foreign]),
+            self.cache_page([dependency]), self.cache_page([project])], **env)
+        self.assertEqual(project["key"], values["project_restore_key"])
+        self.assertEqual([base, base, "refs/heads/dev", base], [
+            urllib.parse.parse_qs(urllib.parse.urlsplit(call.args[0].full_url).query)["ref"][0]
+            for call in requests.call_args_list])
+        evidence = dict(line.split("=", 1) for line in (self.root / "environment").read_text().splitlines())
+        for layer, row in (("dependency", dependency), ("project", project)):
+            self.assertEqual(fresh[layer]["restore_keys"] + [row["key"]], json.loads(values[layer + "_restore_keys"]))
+            for key, attempt, accepted in ((row["key"], "2", True), (row["key"] + "0", "2", False),
+                                           (row["key"], "3", False)):
+                with mock.patch.dict(os.environ, dict(self.env | env | evidence, GITHUB_RUN_ATTEMPT=attempt), clear=True):
+                    keys = owner.actions_keys(self.root)
+                    (self.root / keys[layer]["path"]).mkdir(parents=True, exist_ok=True)
+                    self.assertEqual(accepted, owner.restore_native(self.root, keys, layer, key, "success"))
+
+    def test_pr_hot_lookup_and_cross_integration_pr_skip_all_legacy_queries(self):
+        env = dict(GITHUB_EVENT_NAME="pull_request", GITHUB_BASE_REF="dev", GITHUB_REF="refs/pull/7/merge")
+        for head, rows in (("feature-a", [self.cache_row("18-1")]), ("integration-a", [])):
+            values, _, requests = self.lookup_keys([self.cache_page(rows)], GITHUB_HEAD_REF=head, **env)
+            requests.assert_called_once()
+            for layer in ("dependency", "project"):
+                self.assertEqual([values[layer + "_restore_prefix"]], json.loads(values[layer + "_restore_keys"]))
+            self.assertNotIn("elan_restore_key", values)
+
+    def test_legacy_listing_failure_does_not_advertise_an_unverified_key(self):
+        env = dict(GITHUB_EVENT_NAME="pull_request", GITHUB_BASE_REF="dev", GITHUB_HEAD_REF="feature",
+                   GITHUB_REF="refs/pull/7/merge")
+        values, receipt, requests = self.lookup_keys([self.cache_page(), OSError("old listing unavailable")], **env)
+        self.assertEqual(2, requests.call_count)
+        self.assertEqual("lookup-request-failed", receipt["reason"])
+        self.assertEqual(values["project_key"], values["project_restore_key"])
+        self.assertFalse((self.root / "environment").exists())
 
     def test_project_lookup_supplies_github_json_accept_header(self):
         opened = self.assert_lookup_fallback([self.cache_page()], "lookup-no-eligible-seed")
@@ -950,23 +995,28 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
             self.assertEqual(candidate["save_allowed"], "true")
             self.assertEqual(dev["partition"], candidate["partition"])
             self.assertEqual(dev["release_prefix"], candidate["release_prefix"])
-            self.assertEqual(dev["elan_key"], candidate["elan_restore_key"])
+            self.assertEqual([dev["elan_key"], dev["elan_restore_key"]], json.loads(candidate["elan_restore_key"]))
             for layer in ("dependency", "project"):
                 fallback = dev[layer + "_restore_prefix"]
                 scoped = candidate[layer + "_restore_prefix"]
                 self.assertFalse(scoped.casefold().startswith(fallback.casefold()))
-                self.assertEqual([scoped, fallback], json.loads(candidate[layer + "_restore_keys"]))
-        self.assertNotIn("elan_restore_key", dev)
+                self.assertEqual([scoped, fallback, fallback.removeprefix("dev-")],
+                                 json.loads(candidate[layer + "_restore_keys"]))
+        self.assertEqual(dev["elan_key"].removeprefix("dev-"), dev["elan_restore_key"])
         for key in ("dependency_key", "project_key", "elan_key"):
             self.assertEqual(3, len({generation[key].casefold() for generation in (a, b, dev)}))
-        readers = [(cli("pull_request", "refs/pull/7/merge", base, branch_a), producer)
-                   for base, producer in (("dev", dev), (branch_a, a), (branch_b, b))]
-        readers.append((cli("workflow_dispatch", "refs/heads/" + branch_a), a))
-        for reader, producer in readers:
+        for base, producer in (("dev", dev), (branch_a, a), (branch_b, b)):
+            reader = cli("pull_request", "refs/pull/7/merge", base, branch_a)
             self.assertEqual(reader["save_allowed"], "false")
-            for key in ("elan_key", "elan_restore_key", "dependency_key", "project_key",
-                        "dependency_restore_keys", "project_restore_keys"):
-                self.assertEqual(producer.get(key), reader.get(key))
+            for key in ("elan_key", "dependency_key", "project_key"):
+                self.assertEqual(producer[key], reader[key])
+            self.assertEqual(None if base == "dev" else dev["elan_key"], reader.get("elan_restore_key"))
+            for layer in ("dependency", "project"):
+                self.assertEqual(json.loads(producer[layer + "_restore_keys"])[:-1],
+                                 json.loads(reader[layer + "_restore_keys"]))
+        manual = cli("workflow_dispatch", "refs/heads/" + branch_a)
+        for key in ("elan_key", "elan_restore_key", "project_restore_keys", "dependency_restore_keys"):
+            self.assertEqual(a[key], manual[key])
 
     def test_native_validation_accepts_dev_seed_only_for_compatible_partition_and_saves_to_own_scope(self):
         owner = self.restore_owner()
@@ -1109,7 +1159,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
         for layer, path in (("dependency", ".lake/packages"), ("project", ".lake/build")):
             self.assertEqual(path, keys[layer]["path"])
             self.assertTrue(keys[layer]["restore_prefix"].startswith(
-                "lean-project-push-" if layer == "project" else "lean-dependency-v4-"))
+                "dev-lean-project-push-" if layer == "project" else "dev-lean-dependency-v4-"))
 
     def test_native_project_authorization_preserves_outputs_without_directory_reads(self):
         self.work()

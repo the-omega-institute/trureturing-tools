@@ -83,14 +83,22 @@ def elan_key(root):
     return f"elan-pinned-{system}-{arch}-{hashlib.sha256((root / 'lean-toolchain').read_bytes()).hexdigest()}"
 
 
-def native_namespace():
-    if os.environ.get("GITHUB_EVENT_NAME") in {"pull_request", "pull_request_target"}:
+def is_pr():
+    return os.environ.get("GITHUB_EVENT_NAME") in {"pull_request", "pull_request_target"}
+
+
+def native_namespaces():
+    if is_pr():
         ref = "refs/heads/" + os.environ.get("GITHUB_BASE_REF", "")
     else:
         ref = os.environ.get("GITHUB_REF", "")
+    namespaces = ["dev-"]
     if ref.startswith("refs/heads/integration-"):
-        return "integration-" + hashlib.sha256(ref.encode()).hexdigest() + "-"
-    return ""
+        namespaces.insert(0, "integration-" + hashlib.sha256(ref.encode()).hexdigest() + "-")
+    # PRs can see caches on their source branch and their historical merge ref.
+    if not is_pr():
+        namespaces.append("")
+    return namespaces
 
 
 def manual_source_is_valid() -> bool:
@@ -150,14 +158,15 @@ def actions_keys(root: pathlib.Path) -> dict:
         "project_save_allowed": writer_allowed and os.environ.get("STRATALINT_REPORT_SUCCEEDED") == "true",
         "release_prefix": f"lean-cache-v2-{revision}-{system}-{machine}-",
     }
-    namespace = native_namespace()
+    namespaces = native_namespaces()
     for layer in LAYERS:
         generation = "project-push" if layer == "project" else "dependency-v4"
-        dev_prefix = f"lean-{generation}-{revision}-{system}-{machine}-"
-        prefix = namespace + dev_prefix
+        legacy_prefix = f"lean-{generation}-{revision}-{system}-{machine}-"
+        prefixes = [namespace + legacy_prefix for namespace in namespaces]
+        prefix = prefixes[0]
         result[layer] = {
             "restore_prefix": prefix, "key": f"{prefix}{run}-{attempt}",
-            "restore_keys": [prefix, dev_prefix] if namespace else [prefix],
+            "restore_keys": prefixes,
             "path": ".lake/packages" if layer == "dependency" else ".lake/build",
         }
     return result
@@ -278,7 +287,7 @@ def lookup_project_seed(spec, ref, token, repository, api):
     return best[2]
 
 
-def project_restore_key(keys):
+def project_restore_key(keys, layers=LAYERS):
     spec = keys["project"]
     fallback = spec["key"]
     token = os.environ.get("GH_TOKEN", "")
@@ -286,31 +295,53 @@ def project_restore_key(keys):
     event = os.environ.get("GITHUB_EVENT_NAME", "")
     base = os.environ.get("GITHUB_BASE_REF", "")
     ref = os.environ.get("GITHUB_REF", "")
-    refs = []
-    if event == "pull_request" and base:
-        if re.fullmatch(r"refs/pull/[1-9][0-9]*/merge", ref):
-            refs.append(ref)
-        refs.append("refs/heads/" + base)
-    elif event == "push" and ref:
-        refs.append(ref)
+    selected_ref = ""
+    if is_pr() and base:
+        selected_ref = "refs/heads/" + base
+    elif event == "push":
+        selected_ref = ref
 
     def preferred_seed():
-        for candidate_ref in refs:
-            try:
-                key = lookup_project_seed(spec, candidate_ref, token, repository, api)
-                return candidate_ref, key
-            except SeedLookupUnavailable as error:
-                if str(error) != "lookup-no-eligible-seed":
-                    raise
-        raise SeedLookupUnavailable("lookup-no-eligible-seed")
+        try:
+            key = lookup_project_seed(spec, selected_ref, token, repository, api)
+            return selected_ref, key, {}
+        except SeedLookupUnavailable as error:
+            if str(error) != "lookup-no-eligible-seed":
+                raise
+        head = os.environ.get("GITHUB_HEAD_REF", "")
+        if not (is_pr() and head and not head.startswith("integration-")
+                and (base == "dev" or base.startswith("integration-"))):
+            raise SeedLookupUnavailable("lookup-no-eligible-seed")
+
+        # Old native keys end in the unique producer run and attempt. Resolve
+        # them on a permitted ref after a scoped miss, within the same deadline.
+        legacy = {}
+        for layer in layers:
+            prefix = keys[layer]["restore_keys"][-1].removeprefix("dev-")
+            for owner in dict.fromkeys([selected_ref, "refs/heads/dev"]):
+                try:
+                    key = lookup_project_seed({"restore_prefix": prefix}, owner, token, repository, api)
+                    legacy[layer] = (owner, key)
+                    break
+                except SeedLookupUnavailable as error:
+                    if str(error) != "lookup-no-eligible-seed":
+                        raise
+        owner, preferred = legacy.get("project", ("", fallback))
+        return owner, preferred, legacy
 
     reason = "lookup-not-configured"
     try:
-        if not token or not repository or not refs:
+        if not token or not repository or not selected_ref:
             raise SeedLookupUnavailable(reason)
         api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
-        selected_ref, preferred = guarded_seed_lookup(preferred_seed)
-        receipt("project", "restore-preference", base_ref=selected_ref, requested_key=preferred)
+        owner, preferred, legacy = guarded_seed_lookup(preferred_seed)
+        for layer, (_, exact) in legacy.items():
+            keys[layer]["restore_keys"].append(exact)
+            # The validator runs in a separate step, after Actions extraction.
+            output({"STRATALINT_LEGACY_" + layer.upper(): keys[layer]["key"] + " " + exact}, "GITHUB_ENV")
+        if not owner:
+            raise SeedLookupUnavailable("lookup-no-eligible-seed")
+        receipt("project", "restore-preference", base_ref=owner, requested_key=preferred)
         return preferred
     except SeedLookupUnavailable as error:
         reason = str(error)
@@ -318,7 +349,7 @@ def project_restore_key(keys):
         reason = "lookup-http-error"
     except Exception:
         reason = "lookup-request-failed"
-    receipt("project", "restore-preference-fallback", base_ref=refs[-1] if refs else "", requested_key=fallback, reason=reason)
+    receipt("project", "restore-preference-fallback", base_ref=selected_ref, requested_key=fallback, reason=reason)
     return fallback
 
 
@@ -396,7 +427,11 @@ def restore_native(root, keys, layer, key, outcome):
     try:
         if outcome != "success" or not key:
             raise ValueError("Actions restore did not succeed or supplied no matched cache")
-        if not any(re.fullmatch(re.escape(prefix) + r"[0-9]+-[0-9]+", key) for prefix in spec["restore_keys"]):
+        exact_legacy = (is_pr() and os.environ.get("GITHUB_HEAD_REF")
+                        and not os.environ["GITHUB_HEAD_REF"].startswith("integration-")
+                        and os.environ.get("STRATALINT_LEGACY_" + layer.upper()) == spec["key"] + " " + key)
+        if not exact_legacy and not any(re.fullmatch(re.escape(prefix) + r"[0-9]+-[0-9]+", key)
+                                        for prefix in spec["restore_keys"] if prefix.endswith("-")):
             raise ValueError("Actions seed is outside the selected partition")
         if target.is_symlink() or not target.is_dir():
             raise ValueError("native Actions cache directory is unavailable")
@@ -685,16 +720,19 @@ def main():
         elif args.command == "keys":
             archive_paths = native_archive_paths(root, args.layers)
             if "project" in args.layers:
-                keys["project"]["restore_key"] = project_restore_key(keys)
+                keys["project"]["restore_key"] = project_restore_key(keys, args.layers)
             values = {key: keys[key] for key in ("mathlib_revision", "os", "arch", "partition", "save_allowed", "release_prefix")}
             toolchain = elan_key(root)
-            namespace = native_namespace()
-            values["elan_key"] = namespace + toolchain
-            if namespace:
-                values["elan_restore_key"] = toolchain
+            namespaces = native_namespaces()
+            values["elan_key"] = namespaces[0] + toolchain
+            fallbacks = [namespace + toolchain for namespace in namespaces[1:]]
+            if len(fallbacks) == 1:
+                values["elan_restore_key"] = fallbacks[0]
             for layer in args.layers:
                 values.update({layer + "_" + key: value for key, value in keys[layer].items() if key != "restore_keys"})
             output(values)
+            if len(fallbacks) > 1:
+                output_lines("elan_restore_key", fallbacks)
             for layer, paths in archive_paths.items():
                 output_lines(layer + "_archive_path", paths)
                 output_lines(layer + "_restore_keys", keys[layer]["restore_keys"])

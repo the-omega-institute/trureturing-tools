@@ -69,8 +69,8 @@ class PartitionTests(PartitionFixture, unittest.TestCase):
         self.assertTrue(first["save_allowed"])
         system, arch = first["os"], first["arch"]
         pinned = hashlib.sha256(b"leanprover/lean4:v4.33.0\n").hexdigest()
-        self.assertEqual(f"elan-pinned-{system}-{arch}-{pinned}", first["elan_key"])
-        self.assertFalse(any(key.startswith("elan_restore") for key in first))
+        self.assertEqual(f"dev-elan-pinned-{system}-{arch}-{pinned}", first["elan_key"])
+        self.assertEqual(first["elan_key"].removeprefix("dev-"), first["elan_restore_key"])
         self.assertNotEqual(first["elan_key"], second["elan_key"])
         self.assertFalse(second["save_allowed"])
         self.assertFalse(keys("14", "1", "push", "refs/heads/dev", "false")["save_allowed"])
@@ -109,7 +109,7 @@ class PartitionTests(PartitionFixture, unittest.TestCase):
                 self.assertEqual(f"lean-cache-v2-{REV}-{expected}-", keys["release_prefix"])
                 for layer in ["dependency", "project"]:
                     generation = "project-push" if layer == "project" else "dependency-v4"
-                    prefix = f"lean-{generation}-{REV}-{expected}-"
+                    prefix = f"dev-lean-{generation}-{REV}-{expected}-"
                     self.assertEqual(prefix, keys[layer]["restore_prefix"])
                     self.assertEqual(prefix + "12-1", keys[layer]["key"])
 
