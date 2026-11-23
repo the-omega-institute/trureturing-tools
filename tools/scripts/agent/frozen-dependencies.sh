@@ -7,5 +7,4 @@ if [[ $# != 2 ]]; then
 fi
 
 exec bash tools/scripts/worktree/lean-cache-run.sh --prebuilt \
-  "${LAKE_BIN:-lake}" -d tools/lean-inspector-reg env \
-  "$PWD/.lake/build/lean-inspector/producer/bin/reportInspector" --frozen-dependencies-v1 "$1" "$2"
+  "${LAKE_BIN:-lake}" -d tools/lean-inspector-reg script run leanInspector/frozenDependencies "$1" "$2"

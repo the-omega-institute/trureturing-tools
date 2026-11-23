@@ -8,6 +8,7 @@ fi
 
 exec python3 -B - <<'PY'
 from pathlib import Path
+import os
 import re
 import subprocess
 import tempfile
@@ -15,6 +16,8 @@ import tempfile
 state = Path("Golden/Frozen/state")
 module_path = re.compile(r"(?:[A-Z][A-Za-z0-9_]*/)*[A-Z][A-Za-z0-9_]*\.lean")
 paths = []
+if state.is_symlink() or state.exists() and not state.is_dir():
+    raise SystemExit(f"FROZEN_REFRESH_INVALID state root {state}")
 for entry in sorted(state.rglob("*")):
     if entry.is_dir() and not entry.is_symlink():
         continue
@@ -34,6 +37,8 @@ cli = "tools/StrataLint.Cli/bin/Release/net10.0/StrataLint.dll"
 batch_size = 32
 try:
     subprocess.run(["dotnet", "build", project, "-c", "Release", "--nologo"], check=True)
+    producer = Path("tools/StrataLint.Lean/bin/Release/net10.0/StrataLint.Lean.dll")
+    os.environ.setdefault("STRATALINT_LEAN_PRODUCER_DLL", str(producer.resolve()))
     with tempfile.TemporaryDirectory(prefix="frozen-refresh-") as temporary:
         for index in range(0, len(paths), batch_size):
             batch = paths[index:index + batch_size]

@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ['0', '1', '2', '3', architecture, templates, judge, recovery, scoped, modules, remaining]
+        shard: ['0', '1', '2', '3', architecture, templates, judge, recovery, scoped, modules, remaining, frozen]
     steps:
       - uses: actions/checkout@v5
         with:

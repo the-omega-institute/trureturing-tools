@@ -109,7 +109,7 @@ internal static class DagLedgerAlignWriter
                 + (options.Retirements.IsEmpty ? string.Empty : $"LEDGER_RETIRE registrations={options.Retirements.Length}\n"), string.Empty);
         }
         catch (Exception exception) when (exception is ArgumentException or FormatException or IOException or InvalidDataException
-            or InvalidOperationException or JsonException or UnauthorizedAccessException
+            or InvalidOperationException or JsonException or UnauthorizedAccessException or TimeoutException or KeyNotFoundException
             or DagLedgerCommandPreparation.RepositoryUnavailableException)
         {
             return new(false, Summary(0, 0, 0, 0, 1), "LEDGER_ALIGN_FAILED " + exception.Message

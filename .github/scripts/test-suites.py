@@ -97,6 +97,10 @@ def contract(shard):
         test_project(TEMPLATE_PROJECT)
     elif shard == "architecture":
         test_project(ARCHITECTURE_PROJECT)
+    elif shard == "frozen":
+        install_lean()
+        check("lake", "exe", "cache", "get", "Mathlib.Data.Nat.Prime.Basic")
+        check(sys.executable, "-B", "tools/tests/StrataLint.Lean.Tests/FrozenDependencies/run.py")
     elif shard in LEAN_CLASSES or shard == "remaining":
         install_lean()
         if shard == "remaining":

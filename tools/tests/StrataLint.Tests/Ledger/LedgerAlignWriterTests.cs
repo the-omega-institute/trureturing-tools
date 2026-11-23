@@ -128,8 +128,32 @@ public sealed class LedgerAlignWriterTests
         Assert.Contains("added=1", result.Output, StringComparison.Ordinal);
         var expected = StateFiles(BuildCatalog(a, b, c)).Single(file => file.Path ==
             FrozenStatePath.FromModulePath(RepoPathFor("A")));
-        Assert.Equal(expected.RawBytes.ToArray(), File.ReadAllBytes(fixture.StateFile("A")));
+        var original = FrozenStateRecordLoader.Load(expected);
+        var bytes = File.ReadAllBytes(fixture.StateFile("A")).ToImmutableArray();
+        var measured = FrozenStateRecordLoader.Load(new(expected.Path, bytes, Encoding.UTF8.GetString(bytes.AsSpan())));
+        Assert.Equal(original.StatementId, measured.StatementId);
+        Assert.True(original.HasInventory(measured.Declarations));
+        Assert.All(measured.Declarations, declaration =>
+        {
+            Assert.Empty(declaration.Libraries!.Value);
+            Assert.Empty(declaration.Axioms!.Value);
+        });
         Assert.Equal(expected.Path.Value, Assert.Single(fixture.Image()).Key);
+    }
+
+    [Fact]
+    public void RefreshRejectsMissingMembershipAndChangedPinBeforeWriting()
+    {
+        var baseline = Module("A");
+        var changed = baseline with { StatementMaterial = "True = True" };
+        using var fixture = new AlignFixture(changed, Module("B"));
+        fixture.Install(BuildCatalog(baseline));
+        var before = fixture.Image();
+        var missing = fixture.Align("--refresh-annotations", "--selector", PathFor("B"));
+        Assert.Contains("not a registered frozen-state member", missing.Error, StringComparison.Ordinal);
+        var mismatch = fixture.Align("--refresh-annotations", "--selector", PathFor("A"));
+        Assert.Contains("pin or declaration inventory does not match", mismatch.Error, StringComparison.Ordinal);
+        Assert.Equal(before, fixture.Image());
     }
 
     [Theory]
