@@ -291,36 +291,4 @@ internal static partial class RepositoryRules
             findings.Add(new RuleFinding("Library/queries.yaml", $"query {id} source path is missing: {sourcePath}"));
         }
     }
-
-    private static ImmutableArray<RuleFinding> Values(CurrentRuleContext context)
-    {
-        var findings = context.Current.Files.Keys
-            .Where(static path =>
-                path.Value.StartsWith("Evidence/D5/values.", StringComparison.Ordinal)
-                && path.Value != RepositoryPathPolicy.ValuesProjectionPath)
-            .OrderBy(static path => path.Value, StringComparer.Ordinal)
-            .Select(static path => new RuleFinding(
-                path.Value,
-                "canonical values projection must be Evidence/D5/values.json"))
-            .ToImmutableArray()
-            .ToBuilder();
-        if (!context.Current.TryGetFile(ValuesKernelBindingValidator.RelativePath, out var values))
-        {
-            findings.Add(new RuleFinding(
-                ValuesKernelBindingValidator.RelativePath,
-                "required values kernel binding data is missing"));
-        }
-        else if (values is not null)
-        {
-            findings.AddRange(ValuesKernelBindingValidator.Validate(
-                values.Text,
-                context.Lean.Report,
-                changes: null,
-                current: context.Current));
-        }
-
-        return findings.ToImmutable();
-    }
-
-
 }

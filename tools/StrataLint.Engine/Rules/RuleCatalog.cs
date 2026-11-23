@@ -34,7 +34,6 @@ public sealed partial class RuleCatalog
         RuleId.CreateKnown(22),
         RuleId.CreateKnown(23),
         RuleId.CreateKnown(2),
-        RuleId.CreateKnown(18),
         RuleId.CreateKnown(12),
         RuleId.CreateKnown(31),
         RuleId.CreateKnown(26),
@@ -186,7 +185,7 @@ public sealed partial class RuleCatalog
     {
         try
         {
-            var expected = Enumerable.Range(1, 23).Except([5, 16])
+            var expected = Enumerable.Range(1, 23).Except([5, 16, 18])
                 .Append(25)
                 .Append(26)
                 .Append(28)

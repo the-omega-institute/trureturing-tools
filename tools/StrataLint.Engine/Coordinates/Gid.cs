@@ -203,16 +203,6 @@ public sealed class Gid : IEquatable<Gid>
             throw new FormatException("Evidence GID requires an artifact kind.");
         }
 
-        if (rest is ["values"] && string.Equals(artifactKind.Value, "json", StringComparison.Ordinal))
-        {
-            return new Target.Evidence(
-                Theory,
-                CoordinatePath.Create(rest),
-                RepoPath.CreateKnown(RepositoryPathPolicy.ValuesProjectionPath),
-                "result",
-                artifactKind);
-        }
-
         var pieces = rest[^1].Split('.');
         if (pieces.Length != 2 || !IsSafeSegment(pieces[0]) || !IsSafeSegment(pieces[1]))
         {
@@ -222,11 +212,7 @@ public sealed class Gid : IEquatable<Gid>
         var module = pieces[0];
         var selector = pieces[1];
         CoordinatePath coordinates;
-        if (rest.Length == 1 && string.Equals(module, "values", StringComparison.Ordinal))
-        {
-            coordinates = CoordinatePath.Create(new[] { module });
-        }
-        else if (rest.Length == 2 && string.Equals(rest[0], "experiments", StringComparison.Ordinal))
+        if (rest.Length == 2 && string.Equals(rest[0], "experiments", StringComparison.Ordinal))
         {
             if (!ExperimentPattern.IsMatch(module))
             {
@@ -359,8 +345,6 @@ public sealed class Gid : IEquatable<Gid>
             + (formal.Declaration is null ? string.Empty : $".{formal.Declaration}"),
         Target.Blueprint blueprint =>
             $"{blueprint.Theory}/B/{string.Join('/', blueprint.Coordinates.Values)}",
-        Target.Evidence { Path.Value: RepositoryPathPolicy.ValuesProjectionPath } evidence =>
-            $"{evidence.Theory}/E/values{TagSeparator}{evidence.ArtifactKind.Value}",
         Target.Evidence evidence =>
             $"{evidence.Theory}/E/{string.Join('/', evidence.Coordinates.Values)}"
             + $".{evidence.Selector}{TagSeparator}{evidence.ArtifactKind.Value}",

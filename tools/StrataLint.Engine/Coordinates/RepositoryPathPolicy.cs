@@ -163,7 +163,7 @@ internal static partial class RepositoryPathPolicy
         if (value is "Meta/domains.yaml" or "Meta/BACKFILL.yaml" or "Meta/FILEMAP.toml"
             or "Library/queries.yaml" or AssumptionRegistryPath
             or "D5/X_Frontier/HeartsAuthorizations.md"
-            or "Golden/values-kernels.toml" or "Golden/gate-authority-roots.toml"
+            or "Golden/gate-authority-roots.toml"
             or CacheProductionActionPath
             or CachePublicationWorkflowPath
             or TruthReleasePublicationWorkflowPath
@@ -327,11 +327,7 @@ internal static partial class RepositoryPathPolicy
 
         var coordinates = evidence.Coordinates.Values;
         string scope;
-        if (coordinates is ["values"])
-        {
-            scope = "values";
-        }
-        else if (coordinates is ["experiments", _])
+        if (coordinates is ["experiments", _])
         {
             scope = "experiments";
         }

@@ -189,7 +189,7 @@ public sealed class EmissionTests
             error);
 
         Assert.Equal(2, exit);
-        Assert.Contains("emit-values|filemap [--check]", error.ToString(), StringComparison.Ordinal);
+        Assert.Contains("filemap [--check]", error.ToString(), StringComparison.Ordinal);
     }
 
     private static DocumentDefinition SyntheticDefinition()

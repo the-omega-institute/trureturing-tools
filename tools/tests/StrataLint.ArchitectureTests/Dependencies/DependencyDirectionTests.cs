@@ -86,10 +86,10 @@ public sealed class DependencyDirectionTests
     /// verdict and discards the rendered HTML.
     /// </summary>
     [Fact]
-    public void ScribeReferencesExactlyEngineJintQuestPdfTomlynAndTruth()
+    public void ScribeReferencesExactlyEngineJintQuestPdfAndTruth()
     {
         Assert.Equal(
-            ["Jint", "Microsoft.CodeAnalysis", "Microsoft.CodeAnalysis.CSharp", "QuestPDF", "StrataLint.Engine", "Tomlyn", "Trureturing.Truth"],
+            ["Jint", "Microsoft.CodeAnalysis", "Microsoft.CodeAnalysis.CSharp", "QuestPDF", "StrataLint.Engine", "Trureturing.Truth"],
             AssemblyReferencePolicy.NonPlatformReferences(typeof(ScribeEmitter).Assembly));
     }
 
@@ -122,7 +122,7 @@ public sealed class DependencyDirectionTests
     public void ScribeTestsReferenceOnlyEngineAndScribe()
     {
         // 直接项目引用由本断言核对;Scribe 的依赖由
-        // ScribeReferencesExactlyEngineJintQuestPdfTomlynAndTruth 核对。
+        // ScribeReferencesExactlyEngineJintQuestPdfAndTruth 核对。
         // 两者共同限定声明层的传递依赖;IL 使用集是独立的检查对象。
         Assert.Equal(
             [

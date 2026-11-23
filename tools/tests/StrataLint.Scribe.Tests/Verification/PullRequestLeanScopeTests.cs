@@ -68,26 +68,28 @@ public sealed class PullRequestLeanScopeTests
     }
 
     [Fact]
-    public void SourceOnlyChangesDoNotSelectValuesOrAxiomsButChangedBindingsRequireBoth()
+    public void ConstantsUseOrdinaryLeanDependenciesAndOnlyNonemptyReportsNeedAxiomDebt()
     {
+        using var temporary = new TemporaryRoot();
         const string owner = "D5/S3/Constants/Values.lean";
         var sources = RawRepositorySnapshot.Create([
             RawRepositoryEntry.FromText(owner, "def ah := 1"),
+            RawRepositoryEntry.FromText("D5/Consumer.lean", "import D5.S3.Constants.Values"),
             RawRepositoryEntry.FromText(RepositoryRules.AxiomDebtPath, ""),
-            RawRepositoryEntry.FromText(ValuesKernelBindingValidator.RelativePath, """
-                schema_version = 1
-                [[constants]]
-                id = "ah"
-                lean_gid = "D5/S3/Constants/Values.ah"
-                lean_statement_sha256 = "abc"
+            RawRepositoryEntry.FromText("Meta/ReportProducers/scribe-content.json", """
+                {"schema":"report-producer-scope-v2","registration":"lean-report-inputs.json","scope":"scribe-content","projects":[]}
                 """),
+            RawRepositoryEntry.FromText("lean-report-inputs.json", """
+                {"inspector_sources":{"include":[],"exclude":[]},"producer_scopes":{
+                 "lean-report":{"include":[],"exclude":[]},"scribe-content":{"include":[],"exclude":[]}}}
+                """),
+            RawRepositoryEntry.FromText(EngineeringRegistrationFixture.Path, EngineeringRegistrationFixture.Manifest()),
         ]);
         var snapshot = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(sources)).Snapshot;
-        var targets = new HashSet<string>(StringComparer.Ordinal);
-        PullRequestLeanChecks.AddRuleEvidence(snapshot, ["README.md", "tools/scripts/workflow/ci-entry.sh"], targets);
-        Assert.Empty(targets);
-        PullRequestLeanChecks.AddRuleEvidence(snapshot, [ValuesKernelBindingValidator.RelativePath], targets);
-        Assert.Equal(["D5.S3.Constants.Values", "D5.X_Assumptions.AxiomDebt"], targets.Order(StringComparer.Ordinal));
+        var configOnly = PullRequestLeanChecks.CreatePlan(temporary.Path, snapshot, RawChangeSet.Create(["lakefile.toml"]));
+        Assert.Empty(configOnly.Targets);
+        var changedSource = PullRequestLeanChecks.CreatePlan(temporary.Path, snapshot, RawChangeSet.Create([owner]));
+        Assert.Equal<string>(["D5.Consumer", "D5.S3.Constants.Values", "D5.X_Assumptions.AxiomDebt"], changedSource.Targets);
     }
 
     [Fact]
