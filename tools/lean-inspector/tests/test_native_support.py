@@ -51,6 +51,14 @@ def transport_inspector(source):
     compiled-discovery and compiled-seal fixtures.
     """
     source = source.replace('import LeanInformationAudit.ArtifactAssessment\n', '')
+    # The frozen command uses the full compiled assessment. The frozen
+    # consumer suite exercises it in the registered producer package.
+    source = source.replace('import LeanInformationAudit.FrozenDependencies\n', '')
+    start = source.index('private unsafe def frozenDependencies ')
+    main = source.index('unsafe def main (args : List String)', start)
+    dispatch = source.index('  if let ["--frozen-dependencies-v1"', main)
+    end = source.index('  let args ← match args with', dispatch)
+    source = source[:start] + source[main:dispatch] + source[end:]
     start = source.index('  let targetData ←')
     end = source.index('  let store ← state.get', start)
     source = source[:start] + source[end:]
