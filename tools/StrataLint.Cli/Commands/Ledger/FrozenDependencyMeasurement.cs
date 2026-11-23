@@ -38,20 +38,23 @@ internal static class FrozenDependencyMeasurement
                     var name = module.GetProperty("module").GetString();
                     if (name is null || !expected.Remove(name, out var path))
                         throw new FormatException($"unexpected or duplicate measured module {name}");
-                    var declarations = reports[path].Declarations.Where(static declaration => declaration.IncludeInStatement)
+                    var declarations = reports[path].Declarations
                         .ToDictionary(static declaration => (declaration.NameKey, declaration.Kind));
                     var measured = new Dictionary<(string, string), FrozenDeclaration>();
                     foreach (var row in module.GetProperty("declarations").EnumerateArray())
                     {
                         var key = RequiredString(row, "nameKey");
                         var kind = RequiredString(row, "kind");
+                        var included = row.GetProperty("includeInStatement").GetBoolean();
                         var axioms = ReadSet(row, "axioms");
                         if (!declarations.Remove((key, kind), out var declaration)
+                            || declaration.IncludeInStatement != included
                             || !StringComparer.Ordinal.Equals(declaration.StatementTypeAddress, RequiredString(row, "statementTypeAddress"))
                             || !axioms.SequenceEqual(declaration.Axioms.Order(StringComparer.Ordinal)))
                             throw new FormatException($"measured declaration does not match current report: {name}:{key}");
-                        measured.Add((key, kind), new(key, kind, ReadSet(row, "libraries"),
-                            axioms.Length == LeanAxiomFacts.StandardAxioms.Count ? null : axioms));
+                        if (included)
+                            measured.Add((key, kind), new(key, kind, ReadSet(row, "libraries"),
+                                axioms.Length == LeanAxiomFacts.StandardAxioms.Count ? null : axioms));
                     }
                     if (declarations.Count != 0)
                         throw new FormatException($"compiled declaration measurement is incomplete: {name}");

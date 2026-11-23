@@ -51,6 +51,38 @@ public sealed class LedgerAlignWriterTests
         Assert.Equal(after, fixture.Image());
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OrdinaryAlignmentRetainsAnnotationsOnlyForTheSamePin(bool changesPin)
+    {
+        var baseline = Module("A");
+        var current = changesPin ? baseline with { StatementMaterial = "True = True" } : baseline;
+        using var fixture = new AlignFixture(current);
+        fixture.Install(BuildCatalog(baseline));
+        var path = fixture.StateFile("A");
+        var record = JsonNode.Parse(File.ReadAllText(path))!;
+        var declaration = record["declarations"]![0]!;
+        declaration["libraries"] = new JsonArray("Init");
+        declaration["axioms"] = new JsonArray("propext");
+        var annotated = record.ToJsonString() + "\n";
+        File.WriteAllText(path, annotated);
+
+        var result = fixture.Align("--selector", PathFor("A"));
+
+        Assert.True(result.Success, result.Error);
+        if (changesPin)
+        {
+            var expected = Assert.Single(StateFiles(BuildCatalog(current)));
+            Assert.Equal(expected.RawBytes.AsSpan().ToArray(), File.ReadAllBytes(path));
+        }
+        else
+        {
+            Assert.Equal(annotated, File.ReadAllText(path));
+            Assert.Contains("changed=0", result.Output, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void DifferentModulesHaveDisjointWriteSets()
     {

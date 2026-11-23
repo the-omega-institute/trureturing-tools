@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -15,6 +16,7 @@ RECORD = STATE / (str(MODULE) + ".json")
 INSPECTOR = Path("tools/lean-inspector/build_inputs.py")
 CLI = Path("tools/StrataLint.Cli/bin/Release/net10.0/StrataLint.dll")
 REFRESH = Path("tools/scripts/agent/frozen-refresh.sh")
+MEASURE = Path("tools/scripts/agent/frozen-dependencies.sh")
 
 
 def run(*args, succeed=True):
@@ -52,6 +54,65 @@ def check_independent_reader(directory, states, count):
 
 def write_record(record):
     RECORD.write_text(json.dumps(record, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+def check_duplicate_theorems(directory):
+    direct, classical = "DuplicateDirect", "DuplicateClassical"
+    for name, proof in ((direct, "fun _ h => h"),
+                        (classical, "Classical.choice ⟨fun _ h => h⟩")):
+        source = MODULE.with_name(name + ".lean")
+        source.write_text(f"module\n\npublic theorem frozenDuplicate : ∀ (p : Prop), p → p := {proof}\n",
+                          encoding="utf-8")
+        run("python3", "-B", INSPECTOR, "prepare", "--targets", ".".join(source.with_suffix("").parts))
+
+    request = directory / "request.json"
+    response = directory / "response.json"
+
+    def measure(*names):
+        modules = [".".join(MODULE.with_name(name).with_suffix("").parts) for name in names]
+        request.write_text(json.dumps(modules), encoding="utf-8")
+        run(MEASURE, request, response)
+        rows = json.loads(response.read_bytes())
+        assert [row["module"] for row in rows] == modules
+        return rows
+
+    direct_row, = measure(direct)
+    classical_row, = measure(classical)
+    a, = direct_row["declarations"]
+    b, = classical_row["declarations"]
+    assert a["nameKey"] == b["nameKey"] and a["statementTypeAddress"] == b["statementTypeAddress"]
+    assert a["libraries"] == a["axioms"] == [], a
+    assert b["libraries"] == ["Init"] and b["axioms"] == ["Classical.choice"], b
+    assert measure(direct, classical) == [direct_row, classical_row]
+    assert measure(classical, direct) == [classical_row, direct_row]
+
+
+def check_stale_hidden_axioms(report, deposited):
+    source = MODULE.read_text(encoding="utf-8")
+    proof = "private theorem _closedWitness : True := "
+    assert proof + "True.intro" in source
+    MODULE.write_text(source.replace(proof + "True.intro", proof + "by sorry"), encoding="utf-8")
+    run("python3", "-B", INSPECTOR, "prepare", "--targets", TARGET)
+    run("bash", "tools/scripts/report/lean-report-scoped.sh", "--targets", TARGET, "--output", report)
+    compiled = json.loads(report.read_bytes())
+    module, = [module for module in compiled["modules"] if module["module"] == TARGET]
+    hidden, = [row for row in module["declarations"] if row["name"].endswith("._closedWitness")]
+    assert not hidden["include_in_statement"] and hidden["axioms"] == ["sorryAx"], hidden
+    assert all("sorryAx" not in row["axioms"] for row in module["declarations"] if row is not hidden)
+
+    # Keep current source hashes and materials so only the live axiom check can catch this.
+    hidden["axioms"] = []
+    canonical_json = runpy.run_path("tools/lean-inspector/materials.py")["canonical_json"]
+    report.write_bytes(canonical_json(compiled))
+    RECORD.unlink()
+    for options in (("--add",), ("--refresh-annotations", "--selector")):
+        before = RECORD.read_bytes() if RECORD.exists() else None
+        output = run("dotnet", CLI, "ledger-align", *options, MODULE,
+                     "--candidate-lean-report", report, succeed=False)
+        assert f"measured declaration does not match current report: {TARGET}:{hidden['name_key']}" in output
+        assert (RECORD.read_bytes() if RECORD.exists() else None) == before
+        if before is None:
+            RECORD.write_bytes(deposited)
 
 
 def exercise(directory):
@@ -126,6 +187,9 @@ def exercise(directory):
                  "--candidate-lean-report", report, succeed=False)
     assert "pin or declaration inventory does not match" in output
     assert RECORD.read_bytes() == mismatched
+
+    check_stale_hidden_axioms(report, deposited)
+    check_duplicate_theorems(directory)
 
 
 if __name__ == "__main__":

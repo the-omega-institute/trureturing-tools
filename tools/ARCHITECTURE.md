@@ -27,7 +27,10 @@ are visible, including `Init`, `Lean`, `Mathlib`, third-party roots, and
 `OmegaInit` and `OmegaMath` from the same Lake package. A module imported for
 elaboration contributes a library only when the compiled declaration reaches
 one of its constants. The library walk starts from the declaration itself.
-The axiom measurement uses the report's existing axiom closure semantics.
+The Inspector loads each target in its own import closure. The measurement
+checks the compiled statement address and axiom set against every declaration
+in the report, including hidden declarations used to determine `Closed`.
+Library sets are measured for the included declarations.
 
 A nonempty measured library set contained in `{OmegaInit, OmegaMath}` together with
 `axioms: []` is evidence for an axiom-free declaration with an Omega-only
@@ -46,7 +49,8 @@ valid and a rerun can resume by processing the same inventory. Consumer-local
 library sources participating in scoped reports belong in the consumer's
 `dependency_sources` selection, including `src/**/*.lean` for the Omega libraries.
 Ordinary validation continues to check inventory and pins while accepting aged
-or absent measurements. Legacy records encode to their original bytes.
+or absent measurements. Ordinary alignment clears annotations when a statement
+pin changes. Legacy records encode to their original bytes.
 
 ### Consumer verification
 

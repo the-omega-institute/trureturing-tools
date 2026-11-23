@@ -6,6 +6,8 @@ public import OmegaMath.FrozenDependencyFixture
 
 namespace FrozenFixture
 
+private theorem _closedWitness : True := True.intro
+
 -- Proof types here use distinct libraries within a single import environment.
 public theorem omegaProof : Claim := omegaHelper
 public theorem typeOnly (h : Claim) : Claim := h

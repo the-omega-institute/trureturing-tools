@@ -43,7 +43,7 @@ internal static class DagLedgerAlignWriter
                         throw new InvalidOperationException($"selector {path.Value} pin or declaration inventory does not match the current report");
                     record = existing;
                 }
-                else if (existing is not null)
+                else if (existing is not null && existing.StatementId == record.StatementId)
                 {
                     var previous = existing.Declarations.ToDictionary(static declaration => declaration.Identity);
                     record = record with

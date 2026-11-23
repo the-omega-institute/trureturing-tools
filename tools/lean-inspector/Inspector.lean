@@ -21,14 +21,6 @@ partial def encodeName : Name → String
   | .str parent value => s!"ns({encodeName parent},{atom value})"
   | .num parent value => s!"nn({encodeName parent},{value})"
 
-partial def encodeLevel : Level → String
-  | .zero => "l0"
-  | .succ level => s!"ls({encodeLevel level})"
-  | .max left right => s!"lm({encodeLevel left},{encodeLevel right})"
-  | .imax left right => s!"li({encodeLevel left},{encodeLevel right})"
-  | .param name => s!"lp({encodeName name})"
-  | .mvar id => s!"lv({encodeName id.name})"
-
 def encodeBinderInfo : BinderInfo → String
   | .default => "bd"
   | .implicit => "bi"
@@ -38,35 +30,6 @@ def encodeBinderInfo : BinderInfo → String
 def encodeLiteral : Literal → String
   | .natVal value => s!"ln({value})"
   | .strVal value => s!"lt({atom value})"
-
-partial def encodeExpr : Expr → String
-  | .bvar index => s!"eb({index})"
-  | .fvar id => s!"ef({encodeName id.name})"
-  | .mvar id => s!"em({encodeName id.name})"
-  | .sort level => s!"es({encodeLevel level})"
-  | .const name levels =>
-      s!"ec({encodeName name},[{String.intercalate "," (levels.map encodeLevel)}])"
-  | .app function argument => s!"ea({encodeExpr function},{encodeExpr argument})"
-  | .lam _ type body binderInfo =>
-      s!"el({encodeBinderInfo binderInfo},{encodeExpr type},{encodeExpr body})"
-  | .forallE _ type body binderInfo =>
-      s!"ep({encodeBinderInfo binderInfo},{encodeExpr type},{encodeExpr body})"
-  | .letE _ type value body nondependent =>
-      s!"ee({if nondependent then "1" else "0"},{encodeExpr type},{encodeExpr value},{encodeExpr body})"
-  | .lit literal => s!"ei({encodeLiteral literal})"
-  | .mdata _ body => s!"ed({encodeExpr body})"
-  | .proj name index body => s!"ej({encodeName name},{index},{encodeExpr body})"
-
-def encodeStatement (info : ConstantInfo) : String :=
-  let parameters := info.levelParams.map encodeName
-  let header :=
-    s!"statement-v1(uparams=[{String.intercalate "," parameters}],type={encodeExpr info.type}"
-  match info with
-  | .defnInfo _ | .opaqueInfo _ =>
-      match info.value? (allowOpaque := true) with
-      | some value => header ++ s!",value={encodeExpr value})"
-      | none => header ++ ",value=missing)"
-  | _ => header ++ ")"
 
 /-- Statement-v1 wire output. The bounded buffer amortizes small syntactic
 fragments; no complete encoded expression or statement is retained. -/
@@ -147,6 +110,14 @@ def writeStatement (out : StatementOutput) (info : ConstantInfo) : IO Unit := do
   out.put ")"
   out.flush
 
+private def statementAddress (info : ConstantInfo) : IO String := do
+  let initial : Sha256.Context := {}
+  let hash ← IO.mkRef (initial.update "trureturing:statement:v1\x00".toUTF8)
+  let stream : IO.FS.Stream := { (default : IO.FS.Stream) with
+    write := fun bytes => hash.modify (·.update bytes) }
+  writeStatement ⟨stream, ← IO.mkRef ByteArray.empty⟩ info
+  return "sha256:" ++ (← hash.get).hex
+
 structure ModuleInput where
   moduleName : String
   sourcePath : String
@@ -192,6 +163,10 @@ structure ModuleReport where
 def includeInStatement (name : Name) : ConstantInfo → Bool
   | .thmInfo _ => !(privateToUserName name).isInternalDetail
   | _ => true
+
+private def isRegistrationDiagnostic : Name → Bool
+  | .str _ "__information_registration_diagnostic" => true
+  | _ => false
 
 def kindOf : ConstantInfo → String
   | .axiomInfo _ => "axiom"
@@ -263,10 +238,7 @@ def inspectData (moduleData : ModuleData) (find : Name → Option ConstantInfo)
   let enumerationStart ← if profiling then IO.monoNanosNow else pure 0
   let allNames := moduleData.constNames ++
     generatedNames.filter (!moduleData.constNames.contains ·)
-  let metadata := allNames.filter fun name =>
-    match name with
-    | .str _ suffix => suffix == "__information_registration_diagnostic"
-    | _ => false
+  let metadata := allNames.filter isRegistrationDiagnostic
   let mut informationRegistrationErrors := #[]
   for name in metadata do
     match find name with
@@ -566,39 +538,56 @@ private unsafe def produceCompiled (reportOutput materialSpool : System.FilePath
   if let some path := generatedIndex then
     IO.FS.writeFile path (toJson (← generated.get).toArray).compress
 
+-- Independent targets may compile distinct proofs under the same theorem name.
+-- Keep the constant table, ownership and both closure caches inside this frame.
+@[noinline] private unsafe def writeFrozenDependencies (state : IO.Ref RawArtifacts.Store)
+    (name : String) (out : IO.FS.Handle) : IO Unit := do
+  let target := name.toName
+  RawArtifacts.loadModule target state
+  let store ← state.get
+  let data ← store.getModule target
+  let (current, generated) ←
+    if RawArtifacts.hasTypedInputs data then do
+      RawArtifacts.loadModule `LeanInformationAudit.TemplateEnrollment state
+      let (assessment, _) ← ArtifactAssessment.assess (← state.get) target
+      pure (assessment.store, assessment.generated.filter (·.2 == target) |>.map Prod.fst)
+    else pure (store, #[])
+  let axioms ← IO.mkRef ({ closure := current.metadata.axioms } : AxiomClosureState)
+  let provenance ← IO.mkRef ({} : AxiomClosureState)
+  let names := data.constNames ++ generated.filter (!data.constNames.contains ·)
+  out.putStr ("{\"module\":" ++ (toJson name).compress ++ ",\"declarations\":[")
+  let mut first := true
+  for constant in names do
+    if isRegistrationDiagnostic constant then continue
+    let info ← RawArtifacts.getConstant current.constants.find? constant
+    let included := includeInStatement constant info
+    let actualAxioms ← collectAxiomsShared current.constants.find? axioms constant
+    let fields := [
+      ("nameKey", toJson (encodeName constant)), ("kind", toJson (kindOf info)),
+      ("statementTypeAddress", toJson (← statementAddress info)),
+      ("includeInStatement", toJson included), ("axioms", toJson (actualAxioms.map Name.toString))]
+    let fields ← if included then do
+      let libraries ← FrozenDependencies.collect current provenance constant
+      pure (("libraries", toJson (libraries.map Name.toString)) :: fields)
+    else pure fields
+    unless first do out.putStr ","
+    first := false
+    out.putStr (Json.mkObj fields).compress
+  out.putStr "]}"
+
 private unsafe def frozenDependencies (request destination : System.FilePath) : IO Unit := do
   initSearchPath (← findSysroot)
   let modules : Array String ← IO.ofExcept (Json.parse (← IO.FS.readFile request) >>= fromJson?)
   let state ← IO.mkRef ({} : RawArtifacts.Store)
-  for name in modules do RawArtifacts.loadModule name.toName state
-  let store ← state.get
-  let shared ← IO.mkRef ({} : AxiomClosureState)
-  let report ← modules.mapM fun name => do
-    let target := name.toName
-    let data ← store.getModule target
-    let (current, generated, provenance) ←
-      if RawArtifacts.hasTypedInputs data then do
-        RawArtifacts.loadModule `LeanInformationAudit.TemplateEnrollment state
-        let (assessment, _) ← ArtifactAssessment.assess (← state.get) target
-        pure (assessment.store, assessment.generated.filter (·.2 == target) |>.map Prod.fst,
-          ← IO.mkRef ({} : AxiomClosureState))
-      else pure (store, #[], shared)
-    let axioms ← IO.mkRef ({ closure := current.metadata.axioms } : AxiomClosureState)
-    let names := data.constNames ++ generated.filter (!data.constNames.contains ·)
-    let rows ← names.filterMapM fun constant => do
-      if let .str _ "__information_registration_diagnostic" := constant then return none
-      let info ← RawArtifacts.getConstant current.constants.find? constant
-      unless includeInStatement constant info do return none
-      let libraries ← FrozenDependencies.collect current provenance constant
-      let actualAxioms ← collectAxiomsShared current.constants.find? axioms constant
-      let address := "sha256:" ++ Sha256.hex ("trureturing:statement:v1\x00" ++ encodeStatement info).toUTF8
-      return some <| Json.mkObj [
-        ("nameKey", toJson (encodeName constant)), ("kind", toJson (kindOf info)),
-        ("statementTypeAddress", toJson address),
-        ("libraries", toJson (libraries.map Name.toString)),
-        ("axioms", toJson (actualAxioms.map Name.toString))]
-    return Json.mkObj [("module", toJson name), ("declarations", toJson rows)]
-  IO.FS.writeFile destination (toJson report).compress
+  IO.FS.withFile destination .write fun out => do
+    out.putStr "["
+    for h : index in [:modules.size] do
+      if index > 0 then out.putStr ","
+      try
+        writeFrozenDependencies state modules[index] out
+      finally
+        RawArtifacts.release state
+    out.putStr "]"
 
 unsafe def main (args : List String) : IO Unit := do
   if let ["--frozen-dependencies-v1", request, destination] := args then
