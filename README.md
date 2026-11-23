@@ -42,18 +42,21 @@ gh workflow run release.yml --ref dev -f source=pr/123
 
 To refresh an expired artifact, rerun the pull request CI or use `gh workflow run ci.yml --ref my-feature` for a branch.
 
-Manual preview tags include the channel, workflow run number, and first 12 digits of the source SHA. An automatic dev preview uses `v<series>-dev.g<full-commit-sha>`. Set the repository variable `TOOLS_RELEASE_SERIES` to choose the version under development (default `0.1.0`).
+PR and feature preview tags include the channel, workflow run number, and first 12 digits of the source SHA. A dev preview uses `v<series>-dev.g<full-commit-sha>`. Set the repository variable `TOOLS_RELEASE_SERIES` to choose the version under development (default `0.1.0`).
 
-1. Trial the published preview in a consumer checkout with `make install-tools` and `python3 tools/consumer/pin.py <preview-tag>`. The pin command verifies the archive SHA-256 and updates the local `Meta/tools-release.json`.
-2. Submit the tested source for tools `dev` review. From the tools checkout, use the explicit lock path for a proposed adoption. With no argument the command reads the lock already committed to `trureturing/dev`.
+### Pair a tools PR with a consumer PR
 
-   ```sh
-   python3 tools/consumer/source_pr.py --lock /path/to/trureturing/Meta/tools-release.json
-   python3 tools/consumer/source_pr.py
-   ```
+1. On the same-repository tools PR branch targeting `dev`, run `python3 tools/consumer/source_pr.py --prepare`. If the current consumer pin's tools source is missing, follow the fetch and merge command it prints, resolve any conflicts, and run `--prepare` again. The head commit records the consumer pin's Git blob ID. Push that head and let tools CI pass before publishing with `gh workflow run release.yml --ref dev -f source=pr/123`.
+2. From the tools checkout, run `python3 tools/consumer/pin.py <preview-tag> --consumer /path/to/trureturing`. The command verifies the archive SHA-256 and writes the tag, digest and full source SHA. Open the consumer PR targeting `dev` and merge it after the required checks pass. Use a merge commit or squash merge so the landed commit contains the lock change.
+3. The scheduled tools workflow picks up consumer merges from the GitHub UI and CLI. For immediate delivery or a retry, run `gh workflow run adopt-tools.yml --ref dev -f consumer_pr=456` from the tools checkout. This uses the merged consumer PR's actual pin change and submits only the named tools PR at the matching SHA to GitHub's regular merge API.
 
-   The command uses the maintainer's GitHub CLI credentials. It verifies the release digest, resolves the tag to its commit and reports when that commit is already in tools `dev` history. Otherwise it lists an existing open or draft tools-to-`dev` PR at that commit, or a same-repository PR containing it. Review the additional commits in a stacked PR. If no PR qualifies, the command opens one from the exact source SHA. Review and merge through the normal tools checks.
-3. After the tools `dev` push passes CI, its release workflow verifies the archive bytes against the tested artifact and publishes the resulting dev package. Pin that package with `python3 tools/consumer/pin.py <dev-release-tag>` in the consumer checkout, then submit the lock to `trureturing/dev`.
+If another consumer PR changes the pin first, integrate the new pin's source into the original tools PR and prepare, test, and publish its new head. Resolve the consumer lock conflict using that new preview and rerun the consumer checks. This applies even if the older preview already contained the newly adopted tools source. Unrelated consumer changes leave the preview eligible.
+
+The tools workflow dispatches dev CI after its bot merge. To recover dev publication manually, run `gh workflow run ci.yml --ref dev` and wait for success. Then use `gh workflow run release.yml --ref dev -f source=dev` if the dev release still needs publication.
+
+### Adopt a tools release after its source merges
+
+Use `python3 tools/consumer/source_pr.py --lock /path/to/trureturing/Meta/tools-release.json` to find or submit a tools PR for a legacy preview. With no argument it reads the current consumer `dev` pin. Review and merge the source into tools `dev`, then adopt the resulting dev release using `python3 tools/consumer/pin.py <dev-release-tag>` in the consumer checkout.
 
 To inspect open tools PRs, run `python3 tools/consumer/source_pr.py --list` from a tools Git checkout with Git 2.43 or newer. The command compares each PR's own base-to-head change to the current tools `dev` in a temporary Git repository. It reports ancestry, identical trees, an already-applied change, distinct changes, and conflicts. Ancestry and historical patch matches can survive a later revert. Maintainers assess the present usefulness of each change before closing or merging its PR.
 

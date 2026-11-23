@@ -25,8 +25,8 @@ class DevPublication(unittest.TestCase):
             output = Path(temp) / "output"
             env = dict(GITHUB_EVENT_NAME="workflow_run", GITHUB_EVENT_PATH=str(event),
                        GITHUB_REPOSITORY_ID="2", GITHUB_OUTPUT=str(output), SERIES="0.1.1")
-            for number, attempt in [(30, 2), (51, 1)]:
-                self.run.update(id=number, run_attempt=attempt)
+            for number, attempt, trigger in [(30, 2, "push"), (51, 1, "workflow_dispatch")]:
+                self.run.update(id=number, run_attempt=attempt, event=trigger)
                 event.write_text(json.dumps(self.event))
                 output.write_text("")
                 name = f"tools-release-{attempt}"
@@ -44,14 +44,14 @@ class DevPublication(unittest.TestCase):
             with self.subTest(changes=changes), patch.object(preview, "api", return_value={"id": 12}):
                 event = dict(self.event, workflow_run=self.run | changes)
                 with self.assertRaises(SystemExit):
-                    preview.completed_dev_push(event, 2)
+                    preview.completed_dev_ci(event, 2)
 
     def test_absent_expired_duplicate_and_old_attempt_artifacts(self):
         live = {"id": 99, "name": "tools-release-2", "expired": False}
         for assets in [[], [live | {"expired": True}], [live, live], [live | {"name": "tools-release-1"}]]:
             with self.subTest(assets=assets), patch.object(preview, "api", side_effect=[{"id": 12}, {"artifacts": assets}]):
                 with self.assertRaises(SystemExit):
-                    preview.completed_dev_push(self.event, 2)
+                    preview.completed_dev_ci(self.event, 2)
 
 
 if __name__ == "__main__":

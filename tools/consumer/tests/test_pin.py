@@ -3,10 +3,12 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 spec = importlib.util.spec_from_file_location("pin", Path(__file__).resolve().parents[1] / "pin.py")
 pin = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pin)
@@ -50,3 +52,19 @@ class PinTests(unittest.TestCase):
                 pin.pin_release(root, tag)
                 repeated.assert_not_called()
             self.assertEqual(json.loads(path.read_text()), lock)
+
+    def test_paired_tag_pins_its_full_source_independently_of_the_digest(self):
+        tag, sha, digest = "v0.2.0-pr.18.14.g" + "a" * 12, "a" * 40, "d" * 64
+        release = {"tag_name": tag, "draft": False, "prerelease": True, "author": {"id": pin.ACTIONS_BOT},
+                   "published_at": "2026-01-02T01:00:00Z",
+                   "assets": [{"name": pin.ASSET, "state": "uploaded", "digest": f"sha256:{digest}",
+                               "uploader": {"id": pin.ACTIONS_BOT}}]}
+        with (patch.object(pin, "api", return_value=release),
+              patch.object(pin, "tag_source", return_value=sha),
+              patch.object(pin, "base_trailers", return_value=["b" * 40])):
+            self.assertEqual(pin.release_pin(tag), {"version": tag, "sha256": digest, "source_sha": sha})
+            with self.assertRaisesRegex(ValueError, "published after"):
+                pin.release_pin(tag, published_by="2026-01-01T01:00:00Z")
+            release["author"]["id"] = 123
+            with self.assertRaisesRegex(ValueError, "invalid paired"):
+                pin.release_pin(tag)
