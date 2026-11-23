@@ -45,9 +45,7 @@ def keepCompanion (owner name : Name) (value : Expr) (isTheorem : Bool)
       throw <| IO.userError s!"incomplete_closure:dtr.generated_owner:{name}"
     return
   modify fun state => { state with
-    store := { state.store with
-      constants := state.store.constants.insert name info
-      owners := state.store.owners.insert name owner }
+    store := state.store.insertGenerated owner info
     generated := state.generated.push (name, owner) }
 
 def prepareCompanions (owner : Name) (row : Decoder.CompanionInput) : M Unit := do
@@ -75,9 +73,7 @@ private def keepDiagnostic (entry : InformationRegistryEntry) (diagnostic : Opti
         (← get).generated.contains (name, entry.registrationModuleName) do
       throw <| IO.userError s!"registration diagnostic binding mismatch:{name}"
   modify fun state => { state with
-    store := { state.store with
-      constants := state.store.constants.insert name info
-      owners := state.store.owners.insert name entry.registrationModuleName }
+    store := state.store.insertGenerated entry.registrationModuleName info
     generated := if state.generated.contains (name, entry.registrationModuleName) then state.generated
       else state.generated.push (name, entry.registrationModuleName) }
 

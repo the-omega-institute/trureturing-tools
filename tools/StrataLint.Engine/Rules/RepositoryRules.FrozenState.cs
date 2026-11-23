@@ -71,7 +71,7 @@ internal static partial class RepositoryRules
                 continue;
             }
 
-            if (!record.Declarations.SequenceEqual(FrozenStateRecord.Project(report)))
+            if (!record.HasInventory(FrozenStateRecord.Project(report)))
                 findings.Add(new RuleFinding(displayPath, $"selector {modulePath.Value} declaration list mismatch with current report"));
 
             var actual = FrozenContentAddress.ComputeModuleStatementId(modulePath, report);

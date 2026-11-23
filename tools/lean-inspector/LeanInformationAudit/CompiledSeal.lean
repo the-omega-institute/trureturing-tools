@@ -154,9 +154,7 @@ unsafe def consume (snapshot : Discovery.Snapshot) (owner : Name) (input : SealI
       unless same && (← calculate context (CompiledExpressions.sameShape value (catalogInfo.value?.getD catalogInfo.type))) do
         throw <| IO.userError (qualifiedNameCollisionError owner catalogId catalogName sorted)
     modify fun state => { state with
-      store := { state.store with
-        constants := state.store.constants.insert catalogName catalogInfo
-        owners := state.store.owners.insert catalogName owner }
+      store := state.store.insertGenerated owner catalogInfo
       generated := state.generated.push (catalogName, owner) }
     records := records.push result
   return records
