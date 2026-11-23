@@ -110,14 +110,6 @@ def writeStatement (out : StatementOutput) (info : ConstantInfo) : IO Unit := do
   out.put ")"
   out.flush
 
-private def statementAddress (info : ConstantInfo) : IO String := do
-  let initial : Sha256.Context := {}
-  let hash ← IO.mkRef (initial.update "trureturing:statement:v1\x00".toUTF8)
-  let stream : IO.FS.Stream := { (default : IO.FS.Stream) with
-    write := fun bytes => hash.modify (·.update bytes) }
-  writeStatement ⟨stream, ← IO.mkRef ByteArray.empty⟩ info
-  return "sha256:" ++ (← hash.get).hex
-
 structure ModuleInput where
   moduleName : String
   sourcePath : String
@@ -537,6 +529,14 @@ private unsafe def produceCompiled (reportOutput materialSpool : System.FilePath
         (← IO.getStderr).putStrLn s!"LEAN_INSPECTOR_TARGET_RELEASE completed={index + 1} module={input.moduleName} target_constants={RawArtifacts.mapSize released.constants} target_modules={released.modules.toList.length} target_regions={released.regions.size} target_metadata={released.metadata.axioms.toList.length} rss_kib={resident.stdout.trimAscii.toString}"
   if let some path := generatedIndex then
     IO.FS.writeFile path (toJson (← generated.get).toArray).compress
+
+private def statementAddress (info : ConstantInfo) : IO String := do
+  let initial : Sha256.Context := {}
+  let hash ← IO.mkRef (initial.update "trureturing:statement:v1\x00".toUTF8)
+  let stream : IO.FS.Stream := { (default : IO.FS.Stream) with
+    write := fun bytes => hash.modify (·.update bytes) }
+  writeStatement ⟨stream, ← IO.mkRef ByteArray.empty⟩ info
+  return "sha256:" ++ (← hash.get).hex
 
 -- Independent targets may compile distinct proofs under the same theorem name.
 -- Keep the constant table, ownership and both closure caches inside this frame.

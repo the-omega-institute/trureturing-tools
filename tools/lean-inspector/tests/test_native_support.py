@@ -54,7 +54,7 @@ def transport_inspector(source):
     # The frozen command uses the full compiled assessment. The frozen
     # consumer suite exercises it in the registered producer package.
     source = source.replace('import LeanInformationAudit.FrozenDependencies\n', '')
-    start = source.index('private unsafe def frozenDependencies ')
+    start = source.index('private def statementAddress ')
     main = source.index('unsafe def main (args : List String)', start)
     dispatch = source.index('  if let ["--frozen-dependencies-v1"', main)
     end = source.index('  let args ← match args with', dispatch)
