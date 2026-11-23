@@ -75,7 +75,6 @@ internal sealed partial class RuleFixture
     internal const string HeartsPath = "D5/X_Frontier/Hearts.lean";
     internal const string ThreeDistancePath = "D5/S1/Phase/ThreeDistance.lean";
     internal const string TowerManifestPath = RepositoryRules.TowerManifestPath;
-    internal const string ValuesProjectionPath = RepositoryPathPolicy.ValuesProjectionPath;
     internal const string WorkflowPath = ".github/workflows/ci-current.yml";
     internal const string StageScriptPath = "tools/scripts/workflow/ci-entry.sh";
     internal const string SyntheticProtectedPath =
@@ -152,20 +151,7 @@ internal sealed partial class RuleFixture
                         ImmutableArray.Create("Classical.choice", "Quot.sound", "propext")),
                 ]),
         };
-        var bindingPath = RepoPath.CreateKnown(ValuesBindingPath);
-        var statement = Assert.Single(CanonicalStatementWriter.DeclarationStatementIds(
-            bindingPath,
-            Reports[ValuesBindingPath]));
-        Files[ValuesKernelBindingValidator.RelativePath] = $"""
-            schema_version = 1
-
-            [[constants]]
-            id = "D5/test"
-            lean_gid = "D5/S0/Carrier/ValuesBinding.fixtureValue"
-            lean_statement_sha256 = "{statement.StatementId.Value["sha256:".Length..]}"
-            """ + "\n";
         BaselineReports = new Dictionary<string, LeanFileReport>(Reports, StringComparer.Ordinal);
-        Baseline[ValuesKernelBindingValidator.RelativePath] = Files[ValuesKernelBindingValidator.RelativePath];
         Changes = new List<string> { BlueprintPath };
     }
 
@@ -270,7 +256,6 @@ internal sealed partial class RuleFixture
             case "formula": AddIllegalFormula(); break;
             case "backfill": Files[FixtureBackfillSourcePath] = Files[FixtureBackfillSourcePath].Replace("source_id = \"fixture-source\"", "source_id = [\"fixture-source\"]", StringComparison.Ordinal); break;
             case "query": Files["Library/queries.yaml"] = "schema_version: 1\nqueries:\n  - id: D5-Q0099\n    target_gid: D5/S0/Carrier/Ring\n"; break;
-            case "values": Files["Evidence/D5/values.result.json"] = "{\"D5/sample\": {\"status\": \"verified\"}}\n"; break;
             case "anomaly": Files["Evidence/D5/S0/Carrier/Result.run.json"] = "{\"anomaly\": \"fixture drift\"}\n"; break;
             case "axiom": SetRingDeclaration("invented", "axiom", "invented"); break;
             case "future": AddFutureTheory(); break;
@@ -299,7 +284,6 @@ internal sealed partial class RuleFixture
         "formula" => "Evidence/D5/S0/Carrier/Formula.check.json",
         "backfill" => FixtureBackfillSourcePath,
         "query" => "Library/queries.yaml",
-        "values" => "Evidence/D5/values.result.json",
         "anomaly" => "Evidence/D5/S0/Carrier/Result.run.json",
         "future" => "D8/S0/Carrier/Ring.lean",
         "blueprint-skeleton" or "legacy-scribe" => BlueprintSourcePath,
@@ -513,11 +497,6 @@ internal sealed partial class RuleFixture
             + " -/\n"
             + "def fixtureTask : Unit := ()\n";
         Reports[path] = Report();
-    }
-
-    internal void AddValuesProjection()
-    {
-        Files[ValuesProjectionPath] = "{}\n";
     }
 
     internal void AddNormalizedBackfillTicketTarget()

@@ -21,7 +21,7 @@ public sealed class ScribeCliCommandSetTests
     {
         var pinned = new[]
         {
-            "content-check", "emit", "emit-values", "filemap", "lean-inputs", "resources", "resources release", "resources verify-release", "scripts",
+            "content-check", "emit", "filemap", "lean-inputs", "resources", "resources release", "resources verify-release", "scripts",
         };
 
         Assert.Equal(

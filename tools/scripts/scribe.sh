@@ -32,33 +32,10 @@ fi
 
 dotnet build "$PROJECT" --configuration Release --nologo --verbosity quiet
 SCRIBE_DLL="$ROOT/tools/StrataLint.Scribe/bin/Release/net10.0/StrataLint.Scribe.dll"
-consumer_args=(--role scribe-consumer)
-emit_args=(--paths-from "$PATHS_FILE")
 LEAN_TARGETS="$(dotnet "$SCRIBE_DLL" lean-inputs --paths-from "$PATHS_FILE")"
 [[ -n "$LEAN_TARGETS" ]] || { echo 'scribe: Lean input scope is empty' >&2; exit 2; }
 LEAN_TARGETS="${LEAN_TARGETS//$'\n'/ }"
 make lean-report-prepare "LEAN_TARGETS=$LEAN_TARGETS"
 make lean-report-scoped "LEAN_TARGETS=$LEAN_TARGETS"
-consumer_args+=(--report "$LEAN_REPORT" --targets "$LEAN_TARGETS")
-emit_args+=(--scoped)
-
-run_scribe() {
-  local command=(dotnet "$SCRIBE_DLL" "$1")
-  if [[ "$1" == "emit" ]]; then
-    command+=("${emit_args[@]}")
-    "$CONSUMER" "${consumer_args[@]}" -- "${command[@]}"
-  else
-    "${command[@]}"
-  fi
-}
-
-run_generator() {
-  case "$1" in
-    emit|emit-values) run_scribe "$1" ;;
-    *) echo "scribe: unknown generator '$1'" >&2; return 2 ;;
-  esac
-}
-
-generators=(emit emit-values)
-
-for generator in "${generators[@]}"; do run_generator "$generator"; done
+command=(dotnet "$SCRIBE_DLL" emit --paths-from "$PATHS_FILE" --scoped)
+"$CONSUMER" --role scribe-consumer --report "$LEAN_REPORT" --targets "$LEAN_TARGETS" -- "${command[@]}"

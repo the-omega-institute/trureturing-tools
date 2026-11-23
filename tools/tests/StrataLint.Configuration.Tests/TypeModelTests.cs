@@ -250,8 +250,6 @@ public sealed class TypeModelTests
     [InlineData("D5/S0/Carrier/Ring.αmap_2", "D5/S0/Carrier/Ring.lean")]
     [InlineData("D5/B/S0/Carrier/Ring", "Blueprint/D5/S0/Carrier/Ring.md")]
     [InlineData("D5/E/S0/Carrier/Ring.result--json", "Evidence/D5/S0/Carrier/Ring.result.json")]
-    [InlineData("D5/E/values--json", "Evidence/D5/values.json")]
-    [InlineData("D5/E/values.result--json", "Evidence/D5/values.result.json")]
     [InlineData("D5/E/experiments/D5-X0001.spec--yaml", "Evidence/D5/experiments/D5-X0001.spec.yaml")]
     [InlineData("D5/C/2026-07-11/r168", "Chronicle/2026/07/11-r168.md")]
     [InlineData("D5/L/bellissard1992gap", "Library/notes/bellissard1992gap.md")]
@@ -305,7 +303,8 @@ public sealed class TypeModelTests
     [InlineData("D5/B/S0/Carrier/Ringα")]
     [InlineData("D5/E/S0/Carrier/Ring.Bα--json")]
     [InlineData("D5/E/S0/Carrier/Ring.result--α")]
-    [InlineData("D5/E/values.Bα--json")]
+    [InlineData("D5/E/values--json")]
+    [InlineData("D5/E/values.result--json")]
     [InlineData("D5/E/kernels/Ring.Bα--json")]
     [InlineData("D5/E/experiments/D5-X0001.Bα--json")]
     [InlineData("D5/C/2026-07-11/rα")]
@@ -422,7 +421,6 @@ public sealed class TypeModelTests
     [InlineData("tools/TestSupport/StrataLint.ConfigurationTestSupport/TestFileMap.cs")]
     [InlineData("Golden/Projection/x.json")]
     [InlineData("Golden/Frozen/state/D5/S0/Carrier/Ring.lean.json")]
-    [InlineData("Golden/values-kernels.toml")]
     public void CanonicalGoldenDataResidencesAreClosedWorldRegistered(string value)
     {
         var path = RepoPath.CreateKnown(value);
@@ -433,6 +431,7 @@ public sealed class TypeModelTests
 
     [Theory]
     [InlineData("Golden/other.toml")]
+    [InlineData("Golden/values-kernels.toml")]
     [InlineData("Golden/Other/x.json")]
     [InlineData("Golden/Projection/nested/x.json")]
     [InlineData("Golden/Projection/x.toml")]

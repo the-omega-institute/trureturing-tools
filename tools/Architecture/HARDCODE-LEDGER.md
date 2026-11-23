@@ -35,7 +35,6 @@ theories, and bootstrap admission are outside this anti-hard-code inventory.
 | Check | Machine criterion and scope | Red fixture evidence | Covered family |
 |---|---|---|---|
 | FILEMAP custody and producer policy | `Meta/FILEMAP.toml` is parsed fail-closed; every tracked/unignored path matches exactly one pattern, FILEMAP entries own path membership and Evidence policy, generated files match the producer inventory and name that producer, data names an existing program verifier, and class directories remain pure. Residence policy states the no-data-under-`tools/` ideal and now freezes the closed zero-violation state. | Yes: unclassified, ambiguous, missing registered references, missing loader, missing/mismatched producer, missing generated `produced_by`, directory mixing, unmarked protected-surface data, exact residence inventory drift, data-to-generated reference, and Lean-to-generated import red fixtures. | Hand-maintained or implicit file ownership, generated outputs without an executable producer, and unmarked or newly added protected-surface data. The bounded dependency predicate remains recorded under `HC-OPEN-012`; `RESIDENCE-EPOCH` is closed. |
-| Values constant-set ownership | Engine validates canonical v2 projection schema, status/receipt shape, input attestation, unique sorted IDs, and complete Lean provenance without owning the ID set or kernel names. Scribe loads a non-empty, unique, sorted catalog of any size from `values-kernels.toml`; canonical re-emission is byte-exact. | Yes: the two-item projection, synthetic future-kernel, and one-row TOML fixtures each failed against the former C# copies before repair. Production writer byte-stability and current catalog-content tests remain authoritative for today's 14 rows. | Constant identity/cardinality and computation selection copied from the emitter data into the Engine or loader. It does not make arbitrary projections canonical: the canonical writer binds output to TOML/Lean at production time. |
 | BannedApi culture matrix | The official semantic analyzer consumes an exact, duplicate-free 143-member culture-sensitive denylist in Engine, Scribe, and CLI; `selftest` checks project wiring, the central version, actual lock framework keys, lock attachment, and the exact matrix (`SelfTestGovernancePolicy.cs`). | Yes: synthetic missing-analyzer and `net99.0` lock fixtures in `SelfTestGovernancePolicyTests`, plus the retained compile-fail proof. Attaching it to CLI made providerless `int.TryParse` fail with the sole RS0030 before repair. | Providerless numeric/temporal parse, try-parse, and formatting overloads in production projects. |
 | BannedApi nondeterminism matrix | Engine, Scribe, and CLI consume the exact 7-member ambient clock/entropy/tick denylist. Engine and Scribe also consume the one-member GUID denylist; CLI is outside that GUID predicate because it allocates ephemeral workspaces. `selftest` checks the exact three-file matrix (`SelfTestGovernancePolicy.cs`). | Yes: exact-matrix synthetic fixtures plus the retained compile-fail proof, whose complete run produced exactly 18/18 RS0030 diagnostics. | Ambient runtime nondeterminism in all production projects; GUID creation in deterministic Engine/Scribe code. It does not prove every future CLI GUID use is ephemeral. |
 | SL-004 Mirror completeness | `mirror-B` and `mirror-E` header fields, when not `none`, must have the matching `D5/B/` or `D5/E/` address family and resolve to an existing projection (`RepositoryRules.Structure.cs:98`). | Yes: active-rule `mirror` mutation passed by deleting the referenced Blueprint. | Hand-copied formal-to-projection addresses; it checks existence and address family, not content equality. |
@@ -45,7 +44,6 @@ theories, and bootstrap admission are outside this anti-hard-code inventory.
 | SL-013 Permanent task ledger | The descriptor remains deferred `NoFindings`; it does not enforce task prose. `TASK D5-Tnnnn` remains the case-address vocabulary used by freezing and target commands. | Deferred under D5-T0013; no active SL-013 rejection predicate exists. | Task-code references used by active consumers; free-form task prose has no shape or append-only checker. |
 | SL-015 Machine fields and GID grammar | Repository path policy checks the complete path inventory. GID character set, duplicate GIDs, evidence-kind collisions, anchor syntax and JSON formula grammar inspect selected admission bodies; theory and auxiliary digestion bodies are skipped. | Regression fixtures reject unsafe GIDs, evidence collisions and malformed non-digestion evidence; auxiliary malformed bodies do not block unrelated Lean admission. | Canonical address and field literals plus the closed formula language. Local digestion writers validate their selected inputs. |
 | SL-017 Typed anchor membership | Formal header anchors and library query targets must be canonical catalog members or valid local targets; missing/noncanonical catalog bytes fail closed (`RepositoryRules.Content.cs:194`). | Yes: unregistered literature, malformed external, and uncataloged opaque anchor fixtures. | Invented or unregistered formal references. |
-| SL-018 Machine-produced values | Only `Evidence/D5/values.json` is accepted as the canonical projection address (`RepositoryRules.Content.cs`). The rule no longer re-derives the projection's own bytes from a recomputed producer attestation: that was guarding a projection, and CLAUDE.md section 0 makes the governed producer plus its declared input closure the authority instead. | Yes: the active-rule `values` mutation fixture, plus a green fixture proving mutated canonical bytes are admitted. | Values written to a noncanonical `Evidence/D5/values.*` address. It no longer detects hand-edited bytes inside the canonical projection; `make emit` re-derives them from `Golden/values-kernels.toml`. |
 | SL-014 Toolchain upgrade compatibility | Deferred under `D5-T0010`; `tools/StrataLint.Engine/Rules/RepositoryRules.cs` registers a deferred case with no rejection predicate. | No active red fixture; the deferred-state test passed. | **No active broad or narrow toolchain/version copy guard.** `HC-OPEN-005` records the retired narrow scanners; the BannedApi analyzer lock check above remains independently active. |
 
 ## Executed evidence
@@ -71,8 +69,6 @@ theories, and bootstrap admission are outside this anti-hard-code inventory.
   the specification-copy stock fixture was replaced with neutral synthetic text.
 - Target-framework guard selection: 5/5 cases passed; explicit harness-path and shared
   gate contract selection: 11/11 cases passed, including the out-of-root rejection.
-- Values authority selection: Engine schema/attestation loader 9/9 and Scribe catalog,
-  writer, and byte-exact projection selection 8/8 passed.
 - Definitions retirement migration autopsy: moving the canonical TOML writer into CLI
   activated the existing BannedApi analyzer on that source; the first Debug build failed
   with exactly one RS0030 at providerless `int.ToString("X4")`. Supplying
@@ -121,15 +117,7 @@ theories, and bootstrap admission are outside this anti-hard-code inventory.
   admission: an emitter mismatch may yield no Scribe capability only when SL-022 already
   classifies the change as protected. A clear content change still throws, as the paired
   red/green fixture proves.
-- Historical values replay autopsy: after Scribe replay was restored, the candidate
-  harness flipped the admitted baseline tree to SL-018 because its v2 input manifest
-  named the former kernel-data residence. Production still accepts only
-  `Golden/values-kernels.toml`; conservative baseline replay can supply a historical path
-  only after finding exactly one prior `*/values-kernels.toml` whose bytes equal the
-  candidate canonical file. The loader then verifies the old manifest's declared path,
-  individual SHA-256, and combined input SHA-256 without an implicit legacy alias.
-- Historical frozen-ledger replay autopsy: restoring the values attestation exposed the
-  same old-tree/current-path distinction in SL-008. Candidate admission already resolved
+- Historical frozen-ledger replay autopsy: SL-008 encountered an old-tree/current-path distinction. Candidate admission already resolved
   an old baseline ledger against a new canonical current ledger, but replay evaluates the
   old tree as both sides. The validator now accepts an explicit replay path selected by
   the shared canonical-or-unique-byte-exact resolver; production still defaults to
@@ -152,8 +140,7 @@ theories, and bootstrap admission are outside this anti-hard-code inventory.
 - Residence-epoch split autopsy: the caller meta-judge adopted the prior PARTIAL verdict:
   making the old judge accept the combined move would require weakening the recorded
   residence or protection law. The seven Golden artifacts therefore returned by 100%
-  Git rename, the values attestation returned to its prior input identity, and the
-  relocation-only values/frozen replay adapters were reverted. FILEMAP remains active and
+  Git rename, and the relocation-only replay adapters were reverted. FILEMAP remains active and
   freezes the five concrete `kind=data` violations instead of claiming zero violations.
 - Residence spec-boundary rebind: A8/A18 residence wording shifted the twelve immutable
   acceptance samples by 372 bytes. Each prior byte slice matched the revised spec exactly
@@ -171,19 +158,6 @@ theories, and bootstrap admission are outside this anti-hard-code inventory.
   identity drift. This branch merged the new base without rebase; the renewed ceremony
   and final gate therefore bind the stable post-merge identity instead of reusing the
   stale certificate.
-- RESIDENCE-EPOCH predecessor-bridge autopsy: exact base
-  `ed50b8859574a461f67412c138e1fc4080cf162d` rejected the future P2 tree even though
-  contract-plan comparison ran and accepted the exact five-path contraction: the
-  certificate recorded all five `retired_exact_paths`, `uncovered_obligations=[]`, and
-  eligible base-owned plans for that delta. `CustodyTransferV1` suppresses only those
-  mapped SL-022 protection retirements; it cannot waive the independent actual-tree
-  SL-000 from the closed `RepositoryPathPolicy`, SL-018's required
-  `Meta/StrataLint/Golden/values-kernels.toml`, or the offset SL-016 block. This bridge is
-  pure expansion: it moves no data, consumes no plan, changes no protection policy,
-  exclusion, or C0 ceremony, and admits only the exact future files plus flat canonical
-  case data. The values loader keeps the old writer input but accepts exactly one of the
-  old and future residences, with the same ordered manifest and hashes; both or neither
-  fail closed. P2 performs the move and contracts this temporary dual-residence domain.
 - Residence P2 fixture-state autopsy: the first full non-C0 run failed 12/639 because
   synthetic contract comparisons derived their pre-P2 baseline from the now post-P2
   `Current()` policy, erasing the intended retirement delta, while GoldenRecord's
@@ -192,29 +166,10 @@ theories, and bootstrap admission are outside this anti-hard-code inventory.
   input; the exact 26-test failing selection passed before ceremony work resumed. The
   next architecture scan then caught three real paths inline in the new missing-registry
   fixture; each was promoted to a named test constant without weakening the path policy.
-- Residence P2 C0 replay autopsy: base `3119316` evaluated preimage `5fae3a2`; the actual
-  candidate was blocked by SL-016 and SL-022, the actual baseline flipped to SL-018, and
-  the finite replay preserved 37 base admits but only 36 candidate admits. Contract
-  accounting still recorded all five retired exact paths with `uncovered_obligations=[]`.
-  The roots were twelve stale spec-acceptance boundaries after the P2 spec edit and the
-  baseline values attestation naming its former kernel-data residence. The first canonical
-  `make ingest BASE=origin/dev` also failed closed because CAS-backed `atomizer:none`
-  boundaries were returned unchanged; ingest now requires each trusted CAS blob to have
-  one byte-exact source match and rejects missing, changed, or ambiguous matches. Its
-  successful rerun changed only the twelve start/end pairs. Production remains single-home
-  at `Golden/values-kernels.toml`; only conservative baseline replay can pass an explicit
-  historical suffix path selected by a unique byte-exact relocation, with missing, drift,
-  and ambiguity all failing closed.
 - The next C0 replay restored the baseline tree and all 37/37 admits, then rejected the
   actual candidate only because the four new ingest regressions pushed
   `DigestionLedgerTests.cs` to 821 lines. The tests moved intact to a partial-class sibling;
   both files are below the SL-003 ceiling and no capacity rule was weakened.
-- After that split, three exact-base replays emitted no certificate because the candidate
-  worker exhausted its unchanged 180-second budget. The replay-only values resolver had
-  loaded the entire candidate revision to obtain one canonical TOML blob; after the CAS
-  epoch, `ReadRevision` expands that scan into a `git show` per repository file. The
-  resolver now reads only the exact-commit, exact-path regular blob while actual-candidate
-  admission retains its complete snapshot. The timeout was not raised or bypassed.
 - The repaired replay against base `df14b4c43e001308e2991d8096f8500b8f167856`
   and preimage `a2c5f008d3169dc771c7a8ff30657ec9c1c5df42` then completed within
   the unchanged budget: zero findings, 117 golden cases, 118 total corpus cases, six
@@ -332,7 +287,7 @@ theories, and bootstrap admission are outside this anti-hard-code inventory.
 
 | Family | Concrete instances | Existing guard | Verdict |
 |---|---|---|---|
-| Magic numbers and thresholds | `LeanCacheProvisioner.cs:34,47,72` repeats 1800 seconds; `RepositoryRules.Structure.cs:73-94` embeds 600/800/12 policy thresholds; `QuestPdfWriter.cs:31-47` embeds layout values 36/10/19/18/8. | BannedApi checks ambient APIs, not numeric literals. SL-018 covers only the canonical values projection. | `HC-OPEN-001`: no general low-false-positive predicate. The same syntax represents timeout policy, UI design tokens, proof constants, array bounds, and protocol widths. |
+| Magic numbers and thresholds | `LeanCacheProvisioner.cs:34,47,72` repeats 1800 seconds; `RepositoryRules.Structure.cs:73-94` embeds 600/800/12 policy thresholds; `QuestPdfWriter.cs:31-47` embeds layout values 36/10/19/18/8. | BannedApi checks ambient APIs, not numeric literals. | `HC-OPEN-001`: no general low-false-positive predicate. The same syntax represents timeout policy, UI design tokens, proof constants, array bounds, and protocol widths. |
 | Inline JSON/YAML literals | Synthetic directory-ledger defaults and negative fixtures in `tools/TestSupport/StrataLint.CliTestSupport/RuleFixture.cs`. | Structured canonical writers validate admitted repository artifacts, not arbitrary C# fixture literals. | `HC-OPEN-003`: no machine consumer covers arbitrary C# fixture literals. Malformed-input tests must preserve noncanonical bytes; replacing them with serializers would erase the behavior under test. A global ban would mostly reject valid negative fixtures, so typed fixture builders must be introduced only where they preserve the malformed bytes under test. |
 | Environment, path, OS, locale | Fixed tool PATH in `tools/scripts/local-harness-gate.sh`; POSIX `/tmp` in `WorktreeCommandTests.cs:27-82`; `/usr/bin/false` at `FaultInjectionTests.cs:106`. The domain vocabulary retains strict YAML parsing. | Shell scripts explicitly target Bash; BannedApi now covers culture and ambient time/entropy in all production projects. No declared OS support matrix is machine checked. | `HC-OPEN-004`: without a support contract or a typed temporary-workspace capability, the machine cannot distinguish an intentional POSIX path from an accidental portability bug. |
 | Time/tool/version literals | Production harness discovery derives MSBuild `TargetPath`, but workflows, C#, and compatibility fixtures can still copy SDK, central-package, TFM, or Lean version text. Test-only Lean 4.24 fixture strings still differ from the live 4.31 pin. | `tools/StrataLint.Engine/Runtime/SelfTestGovernancePolicy.cs` still compares the BannedApi analyzer package's central version with every lock framework key. The target-framework, SDK-workflow, and general central-package literal scanners do not run; SL-014 remains deferred. | `HC-OPEN-005` expanded: those three copy families have no machine consumer after `46220826c`. That verdict rejected whole-repository text scans because concatenation bypasses them. Future coverage must route SDK, package, and framework identities through typed values that make duplicate authority unrepresentable. `D5-T0010` continues to own broad toolchain compatibility; fixture versions remain open because equality to the live pin would erase compatibility-test intent. |
@@ -342,7 +297,6 @@ theories, and bootstrap admission are outside this anti-hard-code inventory.
 | Workflow repeated configuration | Five checkout blocks at `.github/workflows/ci.yml:27,131,158,267,275`; job timeouts at lines 24,126,251,264. | The former SDK guard no longer runs; `HC-OPEN-005` owns the missing version-authority coverage. Existing tests check trust topology by substrings. | `HC-OPEN-008`: GitHub Actions repetition can be factored only through composite/reusable workflow boundaries that alter checkout context and the base-controlled trust topology. Textual duplication alone is not a safe predicate. |
 | Internal theory references outside managed sources | `docs/develop/theory/` and target ingestion code retain reference inputs and provenance vocabulary; formal/program coupling is a separate semantic question. | Target digestion commands validate their selected inputs. Admission has no automatic digestion audit and does not read theory bodies for receipt or status reconciliation. | `HC-OPEN-014`: semantic theory isolation requires typed source/provenance boundaries; a whole-repository token scan cannot establish it. |
 | Encoded, split, interpolated, or computed duplication | Examples can be manufactured as concatenation, base64, hash lookup, arithmetic, generated code, or runtime I/O. | No general semantic-duplication consumer exists; surviving guards are scoped to their own typed or structured domains. | `HC-OPEN-009`: deciding arbitrary semantic equivalence or whether a computed value has the wrong authority reduces to program/intent equivalence. Every finite text rule has trivial encoding escapes; broadening it produces both bypasses and false positives. |
-| Values schema epoch transition | Expand admitted attestation v1 or v2; migrate moved the canonical writer and artifact to v2; contract completed in this PR by removing v1 read support and retaining v1 only as an SL-018 negative fixture (expand-migrate-contract, CLAUDE.md section 6). | The conservative verifier observes a finite base-owned corpus plus the actual trees, not every historically admitted snapshot. | `VALUES-SCHEMA-EPOCH` (open): the active schema epoch/domain is not yet machine-defined, so a later v1 contract can be corpus-conservative without proving the literal universal conservative-extension law. |
 | Diagnostic language consistency | English route/parser failures coexist with Chinese SL-021 and bootstrap messages (`Routing.cs:80,85`; `RepositoryRules.Admission.cs:77,82`; `CliApplication.cs:120,124`). Atomizer diagnostics added in this unit are English. | No diagnostic locale/style schema exists; golden cases intentionally bind some current bytes. | `HC-OPEN-011`: terminology and locale are user-interface policy, not a correctness literal. Standardize only with a declared diagnostic style plus an atomic golden-corpus migration; do not mix that migration into registry work. |
 | FILEMAP dependency discovery | Machine-readable data can name generated paths through encoding, concatenation, interpolation, aliases, or runtime computation; Lean can express imports outside the current one-module line grammar. | FILEMAP scans decoded TOML/YAML/JSON/Scribe text for concrete generated paths and resolves simple Lean imports. | `HC-OPEN-012`: the active check is an honest low-false-positive subset, not semantic program equivalence. Encoded/computed references and richer Lean import syntax remain detectable only by future structured loaders or compiler-derived dependency edges. |
 
@@ -366,7 +320,6 @@ recorded pressure gate. Per the no-prebuild rule, this section records debt only
 
 | Site | Why it is scoped rather than global debt |
 |---|---|
-| `StrataLint.Scribe/Values/ValuesKernelDataLoader.cs` and `StrataLint.Scribe/Writers/CanonicalValuesWriter.cs` | These constants bind the D5 values pipeline specifically: D5 Lean truth, D5 kernel data, and the D5 evidence projection. The constant ID set itself lives only in emitter data. A future theory needs its own admitted source before sharing this path. |
 | `tools/TestSupport/StrataLint.CliTestSupport/RuleFixture.cs` and `tools/tests/StrataLint.Tests/Rules/TestFileMap.cs` | The conservative corpus is an explicit synthetic fixture for the sole instantiated M0 theory. Those D5 examples remain valid fixtures after another theory is admitted. |
 | `Blueprint/D5/**/*.scribe.cs` and `StrataLint.Scribe.Tests/**/*.cs` | These are typed D5 document data and tests of those documents, not a generic theory registry. |
 
@@ -383,7 +336,7 @@ Each row is a future migration obligation, not authorization to prebuild the mec
 | `StrataLint.Scribe/Ast/GidRef.cs:40-49`, `Ast/DocumentHeader.cs:99`, `Ast/DefinitionDsl.cs:11`, and `Emission/DocumentDefinitions.cs:83` | Plane classification, mirror derivation, and source-path bijection slice or prepend the literal `D5` instead of using the parsed target theory. |
 | `StrataLint.Engine/Rules/RepositoryRules.Applicability.cs:14,36-40`, `Rules/RepositoryRules.Helpers.cs:15,50-57`, and `Admission/LeanModels.cs:113-115` | Managed formal files and domain-scoped artifacts are recognized only under the D5 root. |
 | `StrataLint.Engine/Rules/RepositoryRules.Structure.cs:11,18,108-109,181,216-223` | Hearts, managed imports, mirror prefixes, and domain validation are fixed to D5 rather than the artifact's theory. |
-| `StrataLint.Engine/Rules/RepositoryRules.Content.cs:154` | Generic evidence-GID diagnostics identify the E plane with a `D5/E/` prefix. The D5 values checks at lines 230-238 remain category 2. |
+| `StrataLint.Engine/Rules/RepositoryRules.Content.cs:154` | Generic evidence-GID diagnostics identify the E plane with a `D5/E/` prefix. |
 | `StrataLint.Engine/Rules/RepositoryRules.cs`, `Coordinates/DomainTypes.cs` | Task, query, case and frontier discovery use D5-shaped identifiers. |
 | `StrataLint.Engine/Coverage/CoverageAnalyzer.cs:83`, `Dag/TruthDagConstruction.cs:177-178`, and `Snapshot/CanonicalSnapshot.cs:96` | Artifact classification, managed-module recognition, and structured evidence canonicalization enumerate D5 as the only admitted theory. |
 | `StrataLint.Engine/Ledger/FrozenContentAddress.cs:12,16,175,182` | Frozen task/assumption references and Lean import discovery recognize only D5 case and assumption namespaces. |

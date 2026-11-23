@@ -110,10 +110,6 @@ internal static partial class RepositoryRules
                 AnchorsAffected,
                 ResolvableAnchors)),
         Register(
-            18,
-            "Machine-produced values",
-            new RepositoryRule(ValuesScoped, Values)),
-        Register(
             19,
             "Balanced anomaly ledger",
             new RepositoryRule(StructuredOrChronicle, Ledger)),

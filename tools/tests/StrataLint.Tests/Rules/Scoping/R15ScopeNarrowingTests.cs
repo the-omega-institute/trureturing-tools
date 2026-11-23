@@ -156,29 +156,6 @@ public sealed class R15ScopeNarrowingTests
     }
 
     [Fact]
-    [BaseFactScopeProbe(18)]
-    public void Sl018HistoricalNoncanonicalValuesPathSurvivesEnvironmentDelta()
-    {
-        const string historicalPath = "Evidence/D5/values.result.json";
-        const string message = "canonical values projection must be Evidence/D5/values.json";
-
-        var unrelated = ValuesPathHistory(historicalPath);
-        AssertFinding(Execute(unrelated, "global.json"), 18, message, historicalPath);
-
-        var changed = ValuesPathHistory(historicalPath);
-        AssertFinding(Execute(changed, historicalPath), 18, message, historicalPath);
-
-        var implementation = ValuesPathHistory(historicalPath);
-        AssertFinding(
-            Execute(
-                implementation,
-                "tools/StrataLint.Engine/Rules/RepositoryRules.Content.cs"),
-            18,
-            message,
-            historicalPath);
-    }
-
-    [Fact]
     [BaseFactScopeProbe(19)]
     public void Sl019HistoricalAnomalyFindingSurvivesUnrelatedJsonDelta()
     {
@@ -483,13 +460,6 @@ public sealed class R15ScopeNarrowingTests
                 ImmutableArray<LeanDeclaration>.Empty);
         }
 
-        return fixture;
-    }
-
-    private static RuleFixture ValuesPathHistory(string path)
-    {
-        var fixture = new RuleFixture();
-        SetHistorical(fixture, path, "{}\n");
         return fixture;
     }
 

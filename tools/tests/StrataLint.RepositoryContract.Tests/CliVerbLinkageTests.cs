@@ -61,7 +61,7 @@ public sealed class CliVerbLinkageTests
             // 一致,漂移时两侧必有一红。
             [CommandProgram.Scribe] = new HashSet<string>(StringComparer.Ordinal)
             {
-                "content-check", "emit", "emit-values", "filemap", "lean-inputs",
+                "content-check", "emit", "filemap", "lean-inputs",
                 "resources", "resources release", "resources verify-release", "scripts",
             },
         };
@@ -81,17 +81,14 @@ public sealed class CliVerbLinkageTests
     }
 
     [Fact]
-    public void ArrayAndVariableForwardersRemainVisibleToTheExtractor()
+    public void ScribeEmissionRemainsVisibleToTheExtractor()
     {
         var invocations = CollectInvocations(TestRepositoryLayout.FindRoot());
 
-        foreach (var verb in new[] { "emit", "emit-values" })
-        {
-            Assert.Contains(invocations, invocation =>
-                invocation.File == "tools/scripts/scribe.sh"
-                && invocation.Verb == verb
-                && invocation.Program == CommandProgram.Scribe);
-        }
+        Assert.Contains(invocations, invocation =>
+            invocation.File == "tools/scripts/scribe.sh"
+            && invocation.Verb == "emit"
+            && invocation.Program == CommandProgram.Scribe);
     }
 
     [Fact]
@@ -130,14 +127,6 @@ public sealed class CliVerbLinkageTests
         @"(?<![\w-])run_cli\s+""\$\{(?<array>[a-z_][a-z0-9_]*)\[@\]\}""",
         RegexOptions.CultureInvariant);
 
-    private static readonly Regex VariableVerbForwarder = new(
-        @"(?:--|""\$SCRIBE_DLL"")\s+""\$(?<variable>[1-9][0-9]*)""",
-        RegexOptions.CultureInvariant);
-
-    private static readonly Regex CaseForwarder = new(
-        @"^\s*(?<verbs>[a-z][a-z0-9-]*(?:\|[a-z][a-z0-9-]*)+)\)\s+run_scribe\s+""\$(?<variable>[1-9][0-9]*)""",
-        RegexOptions.CultureInvariant);
-
     private static ImmutableArray<VerbInvocation> CollectInvocations(string root)
     {
         var builder = ImmutableArray.CreateBuilder<VerbInvocation>();
@@ -146,7 +135,6 @@ public sealed class CliVerbLinkageTests
             var relative = Path.GetRelativePath(root, file).Replace('\\', '/');
             var physicalLines = File.ReadAllLines(file);
             var arrays = ArrayLiteralVerbs(physicalLines);
-            var scribeVariables = ScribeForwardedVariables(relative, physicalLines);
             var projectIsScribe = physicalLines.Any(line => line.StartsWith("PROJECT=", StringComparison.Ordinal)
                 && line.Contains("StrataLint.Scribe.csproj", StringComparison.Ordinal));
             foreach (var (line, text) in LogicalLines(physicalLines))
@@ -216,20 +204,6 @@ public sealed class CliVerbLinkageTests
                             CommandProgram.StrataLint));
                     }
                 }
-
-                var caseForwarder = CaseForwarder.Match(text);
-                if (caseForwarder.Success
-                    && scribeVariables.Contains(caseForwarder.Groups["variable"].Value))
-                {
-                    foreach (var verb in caseForwarder.Groups["verbs"].Value.Split('|'))
-                    {
-                        builder.Add(new VerbInvocation(
-                            relative,
-                            line,
-                            verb,
-                            CommandProgram.Scribe));
-                    }
-                }
             }
         }
 
@@ -259,22 +233,6 @@ public sealed class CliVerbLinkageTests
         }
 
         return arrays;
-    }
-
-    private static HashSet<string> ScribeForwardedVariables(string relative, string[] lines)
-    {
-        if (relative != "tools/scripts/scribe.sh")
-        {
-            return new HashSet<string>(StringComparer.Ordinal);
-        }
-
-        return lines
-            .Where(line => line.Contains("$PROJECT", StringComparison.Ordinal)
-                || line.Contains("$SCRIBE_DLL", StringComparison.Ordinal))
-            .Select(line => VariableVerbForwarder.Match(line))
-            .Where(static match => match.Success)
-            .Select(match => match.Groups["variable"].Value)
-            .ToHashSet(StringComparer.Ordinal);
     }
 
     private static IEnumerable<string> CallerFiles(string root)
