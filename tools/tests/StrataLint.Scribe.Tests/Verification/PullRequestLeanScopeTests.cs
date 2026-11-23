@@ -102,7 +102,7 @@ public sealed class PullRequestLeanScopeTests
         var snapshot = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(sources)).Snapshot;
         var targets = new HashSet<string>(StringComparer.Ordinal);
         var programs = new HashSet<string>(StringComparer.Ordinal);
-        PullRequestLeanChecks.AddAffectedModules(snapshot, ["Example.Basic"], targets, programs);
+        PullRequestLeanChecks.AddAffectedModules(snapshot, ["Example.Basic"], targets, programs, includeInternal: true);
         Assert.Equal(["Example.Basic", "Example.Topic"], programs.Order(StringComparer.Ordinal));
         Assert.Equal("D5.Consumer", Assert.Single(targets));
     }
@@ -114,12 +114,13 @@ public sealed class PullRequestLeanScopeTests
             RawRepositoryEntry.FromText("D5/Middle.lean", "public meta import all D5.Removed\n"),
             RawRepositoryEntry.FromText("Reg/Top.lean", "/- ignored import D5.Other -/\nimport D5.Middle\n"),
             RawRepositoryEntry.FromText("tools/lean-inspector/LeanInformationAuditRegTests/Probe.lean", "import Reg.Top\n"),
+            RawRepositoryEntry.FromText("src/Example/Test.lean", "import D5.Middle\n"),
             RawRepositoryEntry.FromText("D5/Other.lean", "def other := 1\n"),
         ]);
         var snapshot = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(sources)).Snapshot;
         var targets = new HashSet<string>(StringComparer.Ordinal);
         var programs = new HashSet<string>(StringComparer.Ordinal);
-        PullRequestLeanChecks.AddAffectedModules(snapshot, ["D5.Removed"], targets, programs);
+        PullRequestLeanChecks.AddAffectedModules(snapshot, ["D5.Removed"], targets, programs, includeInternal: false);
         Assert.Equal(["D5.Middle", "Reg.Top"], targets.Order(StringComparer.Ordinal));
         Assert.Equal("LeanInformationAuditRegTests.Probe", Assert.Single(programs));
     }
