@@ -161,7 +161,9 @@ internal static class FrozenStateRecordLoader
         var present = properties.ToHashSet(StringComparer.Ordinal);
         if (present.Count != properties.Length || !keys.All(present.Contains)
             || !present.IsSubsetOf(keys.Concat(optional ?? [])))
-            throw new FormatException(label + " has missing, duplicate, or unexpected keys");
+            throw new FormatException(optional is null
+                ? label + " keys must be exactly {" + string.Join(", ", keys) + "}"
+                : label + " has missing, duplicate, or unexpected keys");
     }
 }
 
