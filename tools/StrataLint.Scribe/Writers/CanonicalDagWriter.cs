@@ -1,7 +1,7 @@
 using System.Collections.Immutable;
 using System.Globalization;
-using System.Net;
 using System.Text;
+using System.Text.Json;
 using StrataLint.Engine;
 using Trureturing.Truth;
 
@@ -20,6 +20,7 @@ namespace StrataLint.Scribe;
 public static class CanonicalDagWriter
 {
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    private const string OmegaOnlyBadge = "「仅 Omega · 零公理」";
 
     public static ImmutableArray<byte> Write(TruthDagProjection dag) => Write(dag, null);
 
@@ -36,7 +37,7 @@ public static class CanonicalDagWriter
         AppendPreamble(builder, dag, nodes);
         AppendGraph(builder, dag, nodes, identifiers);
         AppendBlockers(builder, dag);
-        var markedDeclarations = graph?.Nodes.Where(static node => node.OmegaOnlyAxiomFreeDeclarations is not null)
+        var markedDeclarations = graph?.Nodes.Where(static node => node.OmegaOnlyAxiomFreeDeclarations is { IsEmpty: false })
             .ToDictionary(static node => node.RepoPath, static node => node.OmegaOnlyAxiomFreeDeclarations!.Value,
                 StringComparer.Ordinal);
         AppendNodesByDepth(builder, dag, nodes, markedDeclarations);
@@ -147,6 +148,13 @@ public static class CanonicalDagWriter
             return;
         }
 
+        if (markedDeclarations is { Count: > 0 })
+        {
+            builder.Append(OmegaOnlyBadge)
+                .Append(" reflects the last frozen measurement for the declaration and statement pin. "
+                    + "A later proof edit can retain that pin.\n\n");
+        }
+
         var groups = nodes
             .GroupBy(node => dag.Depth(node.RepoPath))
             .OrderBy(static group => group.Key);
@@ -168,11 +176,9 @@ public static class CanonicalDagWriter
                 {
                     foreach (var declaration in declarations)
                     {
-                        var name = CanonicalLeanNameDecoder.DecodePrefix(declaration.DeclarationNameKey, 0, out _);
-                        builder.Append("  - <code>")
-                            .Append(WebUtility.HtmlEncode(name).Replace("\r", "&#13;", StringComparison.Ordinal)
-                                .Replace("\n", "&#10;", StringComparison.Ordinal))
-                            .Append("</code> (").Append(declaration.Kind).Append(") 「仅 Omega · 零公理」\n");
+                        builder.Append("  - ");
+                        AppendCodeSpan(builder, DeclarationName(declaration.DeclarationNameKey));
+                        builder.Append(" (").Append(declaration.Kind).Append(") ").Append(OmegaOnlyBadge).Append('\n');
                     }
                 }
             }
@@ -181,6 +187,64 @@ public static class CanonicalDagWriter
         }
 
         builder.Length -= 1;
+    }
+
+    private static string DeclarationName(string nameKey)
+    {
+        var components = CanonicalLeanNameDecoder.ComponentsPrefix(nameKey, 0, out _);
+        var spelling = new StringBuilder();
+        foreach (var (kind, value) in components)
+        {
+            if (spelling.Length > 0) spelling.Append('.');
+            if (kind == "nn")
+            {
+                spelling.Append(value);
+                continue;
+            }
+
+            var first = true;
+            var unquoted = value.Length > 0;
+            foreach (var rune in value.EnumerateRunes())
+            {
+                var character = rune.Value;
+                var identifier = IsIdentifierStart(character) || (!first && IsIdentifierSuffix(character));
+                // A JSON string of the full key preserves delimiters, whitespace, and controls.
+                if (!identifier && character is not (>= '!' and <= '~'))
+                    return JsonSerializer.Serialize(nameKey);
+                unquoted &= identifier;
+                first = false;
+            }
+
+            if (unquoted) spelling.Append(value);
+            else spelling.Append('«').Append(value).Append('»');
+        }
+
+        return spelling.ToString();
+    }
+
+    // Lean's letter-like and subscript ranges keep ordinary identifiers readable.
+    private static bool IsIdentifierStart(int character) => character is
+        (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or '_'
+        or (>= 0x00c0 and <= 0x00ff and not (0x00d7 or 0x00f7)) or (>= 0x0100 and <= 0x017f)
+        or (>= 0x0391 and <= 0x03a9 and not (0x03a0 or 0x03a3))
+        or (>= 0x03b1 and <= 0x03c9 and not 0x03bb) or (>= 0x03ca and <= 0x03fb)
+        or (>= 0x1f00 and <= 0x1ffe) or (>= 0x2100 and <= 0x214f) or (>= 0x1d49c and <= 0x1d59f);
+
+    private static bool IsIdentifierSuffix(int character) => character is
+        (>= '0' and <= '9') or '\'' or '!' or '?'
+        or (>= 0x2080 and <= 0x2089) or (>= 0x2090 and <= 0x209c) or (>= 0x1d62 and <= 0x1d6a) or 0x2c7c;
+
+    private static void AppendCodeSpan(StringBuilder builder, string text)
+    {
+        var delimiterLength = 1;
+        var runLength = 0;
+        foreach (var character in text)
+        {
+            runLength = character == '`' ? runLength + 1 : 0;
+            delimiterLength = Math.Max(delimiterLength, runLength + 1);
+        }
+
+        builder.Append('`', delimiterLength).Append(text).Append('`', delimiterLength);
     }
 
     private static int MaxDepth(TruthDagProjection dag, ImmutableArray<TruthProjectionNode> nodes) =>

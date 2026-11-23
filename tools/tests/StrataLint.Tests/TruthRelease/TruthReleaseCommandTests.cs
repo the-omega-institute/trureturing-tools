@@ -49,6 +49,7 @@ public sealed partial class TruthReleaseCommandTests
         Assert.Equal(ProducerCommit, verified.Manifest.Producer.PackageCommit);
         Assert.Equal(fixture.ReportBytes.ToArray(), File.ReadAllBytes(
             Path.Combine(output.Path, TruthReleaseBundleWriter.RawLeanReportFileName)));
+        Assert.Equal(fixture.UnannotatedDag.ToArray(), File.ReadAllBytes(dagPath));
         Assert.Equal(5, verified.Manifest.Artifacts.GetType().GetProperties().Length);
         Assert.False(File.Exists(Path.Combine(output.Path, "echo-residual-summary.md")));
         Assert.False(File.Exists(Path.Combine(output.Path, "frozen-ledger-head.json")));
@@ -151,8 +152,10 @@ public sealed partial class TruthReleaseCommandTests
         Assert.Equal(new TruthGraphDeclaration(omega.DeclarationNameKey, omega.Kind, omega.StatementId),
             Assert.Single(graphNode.OmegaOnlyAxiomFreeDeclarations!.Value));
         var markdown = File.ReadAllLines(dagPath);
-        Assert.Equal("  - <code>qualified</code> (theorem) 「仅 Omega · 零公理」",
-            Assert.Single(markdown, line => line.Contains("「仅 Omega · 零公理」", StringComparison.Ordinal)));
+        Assert.Contains("「仅 Omega · 零公理」 reflects the last frozen measurement for the declaration and statement pin. "
+            + "A later proof edit can retain that pin.", markdown);
+        Assert.Equal("  - `qualified` (theorem) 「仅 Omega · 零公理」",
+            Assert.Single(markdown, line => line.EndsWith("「仅 Omega · 零公理」", StringComparison.Ordinal)));
 
         TruthExportDeclaration Row(string name) => rows[Declaration(name).NameKey];
     }
@@ -465,6 +468,7 @@ public sealed partial class TruthReleaseCommandTests
             mutableSource,
             reportPath,
             reportBytes,
+            CanonicalDagWriter.Write(dag),
             sourceCommit,
             sourceTree);
     }
@@ -564,6 +568,7 @@ public sealed partial class TruthReleaseCommandTests
         FakeLeanReportSource mutableLeanReportSource,
         string reportPath,
         ImmutableArray<byte> reportBytes,
+        ImmutableArray<byte> unannotatedDag,
         string sourceCommit,
         string sourceTree) : IDisposable
     {
@@ -581,6 +586,8 @@ public sealed partial class TruthReleaseCommandTests
         internal string ReportPath { get; } = reportPath;
 
         internal ImmutableArray<byte> ReportBytes { get; } = reportBytes;
+
+        internal ImmutableArray<byte> UnannotatedDag { get; } = unannotatedDag;
 
         internal string SourceCommit { get; } = sourceCommit;
 
