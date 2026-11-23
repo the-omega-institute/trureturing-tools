@@ -475,7 +475,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
 
     def cache_row(self, suffix, ref="refs/heads/dev", prefix=None, **fields):
         owner = self.restore_owner()
-        with mock.patch.dict(os.environ, self.env):
+        with mock.patch.dict(os.environ, self.env | {"GITHUB_REF": ref}):
             prefix = prefix or owner.actions_keys(self.root)["project"]["restore_prefix"]
         self.cache_id = getattr(self, "cache_id", 274839100) + 1
         return dict(id=self.cache_id, key=prefix + suffix, ref=ref) | fields
@@ -923,6 +923,74 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                     self.assertEqual(b"other accepted material", (sibling / "keep").read_bytes())
                     if layer == "project":
                         self.assertIn("STRATALINT_ACTIONS_CACHE_SEEDED=" + str(int(accepted)), result.getvalue())
+
+    def test_native_transport_uses_target_scope_and_ordered_compatible_dev_fallback(self):
+        def cli(event, ref, base="", head=""):
+            path = self.root / "outputs"
+            path.unlink(missing_ok=True)
+            env = dict(self.env, GH_TOKEN="", GITHUB_EVENT_NAME=event, GITHUB_REF=ref,
+                       GITHUB_BASE_REF=base, GITHUB_HEAD_REF=head)
+            result = self.run_tool(CACHE, "keys", env=env)
+            self.assertEqual(0, result.returncode, result.stderr)
+            values = dict(line.split("=", 1) for line in result.stdout.splitlines()
+                          if not line.startswith("LEAN_ACTIONS_CACHE "))
+            for layer in ("dependency", "project"):
+                key = layer + "_restore_keys"
+                prefixes = json.loads(values[key])
+                self.assertIn("\n" + "\n".join(prefixes) + "\n", path.read_text())
+                self.assertEqual(values[layer + "_restore_prefix"], prefixes[0])
+                self.assertEqual(values[layer + "_key"], prefixes[0] + "17-2")
+            return values
+
+        branch_a, branch_b = "integration-CI/a", "integration-ci/a"
+        dev = cli("push", "refs/heads/dev")
+        a = cli("push", "refs/heads/" + branch_a)
+        b = cli("push", "refs/heads/" + branch_b)
+        for candidate in (a, b):
+            self.assertEqual(candidate["save_allowed"], "true")
+            self.assertEqual(dev["partition"], candidate["partition"])
+            self.assertEqual(dev["release_prefix"], candidate["release_prefix"])
+            self.assertEqual(dev["elan_key"], candidate["elan_restore_key"])
+            for layer in ("dependency", "project"):
+                fallback = dev[layer + "_restore_prefix"]
+                scoped = candidate[layer + "_restore_prefix"]
+                self.assertFalse(scoped.casefold().startswith(fallback.casefold()))
+                self.assertEqual([scoped, fallback], json.loads(candidate[layer + "_restore_keys"]))
+        self.assertNotIn("elan_restore_key", dev)
+        for key in ("dependency_key", "project_key", "elan_key"):
+            self.assertEqual(3, len({generation[key].casefold() for generation in (a, b, dev)}))
+        readers = [(cli("pull_request", "refs/pull/7/merge", base, branch_a), producer)
+                   for base, producer in (("dev", dev), (branch_a, a), (branch_b, b))]
+        readers.append((cli("workflow_dispatch", "refs/heads/" + branch_a), a))
+        for reader, producer in readers:
+            self.assertEqual(reader["save_allowed"], "false")
+            for key in ("elan_key", "elan_restore_key", "dependency_key", "project_key",
+                        "dependency_restore_keys", "project_restore_keys"):
+                self.assertEqual(producer.get(key), reader.get(key))
+
+    def test_native_validation_accepts_dev_seed_only_for_compatible_partition_and_saves_to_own_scope(self):
+        owner = self.restore_owner()
+        keys = {}
+        for branch in ("dev", "integration-a", "integration-b"):
+            with mock.patch.dict(os.environ, dict(self.env, GITHUB_REF="refs/heads/" + branch)):
+                keys[branch] = owner.actions_keys(self.root)
+        for layer in ("dependency", "project"):
+            for source, target, accepted in (("dev", "integration-a", True), ("integration-a", "dev", False),
+                    ("integration-a", "integration-a", True), ("integration-b", "integration-a", False)):
+                with self.subTest(layer=layer, source=source, target=target):
+                    _, _, native = self.native_seed(layer)
+                    chosen = keys[target]
+                    restored = keys[source][layer]["key"]
+                    self.assertEqual(accepted, owner.restore_native(self.root, chosen, layer, restored, "success"))
+                    self.assertEqual(accepted, native.exists())
+                    if accepted and source == "dev":
+                        with mock.patch.dict(os.environ, dict(self.env, GITHUB_REF="refs/heads/" + target)), \
+                                contextlib.redirect_stdout(io.StringIO()) as result:
+                            owner.snapshot(self.root, chosen, [layer])
+                        self.assertIn(layer + "_ready=true", result.getvalue())
+                        self.assertIn(chosen[layer]["key"], result.getvalue())
+                        self.assertFalse(owner.restore_native(self.root, chosen, layer,
+                                                             restored.replace(REV, "b" * 40), "success"))
 
     def test_native_project_restore_removes_aggregate_files_and_keeps_module_reports(self):
         owner, keys, build = self.native_seed("project")

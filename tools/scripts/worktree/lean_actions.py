@@ -69,19 +69,28 @@ def native_archive_paths(root: pathlib.Path, layers):
         raise CachePathRegistrationError(f"cache path registration {manifest}: {error}") from error
 
 
-def output_archive_paths(layer, paths):
-    key = layer + "_archive_path"
-    value = "\n".join(paths)
+def output_lines(key, lines):
+    value = "\n".join(lines)
     delimiter = "STRATALINT_" + hashlib.sha256(value.encode()).hexdigest()
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
             stream.write(f"{key}<<{delimiter}\n{value}\n{delimiter}\n")
-    print(key + "=" + json.dumps(paths, separators=(",", ":")))
+    print(key + "=" + json.dumps(lines, separators=(",", ":")))
 
 
 def elan_key(root):
     system, arch = binary_platform()
     return f"elan-pinned-{system}-{arch}-{hashlib.sha256((root / 'lean-toolchain').read_bytes()).hexdigest()}"
+
+
+def native_namespace():
+    if os.environ.get("GITHUB_EVENT_NAME") in {"pull_request", "pull_request_target"}:
+        ref = "refs/heads/" + os.environ.get("GITHUB_BASE_REF", "")
+    else:
+        ref = os.environ.get("GITHUB_REF", "")
+    if ref.startswith("refs/heads/integration-"):
+        return "integration-" + hashlib.sha256(ref.encode()).hexdigest() + "-"
+    return ""
 
 
 def manual_source_is_valid() -> bool:
@@ -141,11 +150,14 @@ def actions_keys(root: pathlib.Path) -> dict:
         "project_save_allowed": writer_allowed and os.environ.get("STRATALINT_REPORT_SUCCEEDED") == "true",
         "release_prefix": f"lean-cache-v2-{revision}-{system}-{machine}-",
     }
+    namespace = native_namespace()
     for layer in LAYERS:
         generation = "project-push" if layer == "project" else "dependency-v4"
-        prefix = f"lean-{generation}-{revision}-{system}-{machine}-"
+        dev_prefix = f"lean-{generation}-{revision}-{system}-{machine}-"
+        prefix = namespace + dev_prefix
         result[layer] = {
             "restore_prefix": prefix, "key": f"{prefix}{run}-{attempt}",
+            "restore_keys": [prefix, dev_prefix] if namespace else [prefix],
             "path": ".lake/packages" if layer == "dependency" else ".lake/build",
         }
     return result
@@ -384,7 +396,7 @@ def restore_native(root, keys, layer, key, outcome):
     try:
         if outcome != "success" or not key:
             raise ValueError("Actions restore did not succeed or supplied no matched cache")
-        if not re.fullmatch(re.escape(spec["restore_prefix"]) + r"[0-9]+-[0-9]+", key):
+        if not any(re.fullmatch(re.escape(prefix) + r"[0-9]+-[0-9]+", key) for prefix in spec["restore_keys"]):
             raise ValueError("Actions seed is outside the selected partition")
         if target.is_symlink() or not target.is_dir():
             raise ValueError("native Actions cache directory is unavailable")
@@ -665,7 +677,7 @@ def main():
             spec = resume_spec(root)
             if args.command == "resume-keys":
                 output({"resume_key": spec["key"], "resume_restore_prefix": spec["restore_prefix"]})
-                output_archive_paths("resume", spec["paths"])
+                output_lines("resume_archive_path", spec["paths"])
             elif args.command == "resume-restore":
                 resume_restore(root, spec, args.resume_key, args.resume_outcome)
             else:
@@ -675,12 +687,17 @@ def main():
             if "project" in args.layers:
                 keys["project"]["restore_key"] = project_restore_key(keys)
             values = {key: keys[key] for key in ("mathlib_revision", "os", "arch", "partition", "save_allowed", "release_prefix")}
-            values["elan_key"] = elan_key(root)
+            toolchain = elan_key(root)
+            namespace = native_namespace()
+            values["elan_key"] = namespace + toolchain
+            if namespace:
+                values["elan_restore_key"] = toolchain
             for layer in args.layers:
-                values.update({layer + "_" + key: value for key, value in keys[layer].items()})
+                values.update({layer + "_" + key: value for key, value in keys[layer].items() if key != "restore_keys"})
             output(values)
             for layer, paths in archive_paths.items():
-                output_archive_paths(layer, paths)
+                output_lines(layer + "_archive_path", paths)
+                output_lines(layer + "_restore_keys", keys[layer]["restore_keys"])
         elif args.command == "restore":
             keys["project"]["restore_key"] = args.project_restore_key or keys["project"]["key"]
             restore(root, keys, {layer: getattr(args, layer + "_key") for layer in args.layers}, args.layers,
