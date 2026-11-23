@@ -53,7 +53,7 @@ class VolumeDownloads(unittest.TestCase):
             scripts = Path(__file__).resolve().parent
             wrapper = root / "tools/scripts/worktree"
             (wrapper / "lean-git").mkdir(parents=True)
-            shutil.copy2(scripts / "lean-cache-run.sh", wrapper)
+            (wrapper / "lean-cache-run.sh").write_text("exit 71 # historical driver lacks --build-release\n")
             shutil.copy2(scripts / "lean-git/git", wrapper / "lean-git")
             (root / "lean-toolchain").write_text((scripts.parents[2] / "lean-toolchain").read_text())
             (root / "lakefile.toml").write_text('name="fixture"\n[[lean_lib]]\nname="Trureturing"\n')
@@ -96,6 +96,7 @@ class VolumeDownloads(unittest.TestCase):
                 self.assertTrue((interface / ".lake/build/lib/lean/LeanInformationAuditInterface.olean").exists())
                 self.assertFalse((root / "tools/lean-inspector/.lake/build").exists())
                 self.assertFalse((root / "tools/lean-inspector-reg/.lake/build").exists())
+                shutil.copy2(scripts / "lean-cache-run.sh", wrapper)
                 ordinary = subprocess.run(["bash", str(wrapper / "lean-cache-run.sh"), "--build"], cwd=root,
                                           capture_output=True, text=True)
                 self.assertNotEqual(ordinary.returncode, 0)

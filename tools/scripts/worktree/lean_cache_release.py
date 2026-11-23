@@ -639,7 +639,7 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
         if os.environ.get("FULL_BUILD") != "1":
             print("cache production requires explicit FULL_BUILD=1", file=sys.stderr)
             return 2
-        command = ["bash", "tools/scripts/worktree/lean-cache-run.sh", "--build-release"]
+        command = ["bash", str(pathlib.Path(__file__).with_name("lean-cache-run.sh")), "--build-release"]
         if physical or prepare_only:
             publish_progress("compile_started", sparse=bool(plan))
         if plan:

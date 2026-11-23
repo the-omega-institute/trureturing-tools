@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
+# A current Release driver can compile an older checkout with its own installed cache tools.
+if [[ "${1:-}" == --build-release ]]; then ROOT="$(pwd -P)"; fi
 [[ $# -gt 0 ]] || { echo 'lean-cache-run: COMMAND is required' >&2; exit 2; }
 cd "$ROOT"
 # Full Release and report preparation keep full cache admission for their named targets.
