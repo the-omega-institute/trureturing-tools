@@ -91,7 +91,7 @@ def member_groups(inventory, graph, scope):
 def frame_inventory(root):
     modules = workspace_modules(root)
     graph = project_imports(root, modules)
-    return modules, list(member_groups(build_inventory(root, modules), graph, release_scope(root, modules, graph)))
+    return modules, list(member_groups(build_inventory(root, modules), graph, release_scope(modules, graph)))
 
 
 def write_frame(root, modules, module, artifacts, output, deadline, *, stable_timestamps):

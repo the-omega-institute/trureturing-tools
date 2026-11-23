@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import tempfile
 
-from lean_artifact_inventory import inspector_build_path, import_closure, lake_configuration, project_imports, workspace_modules
+from lean_artifact_inventory import inspector_build_path, import_closure, lake_configuration, project_imports, release_roots, workspace_modules
 import lean_compile_layers as compiler
 import lean_release_index as index
 from lean_cache_release_io import SPARSE_PLAN, check_native_products
@@ -47,11 +47,9 @@ def sparse_plan(root, tag, manifest, digest, tree, target, *, extra_roots=()):
             continue
         return None
     graph = project_imports(root, modules)
-    scope = import_closure(graph, compiler.production_targets(root, modules) | set(extra_roots))
+    scope = import_closure(graph, release_roots(modules) | set(extra_roots))
     rows = tree["members"]
     prior_names = {row["module"] for row in rows if row["module"] is not None}
-    non_inspector = {name for name in prior_names & modules.keys() if not inspector_build_path(modules[name].build)}
-    scope |= import_closure(graph, non_inspector)
     compatible = index.compatible_modules(root, rows, modules, graph, scope)
     changed = scope - compatible
     prerequisites = import_closure(graph, changed | set(extra_roots)) & compatible

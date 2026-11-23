@@ -3,8 +3,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 [[ $# -gt 0 ]] || { echo 'lean-cache-run: COMMAND is required' >&2; exit 2; }
 cd "$ROOT"
-# Full report preparation names its programs but still owns full cache admission.
-if [[ "$1" == --build-report-programs ]]; then
+# Full Release and report preparation keep full cache admission for their named targets.
+if [[ "$1" == --build-release ]]; then
+  [[ "${FULL_BUILD:-0}" == 1 && $# == 1 ]] || { echo 'lean-cache-run: Release compilation requires FULL_BUILD=1' >&2; exit 2; }
+  set -- --build Trureturing Reg
+elif [[ "$1" == --build-report-programs ]]; then
   [[ "${FULL_BUILD:-0}" == 1 && $# -gt 1 ]] || { echo 'lean-cache-run: full report programs require FULL_BUILD=1 and named targets' >&2; exit 2; }
   shift
   set -- --build "$@"
