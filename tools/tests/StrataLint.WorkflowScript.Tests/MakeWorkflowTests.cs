@@ -53,6 +53,7 @@ public sealed partial class MakeWorkflowTests
         "scribe-release-fetch",
         "deposit",
         "deposit-uncovered",
+        "frozen-refresh",
         "worktree",
         "worktree-clean",
         "worktree-remove",
