@@ -56,10 +56,10 @@ internal sealed class LeanCacheChunkFixture : IDisposable
               *) exit 89 ;;
             esac
             """);
-        WriteStub("make",
+        Write(Path.Combine(Path.GetDirectoryName(script)!, "lean-cache-run.sh"),
             """
             printf '%s\n' "$*" >> "$CHUNK_FIXTURE/build-runs"
-            [ "$*" = "lean FULL_BUILD=1" ] || exit 89
+            [ "$FULL_BUILD" = "1" ] && [ "$*" = "--build-release" ] || exit 89
             if [ "$FAKE_BUILD_EXIT" = "0" ]; then
                 mkdir -p .lake/build/lib/lean
                 printf 'compiled fixture' > .lake/build/lib/lean/Trureturing.olean

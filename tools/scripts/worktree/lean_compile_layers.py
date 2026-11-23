@@ -14,11 +14,10 @@ from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
-import tomllib
 
 from lean_artifact_inventory import (
     PROJECT_BUILD, REG_INSPECTOR, build_inventory, import_closure, lake_configuration,
-    lean_artifact_paths, project_imports, required_compiler_paths, workspace_modules, library_globs, matches_module_glob,
+    lean_artifact_paths, project_imports, required_compiler_paths, workspace_modules, release_roots,
 )
 from lean_cache import binary_platform
 from lean_cache_release import cache_guard, install_scoped, report_selection
@@ -101,25 +100,6 @@ def partition(graph, targets):
     if covered != scope or any(graph[name] - common for name in common):
         raise ValueError("incomplete compiler partition")
     return layers
-
-
-def production_targets(root, modules):
-    # lean-cache-run --build enters the root, Reg, inspector and reg-inspector
-    # workspaces. Imported interface modules are discovered through their edges.
-    output = subprocess.check_output(
-        ["lake", "-d", str(REG_INSPECTOR), "--json", "query", "@leanInspector/LeanInformationAudit:modules"],
-        cwd=root, text=True,
-    )
-    targets = set(report_selection.Selection(root).modules())
-    targets.update(json.loads(output))
-    for directory in (Path("."), Path("Reg"), REG_INSPECTOR):
-        config = tomllib.loads((root / directory / "lakefile.toml").read_text())
-        names = set(config["defaultTargets"])
-        globs = [pattern for lib in config["lean_lib"] if lib["name"] in names
-                 for pattern in library_globs(lib)]
-        targets.update(name for name, mod in modules.items() if mod.package == config["name"]
-                       and any(matches_module_glob(name, pattern) for pattern in globs))
-    return targets
 
 
 def checkout(root):
@@ -256,7 +236,7 @@ def main():
     root = Path.cwd()
     sha = checkout(root)
     modules = workspace_modules(root)
-    targets = args.target or production_targets(root, modules)
+    targets = args.target or release_roots(modules)
     layers = partition(scoped_imports(root, modules, targets), targets)
     if args.action == "verify":
         selected = [layers[args.stage]] if args.stage else layers.values()

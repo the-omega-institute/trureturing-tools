@@ -43,7 +43,9 @@ class NativeReleaseSupport:
         policy['report_modules']['include'][0]['pattern'] = 'Trureturing.lean'
         self.write('Trureturing.lean', 'import Fixture\n')
         config = self.root / 'lakefile.toml'
-        config.write_text(config.read_text().replace('["Fixture", "D5"]', '["Trureturing", "Fixture", "D5"]')
+        config.write_text(config.read_text().replace('name = "Fixture"', 'name = "Trureturing"')
+                          .replace('["Fixture", "Audit"]', '["Trureturing", "Audit"]')
+                          .replace('["Fixture", "D5"]', '["Trureturing", "Fixture", "D5"]')
                           .replace('["Fixture", "D5.+"]', '["Trureturing", "Fixture", "D5.+"]'))
         self.write('tools/lean-inspector/lakefile.lean', 'import Lake\nopen Lake DSL\n'
                    'package leanInspector where\n  buildDir := "../../.lake/build/lean-inspector/producer"\n'
@@ -116,8 +118,11 @@ else:
         (self.root / 'bin/gh').chmod(0o755)
         self.write('.gitignore', '.lake/\nbuild/\n__pycache__/\nfixture-mathlib/\nactivity.jsonl\nutility-calls\n'
             'tmp/\ninput-memo/\nsupervisor/\nreleases/\ngh-calls.jsonl\n')
+        self.commit_release_source('native Release source')
+
+    def commit_release_source(self, message):
         for args in (['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
-                '-c', 'commit.gpgsign=false', 'commit', '-qm', 'native Release source']):
+                '-c', 'commit.gpgsign=false', 'commit', '-qm', message]):
             result = self.guarded_command(['git', *args], env=self.env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.env['GITHUB_SHA'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'],
@@ -587,6 +592,9 @@ class NativePackageConsumerTests(NativeReleaseSupport):
         self.assertEqual(releases, {path.name for path in (self.root / 'releases').iterdir()})
         support.write_bytes(saved_support)
         self.write('Audit.lean', 'this is not valid Lean\n')
-        failed = self.release_run('publish', success=False)
-        self.assertIn('Audit.lean:', failed.stdout + failed.stderr)
-        self.assertEqual(releases, {path.name for path in (self.root / 'releases').iterdir()})
+        self.commit_release_source('broken audit target outside the Release build')
+        self.env['GITHUB_RUN_ID'] = '4244'
+        published = self.release_run('publish')
+        self.assertIn('"status":"published"', published.stdout)
+        self.assertEqual(expected_compiler, publication.digest(compiler))
+        self.assertFalse((self.root / '.lake/build/lib/lean/Audit.olean').exists())

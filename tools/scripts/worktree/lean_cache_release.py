@@ -601,7 +601,7 @@ def published_tar_filter(root):
     @cache
     def inspector_outputs():
         modules = workspace_modules(root)
-        scope = release_scope(root, modules, project_imports(root, modules))
+        scope = release_scope(modules, project_imports(root, modules))
         return {path for name in scope if inspector_build_path(modules[name].build)
                 for path in lean_artifact_paths(name, modules[name])}
 
@@ -639,7 +639,7 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
         if os.environ.get("FULL_BUILD") != "1":
             print("cache production requires explicit FULL_BUILD=1", file=sys.stderr)
             return 2
-        command = ["make", "lean", "FULL_BUILD=1"]
+        command = ["bash", str(pathlib.Path(__file__).with_name("lean-cache-run.sh")), "--build-release"]
         if physical or prepare_only:
             publish_progress("compile_started", sparse=bool(plan))
         if plan:
@@ -648,7 +648,7 @@ def publish(root, partition, verification=None, *, build_cache=True, indexed=Fal
             build = subprocess.run(command, cwd=root)
         if build.returncode:
             _observe("publish", "failed", phase="build",
-                     error=subprocess.CalledProcessError(build.returncode, "make"))
+                     error=subprocess.CalledProcessError(build.returncode, command))
             return build.returncode
         if plan:
             plan = sparse.read_plan(root)

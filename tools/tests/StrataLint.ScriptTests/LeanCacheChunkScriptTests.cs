@@ -308,7 +308,7 @@ public sealed class LeanCacheChunkScriptTests
         Assert.Contains("\"status\":\"failed\"", result.Text, StringComparison.Ordinal);
         Assert.Contains("suffix requires a run ID and attempt", result.Text, StringComparison.Ordinal);
         Assert.False(fixture.HasRelease);
-        Assert.Equal(new[] { "lean FULL_BUILD=1" }, fixture.BuildRuns);
+        Assert.Equal(new[] { "--build-release" }, fixture.BuildRuns);
     }
 
     [Fact]

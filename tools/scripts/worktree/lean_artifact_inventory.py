@@ -241,15 +241,14 @@ def inspector_build_path(path):
     return path.parts[:1] == ("lean-inspector",)
 
 
-def release_scope(root, modules, graph):
-    """An ordinary compiler build refreshes only the default inspector import closure."""
-    inspector = {name for name, mod in modules.items() if inspector_build_path(mod.build)}
-    if not inspector:
-        return set(modules)
-    from lean_compile_layers import production_targets
+def release_roots(modules):
+    """Modules of the Trureturing and Reg libraries in the project inventory."""
+    return {name for name, module in modules.items() if module.source.parts[0] in ("D5", "Reg")
+            or module.source == Path("Trureturing.lean")}
 
-    defaults = import_closure(graph, production_targets(root, modules))
-    return (modules.keys() - inspector) | defaults
+
+def release_scope(modules, graph):
+    return import_closure(graph, release_roots(modules))
 
 
 def retired_report_path(path):
