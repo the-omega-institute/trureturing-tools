@@ -13,10 +13,11 @@ import tomllib
 import unittest
 from unittest.mock import Mock, patch
 
+import lean_cache_generation as generation
 import lean_generation_plan as planner
 from lean_artifact_inventory import Module
 from lean_generation_index import read
-from test_lean_cache_generation import Store
+from test_lean_cache_generation import Store, read_from
 
 
 class GenerationPlanner(unittest.TestCase):
@@ -81,17 +82,14 @@ class GenerationPlanner(unittest.TestCase):
         pin = (Path(__file__).resolve().parents[3] / "lean-toolchain").read_text()
         names = ["Fixture.Base", "Fixture.Left", "Fixture.Right", "Fixture.Tail"]
         graph = {names[0]: [], names[1]: names[:1], names[2]: names[:1], names[3]: [names[2]]}
-        targets = {n: {"key": planner.digest(n), "deps": deps} for n, deps in graph.items()}
         modules = {n: Module("fixture", Path(n.replace(".", "/") + ".lean"), Path(".")) for n in graph}
         remote = Store()
-        plan, hits = planner.plan_layers("a" * 40, targets, [])
-        plan["domain"] = "d" * 64
         start = threading.Barrier(2)
         windows = {}
         saved = []
         compile_roots = planner.compiler.compile_roots
 
-        def checkout(path):
+        def checkout(path, mathlib_revision="2" * 40):
             src = path / "tools/lean-inspector-reg"
             src.mkdir(parents=True)
             (src / "lakefile.toml").write_text('name = "fixture"\nsrcDir = "../.."\nbuildDir = "../../.lake/build"\n'
@@ -106,6 +104,50 @@ class GenerationPlanner(unittest.TestCase):
             wrapper.write_text('exec "$@"\n')
             # Lake creates its manifest once, ahead of each independent timed compile.
             subprocess.run(["lake", "-d", str(src), "update"], cwd=path, check=True, capture_output=True)
+
+            # A fixed manifest can model an upstream pin change without fetching mathlib.
+            planner.write(path / "lake-manifest.json",
+                          {"version": "1.3.0", "packages": [{"name": "mathlib", "type": "git",
+                                                             "rev": mathlib_revision}]})
+            for relative, package in [(".", "main"), ("Reg", "reg"), ("tools/lean-inspector", "producer"),
+                                      ("tools/lean-inspector-interface", "interface")]:
+                folder = path / relative
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "lakefile.toml").write_text(f'name = "{package}"\n')
+
+        def keys(path):
+            selection = generation.host.report_selection
+            def paths(*names):
+                return {"include": [{"pattern": n, "optional": False} for n in names], "exclude": []}
+            loader = path / selection.LOADER
+            loader.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(selection.__file__, loader)
+            planner.write(path / selection.MANIFEST, {
+                "schema_version": 1, "report_execution": {"toolchain": "lean-toolchain", **selection.REPORT_EXECUTION},
+                "report_modules": paths("Fixture/Base.lean"), "inspector_sources": paths(),
+                "config_inputs": paths("lean-toolchain"),
+                "producer_scopes": {"lean-report": paths(selection.MANIFEST, selection.LOADER), "scribe-content": paths()}})
+            return planner.package_inputs(path)[0], planner.module_targets(
+                path, modules, {name: set(deps) for name, deps in graph.items()})
+
+        old_root = directory / "old revision"
+        checkout(old_root, "1" * 40)
+        old_domain, old_targets = keys(old_root)
+        old_plan = {"source": "a" * 40, "domain": old_domain, "targets": old_targets}
+        compile_roots(old_root, modules, names)
+        with patch.object(planner.checkpoints, "save"):
+            old_receipt, _ = planner.batch_frames(old_root, old_plan, modules, names, old_root / "receipt.json",
+                                                  old_domain, remote)
+        generation.publish(remote, old_plan, None, [old_receipt], "")
+        old_index = read_from(remote, directory, "ci")
+        new_root = directory / "upgraded revision"
+        checkout(new_root)
+        domain, targets = keys(new_root)
+        self.assertNotEqual(domain, old_domain)
+        self.assertTrue(all(old_targets[n]["key"] != targets[n]["key"] for n in names))
+        plan, hits = planner.plan_layers("b" * 40, targets, [old_index])
+        plan["domain"] = domain
+        self.assertFalse(hits["targets"])
 
         def compile(root, modules, roots, *, no_build=False):
             if no_build:
@@ -152,8 +194,13 @@ class GenerationPlanner(unittest.TestCase):
         hi = min(windows[n][1] for n in names[1:3])
         self.assertGreater(hi - lo, 0)
         self.assertEqual(set(windows), set(names[:3]))
-        self.assertEqual(remote.indexes["ci"], remote.indexes["release"])
-        next_plan, recovered = planner.plan_layers("b" * 40, targets, saved)
+        for transport in ("ci", "release"):
+            visible = read_from(remote, directory, transport)
+            self.assertEqual(visible, old_index)
+            restored = generation.restore(remote, visible, old_plan, [names[0]], directory / ("old-" + transport))
+            self.assertEqual(restored["restored"], 1)
+        next_plan, recovered = planner.plan_layers("c" * 40, targets, [old_index, *saved])
+        next_plan["domain"] = domain
         self.assertEqual(set(recovered["targets"]), set(names[:3]))
         self.assertEqual({tuple(layer["owned"]) for layer in next_plan["stages"].values()}, {(names[3],)})
         failed_stage = next(s for s, layer in plan["stages"].items() if names[3] in layer["owned"])
@@ -170,6 +217,28 @@ class GenerationPlanner(unittest.TestCase):
         self.assertEqual(finished["metrics"]["checkpoint_targets"], 1)
         self.assertEqual(set(finished["targets"]), {names[2], names[3]})
         self.assertEqual(finished["targets"][names[2]], recovered["targets"][names[2]])
+        independent = directory / "new publication run"
+        checkout(independent)
+        self.assertEqual(keys(independent), (domain, targets))
+        only_layer, = next_plan["stages"].values()
+        resumed = independent / "receipt.json"
+        with patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1"}), patch.object(planner.checkpoints, "save"):
+            planner.work_batches(independent, modules, remote, next_plan, deepcopy(recovered), only_layer, resumed)
+        missing = read(resumed)
+        self.assertEqual(missing["metrics"]["compiled_targets"], 1)
+        self.assertEqual(set(missing["targets"]), {names[3]})
+        generation.publish(remote, next_plan, old_index, [recovered, missing], remote.revision)
+        current = read_from(remote, directory, "release")
+        self.assertEqual(current, read_from(remote, directory, "ci"))
+        body_bytes, physical = remote.block_bytes, len(remote.volumes)
+        warm, warm_hits = planner.plan_layers(next_plan["source"], targets, [current])
+        self.assertFalse(warm["stages"])
+        self.assertEqual(set(warm_hits["targets"]), set(names))
+        generation.publish(remote, warm, current, [], remote.revision)
+        self.assertEqual((remote.block_bytes, len(remote.volumes)), (body_bytes, physical))
+        print(f"LEAN_MATHLIB_UPGRADE checkpoint_reuse={len(recovered['targets'])} "
+              f"resumed_compiles={missing['metrics']['compiled_targets']} "
+              f"uploaded_bytes={missing['metrics']['uploaded_bytes']} warm_compiles=0 warm_old_bytes=0 warm_volumes=0")
         print(f"LEAN_GENERATION_FIXTURE exclusive_compile_overlap_seconds={hi-lo:.3f} "
               f"shared_compiles=1 recovered_after_interruption={len(recovered['targets'])}")
 
