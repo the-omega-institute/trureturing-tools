@@ -93,3 +93,64 @@ class Migration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WarmGeneration(unittest.TestCase):
+    def test_complete_seed_reuses_reports_and_compiler_without_opening_frames(self):
+        from contextlib import ExitStack
+        import lean_cache_generation as generation
+        import lean_generation_facets as facets
+        import lean_generation_plan as compiler
+        from test_lean_cache_generation import Store
+
+        # The files represent an authenticated complete seed. Open the same
+        # compiler plan and facet-production coordinator used on a fresh run.
+        modules = {'A', *[main for _, main, _ in facets.PROGRAMS.values()]}
+        module_rows = {n: {'key': sha(n.encode()), 'deps': []} for n in modules}
+        remote = Store()
+        source = '3' * 40
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as mocks:
+            root = Path(directory)
+            mocks.enter_context(patch.object(facets.report_selection, 'Selection')).return_value.modules.return_value = {'A': 'A.lean'}
+            mocks.enter_context(patch.object(facets, 'utility_inputs', return_value={}))
+            mocks.enter_context(patch.object(facets, 'remote_for', return_value=remote))
+            planned = facets.all_targets(root, module_rows)
+            targets = {}
+            sizes = {}
+            for name, descriptor in planned.items():
+                d = sha(name.encode())
+                paths = list(facets.facet_paths(name)) if '/' in name else ['lib/lean/' + name + '.olean']
+                targets[name] = {**descriptor, 'paths': paths, 'offset': 0, 'bytes': 1, 'sha256': d, 'volume': d}
+                sizes[d] = 1
+                remote.volumes[d] = b'x'
+            base = {'schema': generation.SCHEMA, 'source': source, 'targets': targets, 'volumes': sizes}
+            remote.revision = 'f' * 40
+            remote.marker = {'schema': generation.SCHEMA, 'source': source, 'index': sha(encode(base))}
+            plan, hits = compiler.plan_layers(source, module_rows, [base])
+            plan['domain'] = 'd' * 64
+            self.assertFalse(plan['stages'])
+            receipts = root / 'receipts'
+            receipts.mkdir()
+            compiler.write(receipts / 'compiler-hits.json', hits)
+            build = mocks.enter_context(patch.object(facets, 'build_facets', side_effect=AssertionError('unexpected build')))
+            put = mocks.enter_context(patch.object(remote, 'ensure_volume', side_effect=AssertionError('unexpected physical volume')))
+            output = root / 'plan.json'
+            facets.run(root, plan, base, receipts, output)
+            result = generation.publish(remote, json.loads(output.read_bytes()), base,
+                [json.loads(path.read_bytes()) for path in receipts.glob('*.json')], remote.revision)
+            self.assertEqual(result['ci_index_sha256'], sha(encode(base)))
+            self.assertEqual(remote.block_bytes, 0)
+            build.assert_not_called()
+            put.assert_not_called()
+
+    def test_report_survives_unrelated_extractor_rebuild(self):
+        import lean_generation_facets as facets
+        modules = {n: {'key': sha(n.encode()), 'deps': []}
+                   for n in ['A', *[main for _, main, _ in facets.PROGRAMS.values()]]}
+        with patch.object(facets.report_selection, 'Selection') as registry, patch.object(facets, 'utility_inputs', return_value={}):
+            registry.return_value.modules.return_value = {'A': 'A.lean'}
+            previous = facets.all_targets(Path('.'), modules)
+            modules['Inspector'] = {'key': '0' * 64, 'deps': []}
+            current = facets.all_targets(Path('.'), modules)
+        self.assertEqual(previous['report/A'], current['report/A'])
+        self.assertNotEqual(previous['native/reportInspector'], current['native/reportInspector'])

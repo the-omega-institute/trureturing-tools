@@ -2,6 +2,7 @@
 
 import argparse
 import json
+from graphlib import TopologicalSorter
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
@@ -58,10 +59,21 @@ def all_targets(root, module_rows=None):
         name = 'native/' + exe
         deps = [main]
         targets[name] = {'key': digest(['native-v1', binary_platform(), package, exe, targets[main]['key']]), 'deps': deps}
+    # A module cannot contain typed registration inputs without the contract
+    # types in its import closure. These are the same runtime roots used by
+    # scoped report preparation.
+    contracts = {'LeanInformationAuditInterface.Contract.Catalog',
+                 'LeanInformationAuditInterface.Contract.Registration'}
+    graph = {name: row['deps'] for name, row in targets.items()}
+    may_register = set()
+    for name in TopologicalSorter(graph).static_order():
+        if name in contracts or any(dep in may_register for dep in graph[name]):
+            may_register.add(name)
     for module, path in selection.modules().items():
         utility = utilities.get(path)
-        deps = {module, 'native/reportInspector', 'native/inputDiscovery',
-                'LeanInformationAudit.TemplateEnrollment'}
+        deps = {module}
+        if module in may_register:
+            deps.add('LeanInformationAudit.TemplateEnrollment')
         if utility:
             deps.add(utility['claimModule'])
         deps = sorted(deps)
@@ -78,7 +90,6 @@ def build_facets(root, names):
     if programs:
         subprocess.run([*wrapper, '--build-report-programs', *programs], cwd=root, check=True)
     if reports:
-        subprocess.run(['python3', 'tools/lean-inspector/native.py', 'prepare', str(root)], cwd=root, check=True)
         subprocess.run([*wrapper, 'lake', '-d', 'tools/lean-inspector-reg', 'build',
                         *['+' + name + ':report' for name in reports]], cwd=root, check=True)
 
@@ -115,7 +126,7 @@ def run(root, compiler, base, receipts, output):
     if missing_keys:
         rows, sizes = checked_hits(targets, [*snapshots, *discover(remote, plan['domain'], missing_keys)])
     # Include only verified, currently addressable inherited entries.
-    available = {v: size for v, size in sizes.items() if remote.has_volume(v, size)}
+    available = remote.confirmed_volumes(sizes)
     rows, sizes = checked_hits(targets, [{'volumes': available, 'targets':
         {k: row for k, row in rows.items() if row['volume'] in available}}])
     if not compiler['targets'].keys() <= rows.keys():
@@ -130,8 +141,12 @@ def run(root, compiler, base, receipts, output):
     reports = [name for name in missing if name.startswith('report/')]
     restored = set()
     batches = ([native] if native else []) + [reports[i:i+32] for i in range(0, len(reports), 32)]
+    if reports:
+        subprocess.run(['python3', 'tools/lean-inspector/native.py', 'prepare', str(root)], cwd=root, check=True)
     for number, names in enumerate(batches):
         needed = {dep for name in names for dep in targets[name]['deps']}
+        if names[0].startswith('report/'):
+            needed.update(('native/inputDiscovery', 'native/reportInspector'))
         pending = list(needed)
         while pending:
             extra = set(targets[pending.pop()]['deps']) - needed
