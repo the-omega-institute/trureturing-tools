@@ -36,7 +36,15 @@ internal static class CanonicalStatementWriter
         declaration.PrecomputedStatementId
         ?? FrozenContentHash.Compute(
             FrozenHashDomains.Statement,
-            WriteDeclaration(path, declaration).AsSpan());
+            WriteDeclaration(path, declaration, declaration.LoadTypeRepresentation()).AsSpan());
+
+    internal static ReadOnlySpan<byte> DeclarationSuffix => "\"}\n"u8;
+
+    internal static ReadOnlySpan<byte> WriteDeclarationPrefix(RepoPath path, LeanDeclaration declaration)
+    {
+        // statement_material sorts last. Leave its opening quote in the prefix.
+        return WriteDeclaration(path, declaration, string.Empty).AsSpan()[..^DeclarationSuffix.Length];
+    }
 
     internal static ImmutableArray<byte> WriteModule(
         RepoPath path,
@@ -57,7 +65,8 @@ internal static class CanonicalStatementWriter
         return StructuredCanonicalWriter.WriteJson(material);
     }
 
-    private static ImmutableArray<byte> WriteDeclaration(RepoPath path, LeanDeclaration declaration)
+    private static ImmutableArray<byte> WriteDeclaration(
+        RepoPath path, LeanDeclaration declaration, string statementMaterial)
     {
         var material = new Dictionary<string, string?>
         {
@@ -65,7 +74,7 @@ internal static class CanonicalStatementWriter
             ["kind"] = declaration.Kind,
             ["module_path"] = path.Value,
             ["schema"] = "declaration-statement-v1",
-            ["statement_material"] = declaration.LoadTypeRepresentation(),
+            ["statement_material"] = statementMaterial,
         };
         return StructuredCanonicalWriter.WriteJson(material);
     }
