@@ -12,7 +12,7 @@ import tempfile
 import tomllib
 
 import lean_artifact_inventory as inventory
-from lean_cache import SHARED_SEED_PLATFORMS, binary_platform
+from lean_cache_release import release_key
 import lean_generation_checkpoints as checkpoints
 from lean_generation_index import validate
 import lean_compile_layers as compiler
@@ -50,9 +50,9 @@ def package_inputs(root):
             continue
         config = tomllib.loads((root / directory / "lakefile.toml").read_text())
         configs[config["name"]] = config
-    platform = "-".join(binary_platform())
-    family = next((group for group in SHARED_SEED_PLATFORMS if platform in group), (platform,))
-    environment = digest(["lean-olean-v1", family, (root / "lean-toolchain").read_text().strip(), pins])
+    # The release execution projection checks compiler environment overrides
+    # and groups platforms with compatible Lean compiler outputs.
+    environment = digest(["lean-olean-v1", release_key(root)["execution_sha256"], pins])
     return environment, configs
 
 
@@ -67,7 +67,10 @@ def module_config(config, name):
         return any(inventory.matches_module_glob(name, p) for p in patterns) or any(
             name == r or name.startswith(r + ".") for r in inventory.library_roots(lib))
 
-    settings["lean_lib"] = [lib for lib in config.get("lean_lib", []) if owns(lib)]
+    # The selectors decide whether these settings apply; adding another selected
+    # module within the same library changes no already-owned compiler command.
+    settings["lean_lib"] = [{key: value for key, value in lib.items() if key not in {"roots", "globs"}}
+                            for lib in config.get("lean_lib", []) if owns(lib)]
     settings["lean_exe"] = [exe for exe in config.get("lean_exe", []) if exe.get("root", exe["name"]) == name]
     return digest(settings)
 
@@ -200,20 +203,26 @@ def main():
         validate(base, complete=False)
         domain, _ = package_inputs(root)
         snapshots = [base]
-        if checked_hits(targets, snapshots)[0].keys() != targets.keys():
-            snapshots.extend(checkpoints.discover(remote, domain))
+        gaps = targets.keys() - checked_hits(targets, snapshots)[0].keys()
+        if gaps:
+            snapshots.extend(checkpoints.discover(remote, domain, {targets[name]["key"] for name in gaps}))
         candidates, sizes = checked_hits(targets, snapshots)
-        present = {v: size for v, size in sizes.items() if remote.has_volume(v, size)}
+        present = remote.confirmed_volumes(sizes)
         candidates = {n: r for n, r in candidates.items() if r["volume"] in present}
         plan, hits = plan_layers(source, targets, [{"targets": candidates, "volumes": present}])
         plan["domain"] = domain
         write(output / "plan.json", plan)
         write(output / "hits.json", hits)
-        workers = [name for name in plan["stages"] if name != "common"]
+        common = set(plan["stages"].get("common", {}).get("owned", []))
+        workers, independent = [], []
+        for name, layer in plan["stages"].items():
+            if name != "common":
+                (workers if common.intersection(layer["restore"]) else independent).append(name)
         if github_output := os.environ.get("GITHUB_OUTPUT"):
             with open(github_output, "a") as out:
                 print("shared=" + str("common" in plan["stages"]).lower(), file=out)
                 print("workers=" + json.dumps(workers), file=out)
+                print("independent=" + json.dumps(independent), file=out)
         return
     plan = json.loads(args.plan.read_bytes())
     if plan["source"] != source or not args.stage:

@@ -1,5 +1,6 @@
 """Discover partial immutable index receipts separately from the complete generation ref."""
 
+import json
 import os
 from pathlib import Path
 import re
@@ -33,25 +34,59 @@ def save(remote, domain, receipt, directory):
     validate(receipt, complete=False)
     checkpoint = {**receipt, "producer": publisher()}
     digest = stage_indexes(remote, checkpoint, directory)
-    ref = prefix(domain) + digest
+    name = prefix(domain).removeprefix("tags/") + digest
+    keys = sorted(target["key"] for target in receipt["targets"].values())
+    message = json.dumps(keys, separators=(",", ":"))
+    tag = remote.api("git/tags", "-X", "POST", "-f", "tag=" + name, "-f", "message=" + message,
+                     "-f", "type=commit", "-f", "object=" + receipt["source"])
     try:
-        result = remote.api("git/refs", "-X", "POST", "-f", "ref=refs/" + ref, "-f", "sha=" + receipt["source"])
+        ref = remote.api("git/refs", "-X", "POST", "-f", "ref=refs/tags/" + name, "-f", "sha=" + tag["sha"])
     except host.GitHubCommandError:
-        result = remote.api("git/ref/" + ref)
-    if result["object"]["sha"] != receipt["source"]:
-        raise ValueError("checkpoint ref belongs to a different source")
+        ref = remote.api("git/ref/tags/" + name)
+    if ref["object"]["sha"] != tag["sha"]:
+        stored = remote.api("git/tags/" + ref["object"]["sha"])
+        if stored["message"] != message or stored["object"]["sha"] != receipt["source"]:
+            raise ValueError("checkpoint metadata differs from the existing tag")
 
 
-def discover(remote, domain):
-    ref_prefix = prefix(domain)
-    refs = remote.api("git/matching-refs/" + ref_prefix)
+def descriptors(remote, domain):
+    # Read candidate key metadata in pages. The actual partial index is fetched
+    # only when this target checkout requests a key present in the batch.
+    tag_prefix = prefix(domain).removeprefix("tags/")
+    owner, repo = host.REPO.split("/")
+    query = """query($owner:String!,$repo:String!,$prefix:String!,$cursor:String){
+      repository(owner:$owner,name:$repo){
+        refs(refPrefix:"refs/tags/",query:$prefix,first:100,after:$cursor){
+          nodes{name target{... on Tag{message target{oid}}}}
+          pageInfo{endCursor hasNextPage}
+        }
+      }
+    }"""
+    args = ["api", "graphql", "-f", "query=" + query, "-f", "owner=" + owner,
+            "-f", "repo=" + repo, "-f", "prefix=" + tag_prefix]
+    cursor = []
+    while True:
+        page = json.loads(host.gh(remote.deadline, *args, *cursor))["data"]["repository"]["refs"]
+        for row in page["nodes"]:
+            digest = row["name"].removeprefix(tag_prefix)
+            if not re.fullmatch("[0-9a-f]{64}", digest):
+                continue
+            descriptor = row["target"]
+            yield digest, descriptor["target"]["oid"], json.loads(descriptor["message"])
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = ["-f", "cursor=" + page["pageInfo"]["endCursor"]]
+
+
+def discover(remote, domain, keys=None):
     runs = {}
     with tempfile.TemporaryDirectory() as directory:
-        for ref in refs:
-            digest = ref["ref"].removeprefix("refs/" + ref_prefix)
-            if not re.fullmatch("[0-9a-f]{64}", digest):
-                raise ValueError("invalid checkpoint ref")
-            checkpoint = remote.get_index(digest, Path(directory) / "checkpoint", "release")
+        for digest, source, advertised in descriptors(remote, domain):
+            if keys is not None and keys.isdisjoint(advertised):
+                continue
+            checkpoint = remote.get_index(digest, Path(directory) / "checkpoint", "checkpoint")
+            if sorted(advertised) != sorted(row["key"] for row in checkpoint["targets"].values()):
+                raise ValueError("checkpoint targets differ from its advertised keys")
             validate(checkpoint, complete=False)
             run_id = checkpoint["producer"]["run"]
             attempt = checkpoint["producer"]["attempt"]
@@ -64,7 +99,7 @@ def discover(remote, domain):
             if (run["repository"]["full_name"] != host.REPO or run["head_branch"] != "dev"
                     or run["path"] != ".github/workflows/lean-cache-publish.yml"
                     or run["event"] not in {"schedule", "workflow_dispatch"}
-                    or checkpoint["source"] != ref["object"]["sha"]):
+                    or checkpoint["source"] != source):
                 raise ValueError("checkpoint did not originate in the protected dev publisher")
             yield checkpoint
 

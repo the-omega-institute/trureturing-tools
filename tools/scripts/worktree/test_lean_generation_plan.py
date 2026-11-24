@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import lean_generation_plan as planner
 from lean_artifact_inventory import Module
@@ -21,6 +21,8 @@ class GenerationPlanner(unittest.TestCase):
     def test_target_config_ignores_unrelated_libraries_binds_compiler_options(self):
         config = {"name": "pkg", "lean_lib": [{"name": "Math"}, {"name": "Test"}]}
         original = planner.module_config(config, "Math.A")
+        config["lean_lib"][0]["roots"] = ["Math", "Other"]
+        config["lean_lib"][0]["globs"] = ["Math.+", "Other.+"]
         config["lean_lib"][1]["leanOptions"] = {"trace.compiler": True}
         config["lean_exe"] = [{"name": "audit", "root": "Test.Main"}]
         self.assertEqual(original, planner.module_config(config, "Math.A"))
@@ -41,6 +43,27 @@ class GenerationPlanner(unittest.TestCase):
             planner.checked_hits(targets, [cp, other])
         plan, _ = planner.plan_layers("s", targets, [cp])
         self.assertEqual(plan["stages"], {})
+
+    def test_discovery_fetches_only_intersecting_partial_index_and_binds_its_source(self):
+        key = "b" * 64
+        row = {"key": key, "deps": [], "paths": ["lib/A.olean"], "sha256": "c" * 64,
+               "volume": "d" * 64, "offset": 0, "bytes": 3}
+        source = "a" * 40
+        receipt = {"source": source, "targets": {"A": row}, "volumes": {row["volume"]: 3},
+                   "producer": {"run": "12", "attempt": "1"}}
+        remote = Mock()
+        remote.get_index.return_value = receipt
+        remote.api.return_value = {"repository": {"full_name": planner.checkpoints.host.REPO}, "head_branch": "dev",
+                                   "path": ".github/workflows/lean-cache-publish.yml", "event": "schedule"}
+        catalog = [("1" * 64, source, ["other"]), ("2" * 64, source, [key])]
+        with patch.object(planner.checkpoints, "descriptors", return_value=catalog):
+            self.assertEqual(list(planner.checkpoints.discover(remote, "0" * 64, {key})), [receipt])
+        self.assertEqual(remote.get_index.call_count, 1)
+        self.assertEqual(remote.get_index.call_args.args[-1], "checkpoint")
+        remote.api.return_value["event"] = "push"
+        with patch.object(planner.checkpoints, "descriptors", return_value=catalog):
+            with self.assertRaisesRegex(ValueError, "protected dev publisher"):
+                list(planner.checkpoints.discover(remote, "0" * 64, {key}))
 
     @unittest.skipUnless(shutil.which("lake"), "pinned Lake required for compiler fixture")
     def test_parallel_diamond_and_interrupted_worker(self):
