@@ -22,7 +22,7 @@ def discover (store : RawArtifacts.Store) (target : Name) : IO Discovery.Snapsho
   let axioms ← IO.mkRef ({} : CompiledAxioms.AxiomClosureState)
   Discovery.discoverCompiled (requirements owners) owners context
     (fun owner => return (← store.getModule owner).constants)
-    (CompiledAxioms.collectAxiomsShared store.reportConstant? axioms)
+    (CompiledAxioms.collectAxiomsShared (store.reportConstants #[target]) axioms)
     (fun owner => pure (System.FilePath.mk (TemplateBinding.sourcePath owner)))
 
 /-- A fresh target assessment rebuilds plans, registrations, all reachable

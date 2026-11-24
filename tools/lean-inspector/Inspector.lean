@@ -497,7 +497,7 @@ private def withReportWriter (reportOutput materialSpool : System.FilePath)
   let row ← inspectData data (current.constants.find?)
     (closedNegation (fun name => current.modules.find? name.toName)
       (current.constants.find?) input)
-    current.reportConstant? writer counter utilities generatedNames binding input
+    (current.reportConstants #[target]) writer counter utilities generatedNames binding input
   let row := { row with
     informationRegistrationErrors := sortedUnique (row.informationRegistrationErrors ++ enrollmentErrors) }
   out.putStr (renderModule row)

@@ -104,7 +104,7 @@ unsafe def Context.fromArtifacts (store : RawArtifacts.Store) (mainModule : Name
     registeredTheorems
     implementedBy := fun name => (store.metadata.implementedBy.find? name).isSome
     extern := store.metadata.externs.contains
-    collectAxioms := CompiledAxioms.collectAxiomsShared store.reportConstant? axioms }
+    collectAxioms := CompiledAxioms.collectAxiomsShared (store.reportConstants #[mainModule]) axioms }
 
 private def fail [Monad m] [MonadLiftT IO m] (reason : String) : m α :=
   liftM (m := IO) (throw (IO.userError reason) : IO α)

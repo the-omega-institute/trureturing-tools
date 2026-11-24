@@ -15,5 +15,5 @@ unsafe def discover (reader : IO.Ref RawArtifacts.Store) (requirements : Array C
   let closures ← IO.mkRef ({} : CompiledAxioms.AxiomClosureState)
   Contract.Discovery.discoverCompiled requirements owners context
     (fun owner => return (← store.getModule owner).constants)
-    (CompiledAxioms.collectAxiomsShared store.reportConstant? closures) sourceOf
+    (CompiledAxioms.collectAxiomsShared (store.reportConstants owners) closures) sourceOf
 end LeanInformationAuditRegTests.CompiledFixtureReader
