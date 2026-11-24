@@ -190,8 +190,8 @@ internal static partial class RawLeanReportArtifact
 
         if (validateMaterials)
         {
-            materialArchive!.ValidateAll();
-            if (scope is not null) ValidateScopedStatementIdentities(reports);
+            if (scope is null) materialArchive!.ValidateAll();
+            else materialArchive!.ValidateScopedStatementIdentities(reports);
         }
         return scope is null
             ? LeanAxiomReport.Create(reports)
@@ -204,18 +204,6 @@ internal static partial class RawLeanReportArtifact
             .Order(StringComparer.Ordinal).ToImmutableArray();
         if (!imports.SequenceEqual(sourceImports))
             throw new FormatException($"Scoped Lean report imports do not match source for {source.Path.Value}.");
-    }
-
-    private static void ValidateScopedStatementIdentities(IEnumerable<KeyValuePair<string, LeanFileReport>> reports)
-    {
-        foreach (var (path, report) in reports)
-        foreach (var declaration in report.Declarations)
-        {
-            var actual = CanonicalStatementWriter.DeclarationStatementId(RepoPath.CreateKnown(path),
-                declaration with { PrecomputedStatementId = null });
-            if (!string.Equals(actual, declaration.PrecomputedStatementId, StringComparison.Ordinal))
-                throw new InvalidDataException($"Scoped Lean report statement identity does not match material: {path}:{declaration.Name}.");
-        }
     }
 
     internal static ImmutableArray<byte> Write(RepositorySnapshot snapshot, LeanAxiomReport report)
@@ -583,9 +571,65 @@ internal static partial class RawLeanReportArtifact
                 _ = ReadCore("sha256:" + name[EntryPrefix.Length..], materialize: false);
         }
 
-        private string? ReadCore(string address, bool materialize)
+        internal void ValidateScopedStatementIdentities(IEnumerable<KeyValuePair<string, LeanFileReport>> reports)
+        {
+            _ = addressesValidated.Value;
+            var bytes = new byte[64 * 1024];
+            var chars = new char[StrictUtf8.GetMaxCharCount(bytes.Length)];
+            foreach (var (path, report) in reports)
+            {
+                var repoPath = RepoPath.CreateKnown(path);
+                foreach (var declaration in report.Declarations)
+                {
+                    using var statement = FrozenContentHash.Start(FrozenHashDomains.Statement);
+                    statement.AppendData(CanonicalStatementWriter.WriteDeclarationPrefix(repoPath, declaration));
+                    AppendScopedMaterial(declaration.StatementTypeAddress, bytes, chars, statement);
+                    statement.AppendData(CanonicalStatementWriter.DeclarationSuffix);
+                    if (!string.Equals(FrozenContentHash.Finish(statement), declaration.PrecomputedStatementId,
+                            StringComparison.Ordinal))
+                    {
+                        throw new InvalidDataException(
+                            $"Scoped Lean report statement identity does not match material: {path}:{declaration.Name}.");
+                    }
+                }
+            }
+        }
+
+        private void AppendScopedMaterial(string address, byte[] bytes, char[] chars, IncrementalHash statement)
         {
             var archive = contents.Value;
+            var entry = GetEntry(archive, address);
+            using var raw = FrozenContentHash.Start(FrozenHashDomains.Statement);
+            var decoder = StrictUtf8.GetDecoder();
+            Action<ReadOnlySpan<byte>> appendEscaped = statement.AppendData;
+            try
+            {
+                lock (archive.Gate)
+                {
+                    using var stream = entry.Open();
+                    // Read exactly the advertised uncompressed size, as demand reads do.
+                    var remaining = (int)entry.Length;
+                    while (remaining > 0)
+                    {
+                        var chunk = bytes.AsSpan(0, Math.Min(remaining, bytes.Length));
+                        stream.ReadExactly(chunk);
+                        remaining -= chunk.Length;
+                        raw.AppendData(chunk);
+                        var count = decoder.GetChars(chunk, chars, flush: remaining == 0);
+                        StructuredCanonicalWriter.WriteJsonStringContent(appendEscaped, chars.AsSpan(0, count));
+                    }
+                }
+            }
+            catch (DecoderFallbackException exception)
+            {
+                throw InvalidMaterialEncoding(address, exception);
+            }
+
+            ValidateMaterialHash(address, FrozenContentHash.Finish(raw));
+        }
+
+        private static ZipArchiveEntry GetEntry(ArchiveContents archive, string address)
+        {
             if (!archive.Entries.TryGetValue(EntryName(address), out var entry))
             {
                 throw new InvalidDataException($"Lean statement material is missing for {address}.");
@@ -595,6 +639,13 @@ internal static partial class RawLeanReportArtifact
                 throw new InvalidDataException($"Lean statement material is too large for {address}.");
             }
 
+            return entry;
+        }
+
+        private string? ReadCore(string address, bool materialize)
+        {
+            var archive = contents.Value;
+            var entry = GetEntry(archive, address);
             var bytes = new byte[(int)entry.Length];
             lock (archive.Gate)
             {
@@ -610,19 +661,23 @@ internal static partial class RawLeanReportArtifact
             }
             catch (DecoderFallbackException exception)
             {
-                throw new InvalidDataException(
-                    $"Lean statement material is not strict UTF-8 for {address}.",
-                    exception);
+                throw InvalidMaterialEncoding(address, exception);
             }
 
-            var actual = FrozenContentHash.Compute(FrozenHashDomains.Statement, bytes);
+            ValidateMaterialHash(address, FrozenContentHash.Compute(FrozenHashDomains.Statement, bytes));
+            return value;
+        }
+
+        private static InvalidDataException InvalidMaterialEncoding(string address, DecoderFallbackException exception) =>
+            new($"Lean statement material is not strict UTF-8 for {address}.", exception);
+
+        private static void ValidateMaterialHash(string address, string actual)
+        {
             if (!string.Equals(actual, address, StringComparison.Ordinal))
             {
                 throw new InvalidDataException(
                     $"Lean statement material hash mismatch for {address}: actual {actual}.");
             }
-
-            return value;
         }
 
         private sealed class ArchiveContents(ZipArchive archive, ImmutableDictionary<string, ZipArchiveEntry> entries)

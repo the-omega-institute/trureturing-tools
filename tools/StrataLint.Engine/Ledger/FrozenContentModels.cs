@@ -22,11 +22,20 @@ internal static class FrozenContentHash
 {
     internal static string Compute(string domain, ReadOnlySpan<byte> material)
     {
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        hash.AppendData(Encoding.UTF8.GetBytes(domain));
+        using var hash = Start(domain);
         hash.AppendData(material);
-        return "sha256:" + Convert.ToHexStringLower(hash.GetHashAndReset());
+        return Finish(hash);
     }
+
+    internal static IncrementalHash Start(string domain)
+    {
+        var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(Encoding.UTF8.GetBytes(domain));
+        return hash;
+    }
+
+    internal static string Finish(IncrementalHash hash) =>
+        "sha256:" + Convert.ToHexStringLower(hash.GetHashAndReset());
 
     internal static ImmutableArray<byte> Raw(string taggedHash)
     {
