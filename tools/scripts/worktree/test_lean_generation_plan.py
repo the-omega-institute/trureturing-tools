@@ -68,6 +68,17 @@ class GenerationPlanner(unittest.TestCase):
             remote.get_index.side_effect = [error, receipt]
             with self.subTest(error=error), patch.object(planner.checkpoints, "descriptors", return_value=candidates):
                 self.assertEqual(list(planner.checkpoints.discover(remote, "0" * 64, {key})), [receipt])
+        invalid = deepcopy(receipt)
+        invalid["targets"]["A"]["bytes"] = -1
+        remote.get_index.side_effect = [invalid, receipt]
+        with patch.object(planner.checkpoints, "descriptors", return_value=candidates):
+            self.assertEqual(list(planner.checkpoints.discover(remote, "0" * 64, {key})), [receipt])
+        conflict = deepcopy(receipt)
+        conflict["targets"]["B"] = {**row, "paths": ["lib/B.olean"], "sha256": "f"*64}
+        remote.get_index.side_effect = [conflict, receipt]
+        with patch.object(planner.checkpoints, "descriptors", return_value=candidates), self.assertRaisesRegex(
+                ValueError, "conflicting artifacts for input key"):
+            list(planner.checkpoints.discover(remote, "0" * 64, {key}))
         remote.get_index.side_effect = None
         remote.api.return_value["event"] = "push"
         with patch.object(planner.checkpoints, "descriptors", return_value=catalog):

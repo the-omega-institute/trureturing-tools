@@ -9,7 +9,7 @@ import sys
 import tempfile
 
 import lean_cache_release as host
-from lean_generation_index import validate
+from lean_generation_index import ConflictingArtifacts, validate
 from lean_generation_remote import GitHub, InvalidIndexBody, MissingCheckpoint
 
 
@@ -110,9 +110,15 @@ def discover(remote, domain, keys=None):
             except (MissingCheckpoint, InvalidIndexBody) as error:
                 print(f"Skipping unavailable checkpoint {digest}: {error}", file=sys.stderr)
                 continue
-            if sorted(advertised) != sorted(row["key"] for row in checkpoint["targets"].values()):
-                raise ValueError("checkpoint targets differ from its advertised keys")
-            validate(checkpoint, complete=False)
+            try:
+                validate(checkpoint, complete=False)
+                if sorted(advertised) != sorted(row["key"] for row in checkpoint["targets"].values()):
+                    raise ValueError("checkpoint targets differ from its advertised keys")
+            except ConflictingArtifacts:
+                raise
+            except (AttributeError, KeyError, TypeError, ValueError) as error:
+                print(f"Skipping unusable checkpoint receipt {digest}: {error}", file=sys.stderr)
+                continue
             run_id = checkpoint["producer"]["run"]
             attempt = checkpoint["producer"]["attempt"]
             if not all(isinstance(n, str) and re.fullmatch(r"[1-9]\d*", n) for n in (run_id, attempt)):

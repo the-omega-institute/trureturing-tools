@@ -1,5 +1,6 @@
 import copy
 import io
+import json
 from pathlib import Path
 import tarfile
 import subprocess
@@ -195,11 +196,59 @@ class Generations(unittest.TestCase):
                     generation.publish(self.remote, next_plan, read(self.directory / "resolved"), [], first["marker"])
         self.assertEqual(first["marker"], self.remote.revision)
 
+    def test_resume_pending_generation_release_by_draft_id(self):
+        target = self.plan["source"]
+        path = self.directory / "index"
+        path.write_bytes(encode({"source": target}))
+        digest = sha(path.read_bytes())
+        tag = INDEX_PREFIX + digest
+        starter = {"name": digest, "id": 142, "state": "starter", "size": 0, "digest": None}
+        metadata = {"draft": True, "id": 17, "tag_name": tag, "target_commitish": target, "assets": [starter]}
+        writes = []
+        def gh(deadline, *args):
+            if args[:2] == ("api", "graphql"):
+                self.assertIn("tag=" + tag, args)
+                return json.dumps({"data": {"repository": {"release": {"databaseId": 17, "isDraft": True}}}})
+            if args[:2] == ("api", "repos/" + generation.host.REPO + "/releases/17"):
+                return json.dumps(metadata)
+            if args[:3] == ("api", "--method", "DELETE"):
+                self.assertEqual(args[-1], "repos/" + generation.host.REPO + "/releases/assets/142")
+                metadata["assets"].clear()
+            elif args[:3] == ("release", "upload", tag):
+                self.assertEqual(Path(args[3]).read_bytes(), path.read_bytes())
+                metadata["assets"] = [dict(starter, state="uploaded", digest="sha256:" + digest,
+                                           size=path.stat().st_size)]
+            elif args[:3] == ("release", "edit", tag):
+                self.assertIn("--draft=false", args)
+                metadata["draft"] = False
+            else:
+                self.fail(f"unexpected GitHub call: {args}")
+            writes.append(args[1:3])
+        def by_tag(tag_name, deadline):
+            self.assertEqual(tag_name, tag)
+            return None if metadata["draft"] else metadata
+        remote = GitHub(self.directory, None)
+        with patch.object(generation.host, "gh", side_effect=gh), \
+                patch.object(generation.host, "existing_release", side_effect=by_tag), \
+                patch.object(checkpoints, "publisher"), patch.object(remote, "ci"):
+            for field, bad in (("target_commitish", "d"*40), ("tag_name", "wrong"), ("id", 18)):
+                with self.subTest(field=field), patch.dict(metadata, {field: bad}), self.assertRaises(ValueError):
+                    remote.stage_indexes(digest, path)
+                self.assertEqual(writes, [])
+            remote.stage_indexes(digest, path)
+            self.assertEqual(writes, [("--method", "DELETE"), ("upload", tag), ("edit", tag)])
+            remote.stage_indexes(digest, path)
+            self.assertEqual(len(writes), 3)
+
     def test_valid_checkpoint_metadata_with_corrupt_or_vanished_body(self):
         remote = GitHub(self.directory, None)
         digest = sha(b"expected")
         name = "checkpoint-" + digest
         asset = {"id": 5, "name": name, "size": 8, "digest": "sha256:" + digest, "state": "uploaded"}
+        for bad in ({"digest": "sha256:" + "a"*64}, {"size": 0}, {"state": "starter"}, {"id": -1}):
+            with self.subTest(metadata=bad), patch.object(remote.objects, "locate", return_value=("tag", asset | bad)), \
+                    self.assertRaises(InvalidIndexBody):
+                remote.get_index(digest, self.directory / "download", "checkpoint")
         def corrupt(_deadline, *args):
             (Path(args[args.index("--dir") + 1]) / name).write_bytes(b"corrupt!")
         errors = [(corrupt, InvalidIndexBody),

@@ -35,6 +35,10 @@ def read(path):
     return json.loads(data, object_pairs_hook=unique)
 
 
+class ConflictingArtifacts(ValueError):
+    """A single target input key has multiple distinct payloads."""
+
+
 def validate(index, *, complete):
     if (not re.fullmatch(r"[0-9a-f]{40}", index["source"])
             or index.get("schema", SCHEMA) != SCHEMA):
@@ -61,7 +65,7 @@ def validate(index, *, complete):
             raise ValueError(f"invalid generation target or extent: {name}")
         content = (row["sha256"], length, sorted(paths))
         if content_by_key.setdefault(row["key"], content) != content:
-            raise ValueError("conflicting artifacts for input key " + row["key"])
+            raise ConflictingArtifacts("conflicting artifacts for input key " + row["key"])
         for path in paths:
             safe_path(path)
             if path in path_owner:

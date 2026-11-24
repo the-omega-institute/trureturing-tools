@@ -100,7 +100,7 @@ class GitHub:
             self.objects.ensure(digest, "checkpoint-" + digest, path.stat().st_size, path)
         else:
             remote.ensure_asset(host, INDEX_PREFIX + digest, digest, path.stat().st_size, path, self.deadline,
-                                target=read(path)["source"])
+                                serialized=True, target=read(path)["source"])
             self.ci("put", digest, path)
 
     def get_index(self, digest, path, transport):
@@ -111,9 +111,13 @@ class GitHub:
             tag, asset = self.objects.locate(digest, name)
             if asset is None:
                 raise MissingCheckpoint("missing durable checkpoint index: " + digest)
-            if (not 0 < asset["size"] <= MAX_INDEX
-                    or not self.objects.checked(asset, digest, asset["size"])):
-                raise ValueError("checkpoint index is unavailable or invalid")
+            size = asset.get("size")
+            if type(size) is not int or not 0 < size <= MAX_INDEX:
+                raise InvalidIndexBody("invalid checkpoint asset length: " + digest)
+            try:
+                self.objects.checked(asset, digest, size)
+            except ValueError as error:
+                raise InvalidIndexBody("invalid checkpoint asset metadata: " + digest) from error
             with tempfile.TemporaryDirectory(dir=path.parent) as temp:
                 try:
                     host.gh(self.deadline, "release", "download", tag, "--repo", host.REPO, "--dir", temp,
@@ -123,7 +127,10 @@ class GitHub:
                     if re.search(r"\bHTTP 404\b", diagnostic) or diagnostic == "no assets match the file pattern":
                         raise MissingCheckpoint("checkpoint asset disappeared: " + digest) from error
                     raise
-                os.replace(Path(temp) / name, path)
+                candidate = Path(temp) / name
+                if candidate.stat().st_size != size:
+                    raise InvalidIndexBody("checkpoint body differs from its recorded length: " + digest)
+                os.replace(candidate, path)
         else:
             tag = INDEX_PREFIX + digest
             metadata = host.existing_release(tag, self.deadline)
