@@ -29,8 +29,10 @@ are visible, including `Init`, `Lean`, `Mathlib`, third-party roots, and
 elaboration contributes a library only when the compiled declaration reaches
 one of its constants. The library walk starts from the declaration itself.
 The Inspector loads each target in its own import closure. It collects actual
-axioms from the selected kernel entries. Compatible duplicate theorems can make
-these axioms differ from the compiler's name-keyed export summaries. The
+axioms from the selected kernel entries. The report follows the first import's
+compiled term when several modules define a compatible theorem. The independent
+frozen measurement follows the kernel-selected term. Both compute the transitive
+closure of types and bodies across cycles, including inductives and constructors. The
 measurement checks the compiled statement address and axiom set against every
 declaration in the report, including hidden declarations used to determine `Closed`,
 and rejects any disagreement.

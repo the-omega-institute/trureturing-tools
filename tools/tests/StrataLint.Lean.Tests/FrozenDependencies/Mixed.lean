@@ -29,4 +29,8 @@ public theorem fullAxioms : ∃ x : True, x = True.intro ∧ True = True
   ⟨Classical.choice ⟨True.intro⟩, Subsingleton.elim _ _, propext Iff.rfl,
     Quot.sound (a := True.intro) (b := True.intro) True.intro⟩
 
+public inductive AxiomFamily where
+  | plain
+  | dependent (witness : (propext (Iff.rfl : True ↔ True)) = rfl)
+
 end FrozenFixture

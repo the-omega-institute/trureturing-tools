@@ -207,6 +207,8 @@ def exercise(directory):
     assert "Init" in rows["mathlibProof"]["libraries"], rows
     assert "D5" not in rows["mathlibProof"]["libraries"], rows
     assert rows["oneAxiom"]["axioms"] == ["propext"], rows
+    assert rows["plain"]["axioms"] == ["propext"], rows
+    assert rows["dependent"]["axioms"] == ["propext"], rows
     assert "axioms" not in rows["fullAxioms"], rows
     run("dotnet", CLI, "ledger-frozen", "--target", MODULE)
     assert list(STATE.rglob("*.json")) == [RECORD]

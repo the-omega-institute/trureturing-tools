@@ -15,6 +15,10 @@ structure Store where
   -- Like Lean's module index, `owners` records the first import. A compatible
   -- later declaration can replace the term without changing that index.
   selectedOwnerOverrides : NameMap Name := {}
+  -- A downstream report resolves a name through its first imported module, as
+  -- the compiler does for exported declaration metadata. Retain the actual
+  -- term for that view when a compatible later import replaces the kernel term.
+  firstDefinitions : NameMap ConstantInfo := {}
   moduleOrder : Array Name := #[]
   moduleIndices : Std.TreeMap Name Nat Name.quickCmp := {}
   protectedModules : Std.TreeMap Name Bool Name.quickCmp := {}
@@ -30,12 +34,16 @@ def Store.fork (base : Store) : Store :=
 def Store.selectedOwner? (store : Store) (name : Name) : Option Name :=
   (store.selectedOwnerOverrides.find? name).orElse fun _ => store.owners.find? name
 
+def Store.reportConstant? (store : Store) (name : Name) : Option ConstantInfo :=
+  (store.firstDefinitions.find? name).orElse fun _ => store.constants.find? name
+
 /-- Assessment can replace compiled entries with generated report declarations. -/
 def Store.insertGenerated (store : Store) (owner : Name) (info : ConstantInfo) : Store :=
   { store with
     constants := store.constants.insert info.name info
     owners := store.owners.insert info.name owner
-    selectedOwnerOverrides := store.selectedOwnerOverrides.erase info.name }
+    selectedOwnerOverrides := store.selectedOwnerOverrides.erase info.name
+    firstDefinitions := store.firstDefinitions.erase info.name }
 
 def mapSize {α : Type} (map : SMap Name α) : Nat :=
   map.map₂.foldl (fun count name _ => if map.map₁.contains name then count else count + 1) map.map₁.size
@@ -187,13 +195,17 @@ unsafe def loadModule (name : Name) (store : IO.Ref Store) : IO Unit := do
   let (data, regions) ← readOwn name
   store.modify fun s => { s with regions := s.regions ++ regions }
   for item in data.imports do loadModule item.module store
-  let (constants, overrides) ← store.modifyGet fun s =>
-    ((s.constants, s.selectedOwnerOverrides), { s with constants := {}, selectedOwnerOverrides := {} })
+  let (constants, overrides, firstDefinitions) ← store.modifyGet fun s =>
+    ((s.constants, s.selectedOwnerOverrides, s.firstDefinitions),
+     { s with constants := {}, selectedOwnerOverrides := {}, firstDefinitions := {} })
   let mut constants := constants
   let mut overrides := overrides
+  let mut firstDefinitions := firstDefinitions
   for info in data.constants do
     if let some previous := constants.find? info.name then
       if subsumes constants info previous then
+        if !firstDefinitions.contains info.name then
+          firstDefinitions := firstDefinitions.insert info.name previous
         constants := constants.insert info.name info
         overrides := overrides.insert info.name name
       else unless subsumes constants previous info do
@@ -204,6 +216,7 @@ unsafe def loadModule (name : Name) (store : IO.Ref Store) : IO Unit := do
     { s with
     constants := constants
     selectedOwnerOverrides := overrides
+    firstDefinitions
     owners := data.constNames.foldl (fun owners constant => if owners.contains constant then owners else owners.insert constant name) s.owners
     modules := s.modules.insert name data
     moduleIndices
