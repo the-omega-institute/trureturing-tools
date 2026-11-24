@@ -14,6 +14,7 @@ from lean_artifact_inventory import Artifact, PROJECT_BUILD
 from lean_cache import binary_platform
 from lean_cache_generation import restore, stage_frames
 from lean_cache_release import report_selection
+from lean_compile_layers import lake_build
 from lean_generation_checkpoints import discover, remote_for, save
 from lean_generation_index import matches, read
 from lean_generation_plan import checked_hits, digest, module_targets, write
@@ -124,15 +125,18 @@ def use_known_projections(targets, snapshots):
                 targets[name] = alternate
 
 
-def build_facets(root, names):
+def build_facets(root, names, targets):
     programs = [PROGRAMS[n[7:]][0] + '/' + n[7:] for n in names if n.startswith('native/')]
     reports = [n[7:] for n in names if n.startswith('report/')]
     wrapper = ['bash', 'tools/scripts/worktree/lean-cache-run.sh']
     if programs:
         subprocess.run([*wrapper, '--build-report-programs', *programs], cwd=root, check=True)
     if reports:
-        subprocess.run([*wrapper, 'lake', '-d', 'tools/lean-inspector-reg', 'build',
-                        *['+' + name + ':report' for name in reports]], cwd=root, check=True)
+        # Reports open compiler exports in no-build mode. Their project frames
+        # may already be restored while a third-party import is still cold.
+        inputs = sorted({module for name in reports for module in targets['report/' + name]['deps']})
+        lake_build(root, ['+' + name + ':olean' for name in inputs], no_build=False)
+        lake_build(root, ['+' + name + ':report' for name in reports], no_build=False)
 
 
 def stage(root, remote, plan, names, directory):
@@ -212,7 +216,7 @@ def run(root, compiler, base, receipts, output):
                                 volumes={r['volume']: index['volumes'][r['volume']] for r in subset.values()})
             restore(remote, subset_index, plan, sorted(new), root / PROJECT_BUILD)
             restored.update(new)
-        build_facets(root, names)
+        build_facets(root, names, targets)
         with tempfile.TemporaryDirectory() as temp:
             receipt = stage(root, remote, plan, names, Path(temp))
         write(receipts / f'facets-{number}.json', receipt)
