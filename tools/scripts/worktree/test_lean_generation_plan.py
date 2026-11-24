@@ -1,0 +1,132 @@
+"""Check per-module keys, recovery boundaries and execution of a shared compiler DAG."""
+
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+import unittest
+from unittest.mock import patch
+
+import lean_generation_plan as planner
+from lean_artifact_inventory import Module
+from lean_generation_index import read
+from test_lean_cache_generation import Store
+
+
+class GenerationPlanner(unittest.TestCase):
+    def test_target_config_ignores_unrelated_libraries_binds_compiler_options(self):
+        config = {"name": "pkg", "lean_lib": [{"name": "Math"}, {"name": "Test"}]}
+        original = planner.module_config(config, "Math.A")
+        config["lean_lib"][1]["leanOptions"] = {"trace.compiler": True}
+        config["lean_exe"] = [{"name": "audit", "root": "Test.Main"}]
+        self.assertEqual(original, planner.module_config(config, "Math.A"))
+        config["lean_lib"][0]["leanOptions"] = {"autoImplicit": False}
+        self.assertNotEqual(original, planner.module_config(config, "Math.A"))
+
+    def test_conflicting_checkpoint_and_missing_predecessor(self):
+        targets = {name: {"key": planner.digest(name), "deps": deps} for name, deps in
+                   [("A", []), ("B", ["A"])]}
+        def snapshot(names):
+            return {"targets": {n: dict(targets[n], sha256=n, volume=n, paths=[n]) for n in names},
+                    "volumes": {n: 1 for n in names}}
+        self.assertEqual(planner.checked_hits(targets, [snapshot(["B"])])[0], {})
+        cp = snapshot(["A", "B"])
+        other = deepcopy(cp)
+        other["targets"]["A"]["sha256"] = "conflict"
+        with self.assertRaisesRegex(ValueError, "conflicting payloads"):
+            planner.checked_hits(targets, [cp, other])
+        plan, _ = planner.plan_layers("s", targets, [cp])
+        self.assertEqual(plan["stages"], {})
+
+    @unittest.skipUnless(shutil.which("lake"), "pinned Lake required for compiler fixture")
+    def test_parallel_diamond_and_interrupted_worker(self):
+        temp = tempfile.TemporaryDirectory(prefix="generation worker ")
+        self.addCleanup(temp.cleanup)
+        directory = Path(temp.name)
+        pin = (Path(__file__).resolve().parents[3] / "lean-toolchain").read_text()
+        names = ["Fixture.Base", "Fixture.Left", "Fixture.Right", "Fixture.Tail"]
+        graph = {names[0]: [], names[1]: names[:1], names[2]: names[:1], names[3]: [names[2]]}
+        targets = {n: {"key": planner.digest(n), "deps": deps} for n, deps in graph.items()}
+        modules = {n: Module("fixture", Path(n.replace(".", "/") + ".lean"), Path(".")) for n in graph}
+        remote = Store()
+        plan, hits = planner.plan_layers("a" * 40, targets, [])
+        plan["domain"] = "d" * 64
+        start = threading.Barrier(2)
+        windows = {}
+        saved = []
+        compile_roots = planner.compiler.compile_roots
+
+        def checkout(path):
+            src = path / "tools/lean-inspector-reg"
+            src.mkdir(parents=True)
+            (src / "lakefile.toml").write_text('name = "fixture"\nsrcDir = "../.."\nbuildDir = "../../.lake/build"\n'
+                                             '[[lean_lib]]\nname = "Fixture"\nglobs = ["Fixture.+"]\n')
+            (path / "lean-toolchain").write_text(pin)
+            (path / "Fixture").mkdir()
+            for n, deps in graph.items():
+                file = path / modules[n].source
+                file.write_text("".join("import " + d + "\n" for d in deps) + "def " + n.split(".")[-1] + "Value := 5\n")
+            wrapper = path / "tools/scripts/worktree/lean-cache-run.sh"
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_text('exec "$@"\n')
+            # Lake creates its manifest once, ahead of each independent timed compile.
+            subprocess.run(["lake", "-d", str(src), "update"], cwd=path, check=True, capture_output=True)
+
+        def compile(root, modules, roots, *, no_build=False):
+            if no_build:
+                return compile_roots(root, modules, roots, no_build=True)
+            name, = roots
+            if name == names[3]:
+                raise InterruptedError("fixture stopped after the preceding durable batch")
+            if name in names[1:3]:
+                start.wait(timeout=45)
+            began = time.monotonic()
+            compile_roots(root, modules, roots)
+            if name in windows:
+                raise AssertionError("duplicate compilation of " + name)
+            windows[name] = (began, time.monotonic())
+
+        def record(remote, domain, receipt, path):
+            from lean_cache_generation import stage_indexes
+            stage_indexes(remote, receipt, path)
+            saved.append(deepcopy(receipt))
+
+        def worker(stage, seed):
+            root = directory / stage
+            checkout(root)
+            output = root / "result.json"
+            planner.work_batches(root, modules, remote, plan, deepcopy(seed), plan["stages"][stage], output,
+                                 batch_size=1)
+            return read(output)
+
+        with patch.object(planner.compiler, "compile_roots", side_effect=compile), \
+                patch.object(planner.checkpoints, "save", side_effect=record):
+            common = worker("common", hits)
+            with ThreadPoolExecutor(2) as pool:
+                jobs = [pool.submit(worker, s, common) for s in plan["stages"] if s != "common"]
+                outcomes = []
+                for job in jobs:
+                    try:
+                        job.result()
+                        outcomes.append("built")
+                    except InterruptedError:
+                        outcomes.append("interrupted")
+        self.assertCountEqual(outcomes, ["built", "interrupted"])
+        lo = max(windows[n][0] for n in names[1:3])
+        hi = min(windows[n][1] for n in names[1:3])
+        self.assertGreater(hi - lo, 0)
+        self.assertEqual(set(windows), set(names[:3]))
+        self.assertEqual(remote.indexes["ci"], remote.indexes["release"])
+        next_plan, recovered = planner.plan_layers("b" * 40, targets, saved)
+        self.assertEqual(set(recovered["targets"]), set(names[:3]))
+        self.assertEqual({tuple(layer["owned"]) for layer in next_plan["stages"].values()}, {(names[3],)})
+        print(f"LEAN_GENERATION_FIXTURE exclusive_compile_overlap_seconds={hi-lo:.3f} "
+              f"shared_compiles=1 recovered_after_interruption={len(recovered['targets'])}")
+
+
+if __name__ == "__main__":
+    unittest.main()
