@@ -133,7 +133,8 @@ class GenerationPlanner(unittest.TestCase):
                                  batch_size=1)
             return read(output)
 
-        with patch.object(planner.compiler, "compile_roots", side_effect=compile), \
+        with patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "1"}), \
+                patch.object(planner.compiler, "compile_roots", side_effect=compile), \
                 patch.object(planner.checkpoints, "save", side_effect=record):
             common = worker("common", hits)
             with ThreadPoolExecutor(2) as pool:
