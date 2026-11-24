@@ -12,7 +12,7 @@ import tempfile
 import lean_cache_release as host
 import lean_release_index as frames
 from lean_generation_index import MAX_VOLUME, SCHEMA, assemble, encode, matches, read, sha, validate
-from lean_generation_remote import GitHub
+from lean_generation_remote import GitHub, INDEX_PREFIX
 
 
 def latest(remote, transport, output, marker_output=None):
@@ -34,8 +34,9 @@ def stage_indexes(remote, record, directory):
     digest = sha(encoded)
     index_path = Path(directory) / "index"
     index_path.write_bytes(encoded)
-    remote.stage_indexes(digest, index_path)
-    for transport in ("ci", "release"):
+    partial = "producer" in record
+    remote.stage_indexes(digest, index_path, checkpoint=partial)
+    for transport in ("ci", "checkpoint" if partial else "release"):
         if remote.get_index(digest, Path(directory) / transport, transport) != record:
             raise ValueError(f"{transport} readback differs from staged index")
     return digest
@@ -48,8 +49,8 @@ def publish(remote, plan, base, receipts, expected):
     if marker and (base is None or sha(encode(base)) != marker["index"]):
         raise ValueError("publisher base differs from its pinned generation")
     result = assemble(plan, base, receipts)
-    for volume, size in result["volumes"].items():
-        remote.volume(volume, size)
+    if remote.confirmed_volumes(result["volumes"]) != result["volumes"]:
+        raise ValueError("published generation references unavailable volumes")
     with tempfile.TemporaryDirectory() as directory:
         digest = stage_indexes(remote, result, Path(directory))
     new = {"schema": SCHEMA, "source": plan["source"], "index": digest}
@@ -206,14 +207,21 @@ def checkout_plan(root):
     return {"targets": all_targets(root)}
 
 
-def fetch_published(root, targets, deadline, *, refresh_stale):
+def fetch_published(root, targets, deadline, *, refresh_stale, tag=None):
     """Return None before the first cutover so ordinary fetch can use its legacy seed."""
     remote = GitHub(root, deadline)
     with tempfile.TemporaryDirectory() as metadata:
         path = Path(metadata) / "index"
-        if not latest(remote, "release", path):
-            return None
-        index = read(path)
+        if tag is None:
+            if not latest(remote, "release", path):
+                return None
+            index = read(path)
+        else:
+            digest = tag.removeprefix(INDEX_PREFIX)
+            if tag == digest or not frames.valid_digest(digest):
+                raise ValueError("invalid pinned generation tag")
+            index = remote.get_index(digest, path, "release")
+            validate(index, complete=True)
     destination = root / ".lake/build"
     if destination.parent.is_symlink() or destination.is_symlink():
         raise ValueError("generation reader requires a private build directory")
@@ -307,7 +315,7 @@ def main():
     else:
         index = read(args.index)
         validate(index, complete=False)
-        confirmed = {v: n for v, n in index["volumes"].items() if remote.has_volume(v, n)}
+        confirmed = remote.confirmed_volumes(index["volumes"])
         rows = {n: r for n, r in index["targets"].items() if r["volume"] in confirmed}
         args.output.write_bytes(encode({**index, "targets": rows, "volumes": confirmed}))
         result = dict(confirmed_targets=len(rows))

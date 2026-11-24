@@ -47,7 +47,9 @@ exit "${FAKE_BUILD_EXIT:-0}"
         # Exercise the production shell entry point with its declared transport
         # dependencies in the fixture repository.
         for name in ("lean-cache-publish.sh", "cache_material.py", "lean_cache.py", "lean_cache_release.py", "lean_cache_release_io.py", "lean_cache_topology.py", "lean_actions.py",
-                     "lean_artifact_inventory.py", "lean_release_index.py"):
+                     "lean_artifact_inventory.py", "lean_release_index.py", "lean_cache_generation.py",
+                     "lean_generation_index.py", "lean_generation_remote.py", "lean_generation_objects.py",
+                     "lean_release_volume_remote.py", "lean_release_volumes.py", "lean_compile_layers.py"):
             shutil.copy2(PUBLISH.with_name(name), helper_dir / name)
         prepare_release_report(self.root)
         shutil.copy2(ROOT / "Makefile", self.root / "Makefile")
@@ -82,7 +84,7 @@ exit "${FAKE_BUILD_EXIT:-0}"
                     ["git", "-C", str(self.root), "status", "--porcelain"], text=True),
                 FAKE_NATIVE_TRACKED_STATUS=subprocess.check_output(
                     ["git", "-C", str(self.root), "status", "--porcelain", "--untracked-files=no"], text=True))
-        return {**os.environ, "FULL_BUILD": "1", "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
+        return {**os.environ, "FULL_BUILD": "1", "STRATALINT_CACHE_REPO": "fixture/cache", "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
             "HOME": str(self.root), "FAKE_BUILD_LOG": str(self.root / "build-runs"),
             "FAKE_REMOTE": str(self.remote), "GITHUB_SHA": head, "GITHUB_RUN_ID": run,
             "GITHUB_ACTIONS": "true", "FAKE_DEV_BRANCH": json.dumps(dev),

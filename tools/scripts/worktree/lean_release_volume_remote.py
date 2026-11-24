@@ -53,7 +53,7 @@ def asset_for(host, tag, digest, size, deadline):
     return checked_asset(metadata, tag, digest, size)
 
 
-def ensure_asset(host, tag, digest, size, source, deadline, *, serialized=False):
+def ensure_asset(host, tag, digest, size, source, deadline, *, serialized=False, target=None):
     metadata = host.existing_release(tag, deadline)
     if metadata is not None and not metadata["draft"]:
         checked_asset(metadata, tag, digest, size)
@@ -62,7 +62,8 @@ def ensure_asset(host, tag, digest, size, source, deadline, *, serialized=False)
         if source is None:
             raise ValueError("prior physical volume is unavailable: " + digest)
         host.gh(deadline, "release", "create", tag, "--repo", host.REPO, "--draft",
-                "--title", tag, "--notes", "Immutable Lean cache volume.")
+                "--title", tag, "--notes", "Immutable Lean cache object.",
+                *(("--target", target) if target is not None else ()))
     uploaded = False
     assets = metadata.get("assets", []) if metadata is not None else []
     if serialized and len(assets) == 1 and assets[0].get("state") == "starter":

@@ -29,7 +29,7 @@ class ReleaseVerificationCases:
             subprocess.run(["git", *args], check=True, capture_output=True)
         commit = subprocess.run(["git", "-C", str(self.root), "rev-parse", "HEAD"],
                                 check=True, capture_output=True, text=True).stdout.strip()
-        repo = "the-omega-institute/trureturing"
+        repo = "fixture/cache"
         self.verification_commit = commit
         self.verification_ref = "refs/heads/" + branch
         self.verification_api = {
@@ -57,7 +57,7 @@ class ReleaseVerificationCases:
 
     def test_rolling_base_reuses_previous_published_verification_at_next_commit(self):
         self.verification_fixture(branch="integration-ci-rolling-tests")
-        repo = "the-omega-institute/trureturing"
+        repo = "fixture/cache"
         workflow = ".github/workflows/ci-publication-verify.yml"
         old = self.verification_commit
         old_run = self.verification_api[f"repos/{repo}/actions/runs/123/attempts/1"]
@@ -132,7 +132,7 @@ class ReleaseVerificationCases:
         self.assertEqual(0, published.returncode, published.stdout + published.stderr)
         tag = next(self.remote.iterdir()).name
         producer = self.verification_commit
-        repo = "the-omega-institute/trureturing"
+        repo = "fixture/cache"
         prefix = f"repos/{repo}"
         workflow = ".github/workflows/lean-cache-publish.yml"
         branch = "integration-ci-rolling-tests"
@@ -242,7 +242,7 @@ os.execv({real_git}, [{real_git}, *sys.argv[1:]])
                 ("branches/integration-cache-fixture", "protected", False),
                 (f"compare/{self.verification_commit}...{self.verification_commit}", "status", "diverged")]:
             with self.subTest(endpoint=endpoint, field=field):
-                row = self.verification_api["repos/the-omega-institute/trureturing/" + endpoint]
+                row = self.verification_api["repos/fixture/cache/" + endpoint]
                 before = row[field]
                 row[field] = value
                 self.save_verification_api()
@@ -727,7 +727,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertIn("digest mismatch", result.stdout)
         self.assertFalse((self.root / ".lake/build").exists())
         write(manifest, original)
-        run_api = "repos/the-omega-institute/trureturing/actions/runs/123/attempts/"
+        run_api = "repos/fixture/cache/actions/runs/123/attempts/"
         self.verification_api[run_api + "2"] = {**self.verification_api[run_api + "1"], "run_attempt": 2}
         self.save_verification_api()
         result = self.verification("fetch", GITHUB_RUN_ATTEMPT="2")
@@ -761,7 +761,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
 
     def candidate_fixture(self):
         self.verification_fixture()
-        self.verification_api["repos/the-omega-institute/trureturing/commits/" +
+        self.verification_api["repos/fixture/cache/commits/" +
                               self.verification_commit] = {"sha": self.verification_commit}
         self.save_verification_api()
 
@@ -788,7 +788,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertEqual(self.verification_commit, manifest["producer_commit_sha"])
         self.assertNotIn("workflow_run_id", manifest)
         calls = self.verification_calls()
-        self.assertTrue(any(call[:2] == ["api", "repos/the-omega-institute/trureturing/commits/" +
+        self.assertTrue(any(call[:2] == ["api", "repos/fixture/cache/commits/" +
                              self.verification_commit] for call in calls))
         self.assertFalse(any(call[:2] in (["api", "graphql"], ["release", "list"], ["release", "delete"]) or
                              (call[0] == "api" and "/branches/dev" in call[1]) for call in calls))
@@ -803,7 +803,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
 
     def test_candidate_publication_rejects_dirty_missing_source_and_ci_callers(self):
         self.candidate_fixture()
-        endpoint = "repos/the-omega-institute/trureturing/commits/" + self.verification_commit
+        endpoint = "repos/fixture/cache/commits/" + self.verification_commit
         for damage in ("dirty", "missing-source", "ci"):
             with self.subTest(damage=damage):
                 changes = {}

@@ -9,11 +9,11 @@ import tempfile
 
 import lean_cache_release as host
 import lean_release_volume_remote as remote
+from lean_generation_objects import Objects
 from lean_generation_index import MAX_INDEX, SCHEMA, encode, read, sha
 from lean_release_index import valid_digest
 
 MARKER = "heads/lean-cache-published"
-VOLUME_PREFIX = remote.volume_prefix(SCHEMA)
 INDEX_PREFIX = "lean-generation-v1-"
 
 
@@ -21,6 +21,7 @@ class GitHub:
     def __init__(self, root, deadline):
         self.root = root
         self.deadline = deadline
+        self.objects = Objects(deadline)
 
     def api(self, path, *args):
         return json.loads(host.gh(self.deadline, "api", "repos/" + host.REPO + "/" + path, *args))
@@ -43,15 +44,19 @@ class GitHub:
         return commit, marker
 
     def ensure_volume(self, digest, size, path):
-        return remote.ensure_asset(host, VOLUME_PREFIX + digest, digest, size, path, self.deadline,
-                                   serialized=True)
+        return self.objects.ensure(digest, digest, size, path)
 
     def has_volume(self, digest, size):
-        return remote.asset_for(host, VOLUME_PREFIX + digest, digest, size, self.deadline) is not None
+        _, asset = self.objects.locate(digest, digest)
+        return self.objects.checked(asset, digest, size) is not None
+
+    def confirmed_volumes(self, sizes):
+        # Cache one paginated metadata inventory per physical bucket.
+        return {digest: size for digest, size in sizes.items() if self.has_volume(digest, size)}
 
     def volume(self, digest, size):
-        asset = remote.asset_for(host, VOLUME_PREFIX + digest, digest, size, self.deadline)
-        if asset is None:
+        _, asset = self.objects.locate(digest, digest)
+        if not self.objects.checked(asset, digest, size):
             raise ValueError("missing immutable generation volume: " + digest)
         return asset
 
@@ -63,14 +68,29 @@ class GitHub:
         subprocess.run(["node", adapter, "generation-" + operation, digest, path.resolve()],
                        cwd=self.root, check=True)
 
-    def stage_indexes(self, digest, path):
-        remote.ensure_asset(host, INDEX_PREFIX + digest, digest, path.stat().st_size, path,
-                            self.deadline)
+    def stage_indexes(self, digest, path, *, checkpoint=False):
+        from lean_generation_checkpoints import publisher
+        publisher()
+        if checkpoint:
+            self.objects.ensure(digest, "checkpoint-" + digest, path.stat().st_size, path)
+        else:
+            remote.ensure_asset(host, INDEX_PREFIX + digest, digest, path.stat().st_size, path, self.deadline,
+                                target=read(path)["source"])
         self.ci("put", digest, path)
 
     def get_index(self, digest, path, transport):
         if transport == "ci":
             self.ci("get", digest, path)
+        elif transport == "checkpoint":
+            name = "checkpoint-" + digest
+            tag, asset = self.objects.locate(digest, name)
+            if (not asset or not 0 < asset["size"] <= MAX_INDEX
+                    or not self.objects.checked(asset, digest, asset["size"])):
+                raise ValueError("checkpoint index is unavailable or invalid")
+            with tempfile.TemporaryDirectory(dir=path.parent) as temp:
+                host.gh(self.deadline, "release", "download", tag, "--repo", host.REPO, "--dir", temp,
+                        "--pattern", name)
+                os.replace(Path(temp) / name, path)
         else:
             tag = INDEX_PREFIX + digest
             metadata = host.existing_release(tag, self.deadline)
@@ -92,6 +112,8 @@ class GitHub:
         return index
 
     def advance(self, expected, marker):
+        from lean_generation_checkpoints import publisher
+        publisher()
         current, old = self.current()
         if current != expected:
             raise ValueError("stale generation publisher")

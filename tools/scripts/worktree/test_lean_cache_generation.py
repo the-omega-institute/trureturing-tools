@@ -1,5 +1,4 @@
 import copy
-import hashlib
 import io
 from pathlib import Path
 import tarfile
@@ -8,6 +7,8 @@ import unittest
 from unittest.mock import patch
 
 import lean_cache_generation as generation
+from lean_generation_objects import BUCKET, CAPACITY, Objects
+from lean_generation_remote import INDEX_PREFIX
 from lean_generation_index import encode, read, sha, validate
 
 
@@ -32,6 +33,9 @@ class Store:
         self.volumes[digest] = data
         return True
 
+    def confirmed_volumes(self, sizes):
+        return {v: n for v, n in sizes.items() if len(self.volumes[v]) == n}
+
     def volume(self, digest, size):
         assert len(self.volumes[digest]) == size
         return digest
@@ -44,7 +48,7 @@ class Store:
     def current(self):
         return self.revision, self.marker
 
-    def stage_indexes(self, digest, path):
+    def stage_indexes(self, digest, path, *, checkpoint=False):
         for transport in self.indexes:
             if self.fail == transport:
                 raise ConnectionError(transport)
@@ -129,6 +133,33 @@ class Generations(unittest.TestCase):
         bad, _ = self.frames(new_plan, {"A": b"different"})
         with self.assertRaisesRegex(ValueError, "conflicting"):
             generation.assemble(new_plan, first, [bad])
+
+    def test_explicit_release_pin_restores_old_version(self):
+        first = self.commit(self.plan, None, [self.receipt])
+        plan = copy.deepcopy(self.plan)
+        plan["source"] = "b"*40
+        plan["targets"]["B"]["key"] = sha(b"changed key")
+        receipt, _ = self.frames(plan, {"B": b"new payload"})
+        self.commit(plan, first, [receipt])
+        with patch.object(generation, "GitHub", return_value=self.remote), \
+                patch.object(generation, "checkout_plan", return_value=self.plan):
+            tag = INDEX_PREFIX + sha(encode(first))
+            self.assertEqual(generation.fetch_published(self.directory, ["B"], None, refresh_stale=False, tag=tag), 0)
+        self.assertEqual((self.directory / ".lake/build/lib/lean/B.olean").read_bytes(), b"consumer")
+
+    def test_shared_asset_bucket_overflow_and_interrupted_upload(self):
+        objects = Objects(None)
+        digest = sha(b"one volume")
+        valid = {"id": 5, "name": digest, "size": 4, "digest": "sha256:" + digest, "state": "uploaded"}
+        child = BUCKET + "-" + digest[0]
+        objects.buckets[BUCKET] = {str(i): {} for i in range(CAPACITY)}
+        objects.buckets[child] = {digest: valid}
+        self.assertEqual(objects.locate(digest, digest), (child, valid))
+        self.assertEqual(objects.checked(valid, digest, 4)["id"], 5)
+        with self.assertRaisesRegex(ValueError, "digest or length"):
+            objects.checked(valid, digest, 3)
+        objects.buckets[BUCKET] = {digest: {"state": "starter", "size": 0}}
+        self.assertEqual(objects.locate(digest, digest), (child, valid))
 
     def test_digest_failure_and_changed_keys(self):
         first = self.commit(self.plan, None, [self.receipt])
