@@ -139,6 +139,15 @@ internal static partial class RepositoryPathPolicy
             && entry.Pattern != value)
             return Sl000(value, "root files and agent charters require an exact FILEMAP entry");
 
+        if (value.StartsWith("strict/", StringComparison.Ordinal))
+        {
+            return value.EndsWith(".lean", StringComparison.Ordinal)
+                && entry.Kind == FileMapKind.Truth && entry.AdmissionPlane == FileMapAdmissionPlane.Content
+                && entry.ConsumedBy.Contains("Lean") && entry.VerifiedBy.Contains("lean-build")
+                && entry.RuntimeDisposition == "committed-source"
+                ? null : Sl000(value, "strict sources must be Lean-verified mathematical source files");
+        }
+
         // Non-coordinate files derive membership solely from FILEMAP. Coordinate
         // planes still pass their canonical path, GID and domain checks below.
         if (entry.Pattern == value
