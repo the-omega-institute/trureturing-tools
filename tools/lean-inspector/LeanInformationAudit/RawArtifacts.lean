@@ -36,8 +36,8 @@ def Store.selectedOwner? (store : Store) (name : Name) : Option Name :=
 
 -- Shared batch inputs may be loaded in a different order to a target's imports.
 -- Resolve only duplicated names in the target's dependency-first import order.
-def Store.reportConstants (store : Store) (targets : Array Name) : Name → Option ConstantInfo := Id.run do
-  if store.duplicateDefinitions.isEmpty then return store.constants.find?
+def Store.reportOverrides (store : Store) (targets : Array Name) : NameMap ConstantInfo := Id.run do
+  if store.duplicateDefinitions.isEmpty then return {}
   let mut seen : NameSet := {}
   let mut first : NameMap ConstantInfo := {}
   let mut todo := targets.reverse.map (fun name => (name, false))
@@ -53,7 +53,7 @@ def Store.reportConstants (store : Store) (targets : Array Name) : Name → Opti
       todo := todo.push (name, true)
       if let some data := store.modules.find? name then
         for item in data.imports.reverse do todo := todo.push (item.module, false)
-  return fun name => (first.find? name).orElse fun _ => store.constants.find? name
+  return first
 
 /-- Assessment can replace compiled entries with generated report declarations. -/
 def Store.insertGenerated (store : Store) (owner : Name) (info : ConstantInfo) : Store :=

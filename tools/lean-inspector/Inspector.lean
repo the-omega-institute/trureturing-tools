@@ -494,10 +494,12 @@ private def withReportWriter (reportOutput materialSpool : System.FilePath)
       pure (assessment.store, assessment.generated.filter (·.2 == target) |>.map Prod.fst,
         ← ArtifactRegistration.targetJson target assessment, assessment.enrollmentErrors)
     else pure (store, #[], empty, #[])
+  let overrides := current.reportOverrides #[target]
   let row ← inspectData data (current.constants.find?)
     (closedNegation (fun name => current.modules.find? name.toName)
       (current.constants.find?) input)
-    (current.reportConstants #[target]) writer counter utilities generatedNames binding input
+    (fun name => (overrides.find? name).orElse fun _ => current.constants.find? name)
+    writer counter utilities generatedNames binding input
   let row := { row with
     informationRegistrationErrors := sortedUnique (row.informationRegistrationErrors ++ enrollmentErrors) }
   out.putStr (renderModule row)
