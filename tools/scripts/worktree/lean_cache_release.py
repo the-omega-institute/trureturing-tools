@@ -1381,9 +1381,14 @@ def fetch(root, partition, writer_owned=False, refresh_stale=False, approved_tag
     try:
         deadline = operation_deadline()
         with contextlib.nullcontext() if writer_owned else cache_guard(root):
+            if approved_tag is None and local_assets is None:
+                from lean_cache_generation import fetch_published
+                result = fetch_published(root, targets, deadline, refresh_stale=refresh_stale)
+                if result is not None:
+                    return result
             return fetch_locked(root, partition, deadline, refresh_stale, approved_tag, approved_producer,
                                 local_assets, indexed=indexed, targets=targets)
-    except (OSError, ImportError, ValueError) as error:
+    except (OSError, ImportError, ValueError, KeyError, tarfile.TarError, subprocess.SubprocessError) as error:
         receipt("fetch", "miss", _error=error, reason=str(error), partition=partition)
         return 1
 
