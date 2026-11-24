@@ -55,8 +55,8 @@ class ReleaseVerificationCases:
             **{**self.verification_environment, **environment})
 
     def test_rolling_base_reuses_previous_published_verification_at_next_commit(self):
-        self.verification_fixture(branch="integration-ci-rolling-tests")
-        repo = "fixture/cache"
+        self.verification_fixture(branch="integration-ci-rolling-tests", repo="the-omega-institute/trureturing")
+        repo = self.verification_environment["GITHUB_REPOSITORY"]
         workflow = ".github/workflows/ci-publication-verify.yml"
         old = self.verification_commit
         old_run = self.verification_api[f"repos/{repo}/actions/runs/123/attempts/1"]
@@ -126,12 +126,12 @@ class ReleaseVerificationCases:
         self.assertEqual("false", receipt(call("select-base", "--previous-commit-only"))["found"])
 
     def test_rolling_base_manual_dev_publication_from_protected_integration(self):
-        self.prepare_indexed_candidate()
+        self.prepare_indexed_candidate(repo="the-omega-institute/trureturing")
         published = self.transport("publish", arguments=("--indexed",))
         self.assertEqual(0, published.returncode, published.stdout + published.stderr)
         tag = next(self.remote.iterdir()).name
         producer = self.verification_commit
-        repo = "fixture/cache"
+        repo = self.verification_environment["GITHUB_REPOSITORY"]
         prefix = f"repos/{repo}"
         workflow = ".github/workflows/lean-cache-publish.yml"
         branch = "integration-ci-rolling-tests"
@@ -758,9 +758,9 @@ if sys.argv[0].endswith("lean_cache_release.py"):
             self.verification_commit, "--tag", tag, *(("--no-build",) if verb == "publish" else ())),
             **{**self.verification_environment, "GITHUB_ACTIONS": "false", **changes})
 
-    def candidate_fixture(self):
-        self.verification_fixture()
-        self.verification_api["repos/fixture/cache/commits/" +
+    def candidate_fixture(self, repo="fixture/cache"):
+        self.verification_fixture(repo=repo)
+        self.verification_api[f"repos/{repo}/commits/" +
                               self.verification_commit] = {"sha": self.verification_commit}
         self.save_verification_api()
 
@@ -850,7 +850,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertIn("snapshot does not match this exact publication", result.stdout)
         self.assertEqual("keep current material", (self.root / ".lake/build/keep.txt").read_text())
 
-    def prepare_indexed_candidate(self):
+    def prepare_indexed_candidate(self, repo="fixture/cache"):
         for directory in ("Reg", "tools/lean-inspector-reg", "tools/lean-inspector-interface"):
             name = pathlib.Path(directory).name
             build = pathlib.Path(*([".."] * len(pathlib.Path(directory).parts)), ".lake/build", name)
@@ -859,7 +859,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         write(lean, '#!/usr/bin/env python3\nimport json,sys\n'
                     'print(json.dumps({"imports":[{"errors":[],"result":{"imports":[]}} for _ in sys.stdin]}))\n')
         lean.chmod(0o755)
-        self.candidate_fixture()
+        self.candidate_fixture(repo=repo)
 
     def test_protected_producer_restores_exact_production_release_without_an_actions_seed(self):
         self.prepare_indexed_candidate()

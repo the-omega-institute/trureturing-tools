@@ -885,7 +885,8 @@ ctypes.CDLL = cdll
         log = self.root / "key-gh-calls"
         missed = self.transport("fetch", FAKE_LIST_JSON=json.dumps(releases), FAKE_GH_LOG=str(log))
         self.assertEqual(1, missed.returncode, missed.stdout + missed.stderr)
-        self.assertEqual([["api", "graphql"]], [json.loads(line)[:2] for line in log.read_text().splitlines()])
+        self.assertEqual([["api", "repos/fixture/cache/git/ref/heads/lean-cache-published"], ["api", "graphql"]],
+                         [json.loads(line)[:2] for line in log.read_text().splitlines()])
         releases.extend(dict(tagName=f"unrelated-{i}", createdAt="2", isDraft=False) for i in range(100))
         releases.append(dict(tagName=original, createdAt="1", isDraft=False))
         log.unlink()
