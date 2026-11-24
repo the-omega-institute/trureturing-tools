@@ -243,9 +243,11 @@ def restore(remote, index, plan, names, destination):
             "deferred": conflicts, "transferred_bytes": transferred}
 
 
-def checkout_plan(root):
-    from lean_generation_facets import all_targets
-    return {"targets": all_targets(root)}
+def checkout_plan(root, index):
+    from lean_generation_facets import all_targets, use_known_projections
+    targets = all_targets(root)
+    use_known_projections(targets, [index])
+    return {"targets": targets}
 
 
 def fetch_published(root, targets, deadline, *, refresh_stale, tag=None):
@@ -278,7 +280,7 @@ def fetch_published(root, targets, deadline, *, refresh_stale, tag=None):
     with tempfile.TemporaryDirectory(dir=destination.parent) as directory:
         stage = Path(directory)
         output = destination if targets else stage / "build"
-        result = restore(remote, index, checkout_plan(root), targets or None, output)
+        result = restore(remote, index, checkout_plan(root, index), targets or None, output)
         if not result["restored"]:
             host.receipt("fetch", "miss", reason="no matching published generation targets", **result)
             return 1
@@ -335,7 +337,8 @@ def main():
         return 0 if latest(remote, args.transport, args.output, args.marker_output) else 3
     if args.command == "restore":
         names = args.targets_file.read_text().split() if args.targets_file else None
-        result = restore(remote, read(args.index), read(args.plan) if args.plan else checkout_plan(root),
+        index = read(args.index)
+        result = restore(remote, index, read(args.plan) if args.plan else checkout_plan(root, index),
                          names, args.destination or root / ".lake/build")
     elif args.command == "commit":
         result = publish(remote, read(args.plan), read(args.base) if args.base else None,

@@ -154,3 +154,61 @@ class WarmGeneration(unittest.TestCase):
             current = facets.all_targets(Path('.'), modules)
         self.assertEqual(previous['report/A'], current['report/A'])
         self.assertNotEqual(previous['native/reportInspector'], current['native/reportInspector'])
+
+    def test_compiled_empty_judge_projection_reuses_report_across_registry_change(self):
+        from contextlib import ExitStack
+        import tempfile
+        import zipfile
+        import lean_cache_generation as generation
+        import lean_generation_facets as facets
+        from test_lean_cache_generation import Store
+
+        contract = 'LeanInformationAuditInterface.Contract.Catalog'
+        enrollment = 'LeanInformationAudit.TemplateEnrollment'
+        modules = {n: {'key': sha(n.encode()), 'deps': []} for n in
+                   [contract, enrollment, 'A', 'B', *[main for _, main, _ in facets.PROGRAMS.values()]]}
+        modules['A']['deps'] = modules['B']['deps'] = [contract]
+        remote = Store()
+        public = facets.report_publication
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as mocks:
+            root = Path(directory)
+            mocks.enter_context(patch.object(facets.report_selection, 'Selection')).return_value.modules.return_value = {
+                'A': 'A.lean', 'B': 'B.lean'}
+            mocks.enter_context(patch.object(facets, 'utility_inputs', return_value={}))
+            mocks.enter_context(patch.object(facets, 'module_targets', return_value=modules))
+            mocks.enter_context(patch.object(facets, 'save'))
+            plan = {'source': 'a' * 40, 'domain': 'b' * 64, 'targets': facets.all_targets(root, modules)}
+            for module in ['A', 'B']:
+                label = 'report/' + module
+                self.assertIn(enrollment, plan['targets'][label]['deps'])
+                output = root / facets.PROJECT_BUILD / facets.facet_paths(label)[0]
+                output.parent.mkdir(parents=True, exist_ok=True)
+                row = {'module': module}
+                report = root / public.RAW
+                report.write_bytes(public.materials.canonical_json({'schema': public.materials.REPORT_SCHEMA,
+                                                                     'modules': [row]}))
+                inputs = [] if module == 'A' else [{'type': 'LeanInformationAudit.Contract.Registration',
+                                                    'owner': module, 'name': 'B.registration'}]
+                public.write_origin(report, module, {'producer_sources_sha256': 'a'*64,
+                                    'inspector_executable_sha256': 'b'*64},
+                                    {'schema': 'stratalint-judge-input-projection-v1', 'module': module, 'inputs': inputs})
+                with zipfile.ZipFile(output, 'w') as bundle:
+                    bundle.write(report, public.RAW)
+                    bundle.write(public.member(report, '.provenance.json'), public.RAW + '.provenance.json')
+                    bundle.writestr(public.RAW + '.materials.zip', b'')
+                for sidecar in facets.facet_paths(label)[1:]:
+                    (root / facets.PROJECT_BUILD / sidecar).write_bytes(b'trace')
+            # Production establishes the dependency from the authenticated bundle.
+            receipt = facets.stage(root, remote, plan, ['report/A', 'report/B'], root)
+            self.assertNotIn(enrollment, receipt['targets']['report/A']['deps'])
+            self.assertIn(enrollment, receipt['targets']['report/B']['deps'])
+            modules[enrollment] = {'key': 'e' * 64, 'deps': []}
+            candidate = generation.checkout_plan(root, receipt)['targets']
+            self.assertEqual(candidate['report/A']['key'], receipt['targets']['report/A']['key'])
+            self.assertNotEqual(candidate['report/B']['key'], receipt['targets']['report/B']['key'])
+            self.assertEqual(remote.block_bytes, 0)
+            # A changed module cannot inherit the original projection.
+            modules['A'] = {'key': 'd' * 64, 'deps': [contract]}
+            candidate = generation.checkout_plan(root, receipt)['targets']
+            self.assertIn(enrollment, candidate['report/A']['deps'])
+            self.assertNotEqual(candidate['report/A']['key'], receipt['targets']['report/A']['key'])

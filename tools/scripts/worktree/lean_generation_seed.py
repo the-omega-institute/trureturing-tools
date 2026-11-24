@@ -18,7 +18,7 @@ import lean_compile_layers as compiler
 import lean_generation_checkpoints as checkpoints
 from lean_cache_generation import stage_frames
 from lean_cache_release_io import archive_sha
-from lean_generation_facets import all_targets, facet_paths
+from lean_generation_facets import all_targets, facet_paths, report_has_inputs, use_known_projections
 from lean_generation_index import matches, read
 from lean_generation_plan import module_targets, package_inputs, write
 from lean_release_index import safe_path, write_frame
@@ -54,7 +54,9 @@ def shareable(seed, root, record):
     after = all_targets(root)
     groups = defaultdict(dict)
     for name in before.keys() & after.keys():
-        if not matches(before[name], after[name]):
+        original, target = before[name], after[name]
+        if (not matches(original, target)
+                and not matches(original.get("empty_projection", original), target.get("empty_projection", target))):
             continue
         if name.startswith("native/"):
             group = legacy.EXTRAS
@@ -69,7 +71,7 @@ def shareable(seed, root, record):
                      inventory.lean_artifact_paths(module, modules[module]))
         if group in record["entries"]:
             groups[group][name] = set(map(str, paths))
-    return after, modules, groups
+    return before, after, modules, groups
 
 
 def extract_shard(archive_path, digest, fingerprint, expected, selected, output):
@@ -137,7 +139,9 @@ def pack_target(scratch, name, paths, available, modules, directory):
 def checkpoint_rows(remote, domain, targets):
     rows, volumes = {}, {}
     present = {}
-    for snapshot in checkpoints.discover(remote, domain):
+    snapshots = list(checkpoints.discover(remote, domain))
+    use_known_projections(targets, snapshots)
+    for snapshot in snapshots:
         for name, row in snapshot["targets"].items():
             if name not in targets or not matches(row, targets[name]):
                 continue
@@ -164,7 +168,7 @@ def request_payloads(digests, protocol):
 
 def migrate(root, seed, directory, request):
     descriptor, old = pinned_seed(seed, directory)
-    targets, modules, grouped = shareable(seed, root, old)
+    original, targets, modules, grouped = shareable(seed, root, old)
     source = compiler.checkout(root)
     plan = {"source": source, "targets": targets}
     domain, _ = package_inputs(root)
@@ -202,6 +206,17 @@ def migrate(root, seed, directory, request):
                         continue
                     for name, expected in candidates.items():
                         try:
+                            prior, current = original[name], targets[name]
+                            if "empty_projection" in prior or "empty_projection" in current:
+                                bundle = build / facet_paths(name)[0]
+                                if not bundle.exists():
+                                    continue
+                                if not report_has_inputs(bundle, name.removeprefix("report/")):
+                                    prior = prior.get("empty_projection", prior)
+                                    current = current.get("empty_projection", current)
+                                if not matches(prior, current):
+                                    continue
+                                targets[name] = current
                             prepared[name] = pack_target(scratch, name, expected, paths, modules, frames_dir)
                         except (ValueError, EOFError, zipfile.BadZipFile, KeyError) as error:
                             print(f"seed target {name} rejected: {error}", file=sys.stderr)
