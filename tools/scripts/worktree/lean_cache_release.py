@@ -1797,7 +1797,8 @@ def _main():
             return fetch(args.repository, partition, args.writer_owned, args.refresh_stale,
                          args.approved_tag, args.approved_producer, args.local_assets,
                          indexed=args.indexed, targets=args.target, generation_tag=generation_tag)
-        if not args.prepare_only and REPO.lower() == "the-omega-institute/trureturing":
+        if (not args.prepare_only and args.mode != "verification"
+                and REPO.lower() == "the-omega-institute/trureturing"):
             raise ValueError("shared Lean cache publication requires Cache Release Publish")
         return publish(args.repository, partition, verification, build_cache=not args.no_build, indexed=args.indexed,
                        prepare_only=args.prepare_only)

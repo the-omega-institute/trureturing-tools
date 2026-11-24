@@ -17,6 +17,14 @@ MARKER = "heads/lean-cache-published"
 INDEX_PREFIX = "lean-generation-v1-"
 
 
+def decode_marker(commit):
+    marker = json.loads(commit["message"])
+    if (marker["schema"] != SCHEMA or not valid_digest(marker["index"])
+            or not re.fullmatch("[0-9a-f]{40}", marker["source"])):
+        raise ValueError("invalid published generation marker")
+    return marker
+
+
 class GitHub:
     def __init__(self, root, deadline):
         self.root = root
@@ -37,11 +45,20 @@ class GitHub:
         commit = ref["object"]["sha"]
         if ref["ref"] != "refs/" + MARKER or not re.fullmatch("[0-9a-f]{40}", commit):
             raise ValueError("invalid published generation ref")
-        marker = json.loads(self.api("git/commits/" + commit)["message"])
-        if (marker["schema"] != SCHEMA or not valid_digest(marker["index"])
-                or not re.fullmatch("[0-9a-f]{40}", marker["source"])):
-            raise ValueError("invalid published generation marker")
-        return commit, marker
+        return commit, decode_marker(self.api("git/commits/" + commit))
+
+    def published(self, digest):
+        revision, marker = self.current()
+        while marker:
+            if marker["index"] == digest:
+                return marker
+            row = self.api("git/commits/" + revision)
+            parent, = row["parents"]
+            revision = parent["sha"]
+            if revision == marker["source"]:
+                break  # The first marker's parent is its protected dev source.
+            marker = decode_marker(self.api("git/commits/" + revision))
+        raise ValueError("version is outside published generation history")
 
     def ensure_volume(self, digest, size, path):
         return self.objects.ensure(digest, digest, size, path)
@@ -76,7 +93,7 @@ class GitHub:
         else:
             remote.ensure_asset(host, INDEX_PREFIX + digest, digest, path.stat().st_size, path, self.deadline,
                                 target=read(path)["source"])
-        self.ci("put", digest, path)
+            self.ci("put", digest, path)
 
     def get_index(self, digest, path, transport):
         if transport == "ci":
@@ -84,7 +101,9 @@ class GitHub:
         elif transport == "checkpoint":
             name = "checkpoint-" + digest
             tag, asset = self.objects.locate(digest, name)
-            if (not asset or not 0 < asset["size"] <= MAX_INDEX
+            if asset is None:
+                raise FileNotFoundError("missing durable checkpoint index: " + digest)
+            if (not 0 < asset["size"] <= MAX_INDEX
                     or not self.objects.checked(asset, digest, asset["size"])):
                 raise ValueError("checkpoint index is unavailable or invalid")
             with tempfile.TemporaryDirectory(dir=path.parent) as temp:
@@ -115,10 +134,10 @@ class GitHub:
         from lean_generation_checkpoints import publisher
         publisher()
         current, old = self.current()
-        if current != expected:
-            raise ValueError("stale generation publisher")
         if marker == old:
             return current
+        if current != expected:
+            raise ValueError("stale generation publisher")
         if old is not None and old["source"] != marker["source"]:
             comparison = self.api("compare/" + old["source"] + "..." + marker["source"])
             if comparison["status"] != "ahead":

@@ -2,11 +2,13 @@ import copy
 import io
 from pathlib import Path
 import tarfile
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import lean_cache_generation as generation
+import lean_generation_checkpoints as checkpoints
 from lean_generation_objects import BUCKET, CAPACITY, Objects
 from lean_generation_remote import INDEX_PREFIX
 from lean_generation_index import encode, read, sha, validate
@@ -18,6 +20,7 @@ class Store:
     def __init__(self):
         self.revision = ""
         self.marker = None
+        self.history = {}
         self.indexes = {"ci": {}, "release": {}}
         self.volumes = {}
         self.block_bytes = 0
@@ -49,7 +52,10 @@ class Store:
         return self.revision, self.marker
 
     def stage_indexes(self, digest, path, *, checkpoint=False):
-        for transport in self.indexes:
+        if checkpoint:
+            self.indexes.setdefault("checkpoint", {})[digest] = path.read_bytes()
+            return
+        for transport in ("ci", "release"):
             if self.fail == transport:
                 raise ConnectionError(transport)
             self.indexes[transport][digest] = path.read_bytes()
@@ -59,9 +65,15 @@ class Store:
         assert sha(path.read_bytes()) == digest
         return read(path)
 
+    def published(self, digest):
+        if digest not in self.history:
+            raise ValueError("version is outside published generation history")
+        return self.history[digest]
+
     def advance(self, expected, marker):
         assert self.revision == expected
         self.marker = marker
+        self.history[marker["index"]] = marker
         self.revision = sha(encode(marker))[:40]
         return self.revision
 
@@ -108,7 +120,7 @@ class Generations(unittest.TestCase):
             self.assertEqual(result["restored"], 2)
             self.assertEqual(current["targets"]["B"]["key"], self.plan["targets"]["B"]["key"])
             payload[transport] = sha((directory / "lib/lean/B.olean").read_bytes())
-        self.assertEqual(self.remote.range_requests, 2)
+        self.assertEqual(self.remote.range_requests, 4)
         self.assertEqual(payload, {"ci": sha(b"consumer"), "release": sha(b"consumer")})
         body_bytes = self.remote.block_bytes
         second_plan = {**self.plan, "source": "b"*40}
@@ -160,6 +172,64 @@ class Generations(unittest.TestCase):
             objects.checked(valid, digest, 3)
         objects.buckets[BUCKET] = {digest: {"state": "starter", "size": 0}}
         self.assertEqual(objects.locate(digest, digest), (child, valid))
+
+    def test_retry_lost_ack_and_read_only_eviction_fallback(self):
+        first = generation.publish(self.remote, self.plan, None, [self.receipt], "")
+        proof = first["first_restore"]
+        self.assertEqual(proof["ci_artifact_digest"], proof["release_artifact_digest"])
+        self.assertGreater(proof["release_bytes"], 0)
+        replay = generation.publish(self.remote, self.plan, None, [self.receipt], "")
+        self.assertEqual(first["marker"], replay["marker"])
+        self.assertEqual(self.remote.range_requests, 2)
+        actual = self.remote.get_index
+        def evicted(digest, path, transport):
+            if transport == "ci":
+                raise subprocess.CalledProcessError(4, "get")
+            return actual(digest, path, transport)
+        with patch.object(self.remote, "get_index", side_effect=evicted):
+            self.assertTrue(generation.latest(self.remote, "ci", self.directory / "resolved"))
+            next_plan = {**self.plan, "source": "c"*40}
+            with self.assertRaises(subprocess.CalledProcessError):
+                generation.publish(self.remote, next_plan, read(self.directory / "resolved"), [], first["marker"])
+        self.assertEqual(first["marker"], self.remote.revision)
+
+    def test_partial_checkpoint_discoverable_before_ci_quota_failure(self):
+        remote = self.remote
+        discovered = []
+        def api(endpoint, *args):
+            if endpoint == "git/tags":
+                return {"sha": "f"*40}
+            if endpoint == "git/refs":
+                digest = next(a.rsplit("-", 1)[1] for a in args if a.startswith("ref="))
+                advertised = [r["key"] for r in self.receipt["targets"].values()]
+                discovered.append((digest, self.receipt["source"], advertised))
+                return {"object": {"sha": "f"*40}}
+            self.assertEqual(endpoint, "actions/runs/123/attempts/1")
+            return {"repository": {"full_name": generation.host.REPO}, "head_branch": "dev",
+                    "head_sha": self.receipt["source"], "event": "schedule",
+                    "path": ".github/workflows/lean-cache-publish.yml"}
+        def deny(operation, digest, path):
+            self.assertEqual(operation, "put")
+            self.assertEqual(discovered[0][0], digest)
+            raise subprocess.CalledProcessError(1, "quota")
+        with patch.object(remote, "ci", create=True, side_effect=deny), \
+                patch.object(remote, "api", create=True, side_effect=api), \
+                patch.object(checkpoints, "publisher", return_value={"run": "123", "attempt": "1"}), \
+                patch.object(checkpoints, "descriptors", return_value=discovered):
+            checkpoints.save(remote, sha(b"domain"), self.receipt, self.directory)
+            recovered, = checkpoints.discover(remote, sha(b"domain"))
+        self.assertEqual(recovered["targets"], self.receipt["targets"])
+        self.assertFalse(remote.indexes["ci"])
+        self.assertFalse(remote.marker)
+
+    def test_staged_only_explicit_version_refused_before_artifacts(self):
+        index = generation.assemble(self.plan, None, [self.receipt])
+        digest = sha(encode(index))
+        self.remote.indexes["release"][digest] = encode(index)
+        with patch.object(generation, "GitHub", return_value=self.remote), self.assertRaisesRegex(
+                ValueError, "published generation history"):
+            generation.fetch_published(self.directory, ["B"], None, refresh_stale=False, tag=INDEX_PREFIX + digest)
+        self.assertEqual(self.remote.block_bytes, 0)
 
     def test_digest_failure_and_changed_keys(self):
         first = self.commit(self.plan, None, [self.receipt])

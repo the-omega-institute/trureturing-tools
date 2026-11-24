@@ -13,7 +13,7 @@ from lean_seed_support import COMPILER_BUILD, ROOT, digest, write
 
 
 class ReleaseVerificationCases:
-    def verification_fixture(self, chunk_bytes=None, *, branch="integration-cache-fixture"):
+    def verification_fixture(self, chunk_bytes=None, *, branch="integration-cache-fixture", repo="fixture/cache"):
         shutil.copy2(ROOT / "Makefile", self.root / "Makefile")
         helper = "tools/scripts/worktree/lean_cache_release.py"
         (self.root / helper).parent.mkdir(parents=True, exist_ok=True)
@@ -29,7 +29,6 @@ class ReleaseVerificationCases:
             subprocess.run(["git", *args], check=True, capture_output=True)
         commit = subprocess.run(["git", "-C", str(self.root), "rev-parse", "HEAD"],
                                 check=True, capture_output=True, text=True).stdout.strip()
-        repo = "fixture/cache"
         self.verification_commit = commit
         self.verification_ref = "refs/heads/" + branch
         self.verification_api = {
@@ -42,7 +41,7 @@ class ReleaseVerificationCases:
                 "status": "identical", "merge_base_commit": {"sha": commit}}}
         self.verification_environment = {
             "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push", "GITHUB_REF": self.verification_ref,
-            "GITHUB_SHA": commit, "GITHUB_REPOSITORY": repo,
+            "GITHUB_SHA": commit, "GITHUB_REPOSITORY": repo, "STRATALINT_CACHE_REPO": repo,
             "FAKE_VERIFICATION_API": str(self.root / "verification-api.json"),
             "FAKE_GH_LOG": str(self.root / "gh-calls")}
         self.save_verification_api()
@@ -257,7 +256,7 @@ os.execv({real_git}, [{real_git}, *sys.argv[1:]])
                     self.save_verification_api()
 
     def test_verification_roundtrip_uses_isolated_exact_tag_and_never_prunes(self):
-        self.verification_fixture()
+        self.verification_fixture(repo="the-omega-institute/trureturing")
         self.assertEqual(0, self.transport("publish", "999").returncode)
         published = self.verification("publish", **self.installation_probe())
         self.assertEqual(0, published.returncode, published.stdout + published.stderr)

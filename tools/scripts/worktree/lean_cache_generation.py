@@ -5,6 +5,7 @@ from contextlib import closing
 import datetime
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 import tarfile
 import tempfile
@@ -22,7 +23,13 @@ def latest(remote, transport, output, marker_output=None):
     if marker is None:
         output.unlink(missing_ok=True)
         return False
-    index = remote.get_index(marker["index"], output, transport)
+    try:
+        index = remote.get_index(marker["index"], output, transport)
+    except subprocess.CalledProcessError as error:
+        if transport != "ci" or error.returncode != 4:
+            raise
+        # The evictable CI index and durable Release share the exact address.
+        index = remote.get_index(marker["index"], output, "release")
     if index["source"] != marker["source"] or index.get("schema") != SCHEMA:
         raise ValueError("published marker and generation index disagree")
     validate(index, complete=True)
@@ -36,27 +43,58 @@ def stage_indexes(remote, record, directory):
     index_path.write_bytes(encoded)
     partial = "producer" in record
     remote.stage_indexes(digest, index_path, checkpoint=partial)
-    for transport in ("ci", "checkpoint" if partial else "release"):
+    for transport in (("checkpoint",) if partial else ("ci", "release")):
         if remote.get_index(digest, Path(directory) / transport, transport) != record:
             raise ValueError(f"{transport} readback differs from staged index")
     return digest
 
 
+def verify_first_restore(remote, result, stage):
+    roots = [(row["bytes"], name) for name, row in result["targets"].items()
+             if not row["deps"] and "/" not in name and any(p.endswith(".olean") for p in row["paths"])]
+    if not roots:
+        raise ValueError("first generation has no independently restorable compiler target")
+    _, name = min(roots)
+    row = result["targets"][name]
+    plan = {"targets": {name: row}}
+    report = {"target": name, "key": row["key"]}
+    inventories = {}
+    for transport in ("ci", "release"):
+        index = read(stage / transport)  # Independently fetched by the strict dual readback.
+        destination = stage / (transport + "-restore")
+        restored = restore(remote, index, plan, [name], destination)
+        if restored["restored"] != 1 or index["targets"][name]["key"] != row["key"]:
+            raise ValueError(f"first generation {transport} reader missed the probe target")
+        inventories[transport] = {p: host.archive_sha(destination / p, remote.deadline) for p in row["paths"]}
+        report[transport + "_bytes"] = restored["transferred_bytes"]
+        report[transport + "_artifact_digest"] = sha(encode(inventories[transport]))
+    if inventories["ci"] != inventories["release"]:
+        raise ValueError("first generation probes restored different artifacts")
+    return report
+
+
 def publish(remote, plan, base, receipts, expected):
-    current, marker = remote.current()
-    if current != expected:
-        raise ValueError("stale generation publisher")
-    if marker and (base is None or sha(encode(base)) != marker["index"]):
-        raise ValueError("publisher base differs from its pinned generation")
     result = assemble(plan, base, receipts)
-    if remote.confirmed_volumes(result["volumes"]) != result["volumes"]:
-        raise ValueError("published generation references unavailable volumes")
-    with tempfile.TemporaryDirectory() as directory:
-        digest = stage_indexes(remote, result, Path(directory))
-    new = {"schema": SCHEMA, "source": plan["source"], "index": digest}
-    revision = remote.advance(expected, new)
+    digest = sha(encode(result))
+    intended = {"schema": SCHEMA, "source": plan["source"], "index": digest}
+    current, marker = remote.current()
+    if current != expected and intended != marker:
+        raise ValueError("stale generation publisher")
+    if current == expected and marker and (base is None or sha(encode(base)) != marker["index"]):
+        raise ValueError("publisher base differs from its pinned generation")
+    revision = current
+    probe = {}
+    if current == expected:
+        if remote.confirmed_volumes(result["volumes"]) != result["volumes"]:
+            raise ValueError("published generation references unavailable volumes")
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory)
+            stage_indexes(remote, result, stage)
+            if marker is None:
+                probe = {"first_restore": verify_first_restore(remote, result, stage)}
+        revision = remote.advance(expected, intended)
     return dict(marker=revision, source=plan["source"], ci_index_sha256=digest,
-                release_index_sha256=digest, targets=len(result["targets"]), inherited_frame_bytes_read=0)
+                release_index_sha256=digest, targets=len(result["targets"]), inherited_frame_bytes_read=0, **probe)
 
 
 def stage_frames(remote, plan, directory, limit):
@@ -220,7 +258,10 @@ def fetch_published(root, targets, deadline, *, refresh_stale, tag=None):
             digest = tag.removeprefix(INDEX_PREFIX)
             if tag == digest or not frames.valid_digest(digest):
                 raise ValueError("invalid pinned generation tag")
+            marker = remote.published(digest)
             index = remote.get_index(digest, path, "release")
+            if index["source"] != marker["source"] or index.get("schema") != SCHEMA:
+                raise ValueError("historical generation marker and index disagree")
             validate(index, complete=True)
     destination = root / ".lake/build"
     if destination.parent.is_symlink() or destination.is_symlink():
