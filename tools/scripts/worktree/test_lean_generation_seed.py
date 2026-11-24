@@ -96,6 +96,26 @@ if __name__ == "__main__":
 
 
 class WarmGeneration(unittest.TestCase):
+    def test_report_batch_prepares_its_planned_inputs_before_reading_exports(self):
+        import lean_generation_facets as facets
+
+        root = Path('checkout')
+        targets = {
+            'report/D5.A': {'deps': ['D5.A', 'External.Claim']},
+            'report/Reg.B': {'deps': ['Reg.B', 'External.Claim', 'LeanInformationAudit.TemplateEnrollment']},
+            'report/Unrelated': {'deps': ['Unrelated']},
+        }
+        with patch.object(facets.subprocess, 'run', autospec=True) as run:
+            facets.build_facets(root, ['report/D5.A', 'report/Reg.B'], targets)
+        commands = [call.args[0] for call in run.call_args_list]
+        lake = ['bash', 'tools/scripts/worktree/lean-cache-run.sh', 'lake', '-d', 'tools/lean-inspector-reg', 'build']
+        self.assertEqual(commands, [
+            [*lake, '+D5.A:olean', '+External.Claim:olean', '+LeanInformationAudit.TemplateEnrollment:olean',
+             '+Reg.B:olean'],
+            [*lake, '+D5.A:report', '+Reg.B:report'],
+        ])
+        self.assertTrue(all(call.kwargs == {'cwd': root, 'check': True} for call in run.call_args_list))
+
     def test_complete_seed_reuses_reports_and_compiler_without_opening_frames(self):
         from contextlib import ExitStack
         import lean_cache_generation as generation
