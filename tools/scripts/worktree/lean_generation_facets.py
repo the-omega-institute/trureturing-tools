@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path, PurePosixPath
+import shutil
 import subprocess
 import tempfile
 
@@ -12,7 +13,7 @@ from lean_cache_generation import restore, stage_frames
 from lean_cache_release import report_selection
 from lean_generation_checkpoints import discover, remote_for, save
 from lean_generation_index import read
-from lean_generation_plan import checked_hits, digest, file_digest, module_targets, write
+from lean_generation_plan import checked_hits, digest, module_targets, write
 from lean_release_index import write_frame
 
 
@@ -27,10 +28,12 @@ PROGRAMS = {
 def facet_paths(name):
     kind, target = name.split('/', 1)
     if kind == 'report':
-        return (f'lean-inspector/modules/{target}.zip',)
-    if kind == 'native':
-        return (f'lean-inspector/{PROGRAMS[target][2]}/bin/{target}',)
-    raise ValueError('unknown cache facet: ' + name)
+        path = f'lean-inspector/modules/{target}.zip'
+    elif kind == 'native':
+        path = f'lean-inspector/{PROGRAMS[target][2]}/bin/{target}'
+    else:
+        raise ValueError('unknown cache facet: ' + name)
+    return path, path + '.hash', path + '.trace'
 
 
 def utility_inputs(root):
@@ -46,11 +49,10 @@ def utility_inputs(root):
 def all_targets(root, module_rows=None):
     targets = dict(module_targets(root) if module_rows is None else module_rows)
     selection = report_selection.Selection(root)
-    # These are literal inputs to the report producer (including config file
-    # bytes embedded in report evidence). Compiler keys use Lake target inputs.
-    materials = sorted(set(selection.expand('config_inputs')) |
-                       set(selection.producer_paths('lean-report')))
-    producer = digest([(p, file_digest(root / p)) for p in materials])
+    # The module facet traces its compiler exports, claim inputs and report
+    # format. Aggregate configuration and production provenance have their
+    # own checks when the report is consumed.
+    report_format = report_selection.REPORT_FORMAT
     utilities = utility_inputs(root)
     for exe, (package, main, _) in PROGRAMS.items():
         name = 'native/' + exe
@@ -64,7 +66,7 @@ def all_targets(root, module_rows=None):
             deps.add(utility['claimModule'])
         deps = sorted(deps)
         targets['report/' + module] = {
-            'key': digest(['report-v1', module, producer, utility, [(n, targets[n]['key']) for n in deps]]),
+            'key': digest(['report-v1', module, report_format, utility, [(n, targets[n]['key']) for n in deps]]),
             'deps': deps}
     return targets
 
@@ -109,8 +111,9 @@ def run(root, compiler, base, receipts, output):
     write(output, plan)
     snapshots = [base, *(read(p) for p in sorted(receipts.glob('*.json')))]
     rows, sizes = checked_hits(targets, snapshots)
-    if rows.keys() != targets.keys():
-        rows, sizes = checked_hits(targets, [*snapshots, *discover(remote, plan['domain'])])
+    missing_keys = {targets[n]['key'] for n in targets.keys() - rows.keys()}
+    if missing_keys:
+        rows, sizes = checked_hits(targets, [*snapshots, *discover(remote, plan['domain'], missing_keys)])
     # Include only verified, currently addressable inherited entries.
     available = {v: size for v, size in sizes.items() if remote.has_volume(v, size)}
     rows, sizes = checked_hits(targets, [{'volumes': available, 'targets':
@@ -148,6 +151,11 @@ def run(root, compiler, base, receipts, output):
         index['targets'].update(receipt['targets'])
         index['volumes'].update(receipt['volumes'])
         restored.update(names)
+        if shutil.disk_usage(root).free < 4 * 1024**3:
+            for target in restored:
+                for relative in index['targets'][target]['paths']:
+                    (root / PROJECT_BUILD / relative).unlink(missing_ok=True)
+            restored.clear()
 
 
 if __name__ == '__main__':
