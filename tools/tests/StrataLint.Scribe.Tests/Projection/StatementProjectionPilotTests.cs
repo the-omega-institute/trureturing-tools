@@ -296,6 +296,8 @@ public sealed class StatementProjectionPilotTests
     [Theory]
     [InlineData("notes/r15-unrelated.txt", false)]
     [InlineData("Blueprint/D5/Probe.md", false)]
+    [InlineData("Blueprint/D5/S0/Carrier/Probe.scribe.cs", false)]
+    [InlineData("Blueprint/D5/S0/Carrier/Added.scribe.cs", false)]
     [InlineData("D5/S0/Carrier/Probe.lean", false)]
     [InlineData("Golden/Projection/statement-projection-pilot-v1.json", true)]
     [InlineData("tools/StrataLint.Scribe/Projection/StatementProjectionReconciliation.cs", true)]
@@ -345,7 +347,8 @@ public sealed class StatementProjectionPilotTests
              "inspector_sources":{"include":[{"pattern":"inspector/**/*.lean","optional":true}],"exclude":[]},
              "producer_scopes":{
                "lean-report":{"include":[{"pattern":"lean-producer/**/*.py","optional":true}],"exclude":[]},
-               "scribe-content":{"include":[{"pattern":"producer/**/*.py","optional":false}],
+               "scribe-content":{"include":[{"pattern":"producer/**/*.py","optional":false},
+                                           {"pattern":"Blueprint/**/*.scribe.cs","optional":true}],
                                  "exclude":["producer/excluded/**"]}}}
             """)!;
         var selected = native["producer_scopes"]!["scribe-content"]!;
@@ -366,6 +369,7 @@ public sealed class StatementProjectionPilotTests
             RawRepositoryEntry.FromText("alternative.json", native.ToJsonString()),
             RawRepositoryEntry.FromText("producer/Owner.csproj", "<Project />"),
             RawRepositoryEntry.FromText("producer/retained.py", "# retained registered member"),
+            RawRepositoryEntry.FromText("Blueprint/D5/S0/Carrier/Probe.scribe.cs", "// registered definition source"),
             RawRepositoryEntry.FromText(StrataLint.TestSupport.EngineeringRegistrationFixture.Path,
                 StrataLint.TestSupport.EngineeringRegistrationFixture.Manifest(new StrataLint.TestSupport.EngineeringProjectFixture(
                     "producer/Owner.csproj", "Owner", "test-support", ["tools/StrataLint.Scribe/**/*.cs"]))),
