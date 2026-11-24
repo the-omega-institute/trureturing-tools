@@ -13,7 +13,7 @@ from lean_seed_support import COMPILER_BUILD, ROOT, digest, write
 
 
 class ReleaseVerificationCases:
-    def verification_fixture(self, chunk_bytes=None, *, branch="integration-cache-fixture"):
+    def verification_fixture(self, chunk_bytes=None, *, branch="integration-cache-fixture", repo="fixture/cache"):
         shutil.copy2(ROOT / "Makefile", self.root / "Makefile")
         helper = "tools/scripts/worktree/lean_cache_release.py"
         (self.root / helper).parent.mkdir(parents=True, exist_ok=True)
@@ -29,7 +29,6 @@ class ReleaseVerificationCases:
             subprocess.run(["git", *args], check=True, capture_output=True)
         commit = subprocess.run(["git", "-C", str(self.root), "rev-parse", "HEAD"],
                                 check=True, capture_output=True, text=True).stdout.strip()
-        repo = "the-omega-institute/trureturing"
         self.verification_commit = commit
         self.verification_ref = "refs/heads/" + branch
         self.verification_api = {
@@ -42,7 +41,7 @@ class ReleaseVerificationCases:
                 "status": "identical", "merge_base_commit": {"sha": commit}}}
         self.verification_environment = {
             "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push", "GITHUB_REF": self.verification_ref,
-            "GITHUB_SHA": commit, "GITHUB_REPOSITORY": repo,
+            "GITHUB_SHA": commit, "GITHUB_REPOSITORY": repo, "STRATALINT_CACHE_REPO": repo,
             "FAKE_VERIFICATION_API": str(self.root / "verification-api.json"),
             "FAKE_GH_LOG": str(self.root / "gh-calls")}
         self.save_verification_api()
@@ -56,8 +55,8 @@ class ReleaseVerificationCases:
             **{**self.verification_environment, **environment})
 
     def test_rolling_base_reuses_previous_published_verification_at_next_commit(self):
-        self.verification_fixture(branch="integration-ci-rolling-tests")
-        repo = "the-omega-institute/trureturing"
+        self.verification_fixture(branch="integration-ci-rolling-tests", repo="the-omega-institute/trureturing")
+        repo = self.verification_environment["GITHUB_REPOSITORY"]
         workflow = ".github/workflows/ci-publication-verify.yml"
         old = self.verification_commit
         old_run = self.verification_api[f"repos/{repo}/actions/runs/123/attempts/1"]
@@ -127,12 +126,12 @@ class ReleaseVerificationCases:
         self.assertEqual("false", receipt(call("select-base", "--previous-commit-only"))["found"])
 
     def test_rolling_base_manual_dev_publication_from_protected_integration(self):
-        self.prepare_indexed_candidate()
+        self.prepare_indexed_candidate(repo="the-omega-institute/trureturing")
         published = self.transport("publish", arguments=("--indexed",))
         self.assertEqual(0, published.returncode, published.stdout + published.stderr)
         tag = next(self.remote.iterdir()).name
         producer = self.verification_commit
-        repo = "the-omega-institute/trureturing"
+        repo = self.verification_environment["GITHUB_REPOSITORY"]
         prefix = f"repos/{repo}"
         workflow = ".github/workflows/lean-cache-publish.yml"
         branch = "integration-ci-rolling-tests"
@@ -242,7 +241,7 @@ os.execv({real_git}, [{real_git}, *sys.argv[1:]])
                 ("branches/integration-cache-fixture", "protected", False),
                 (f"compare/{self.verification_commit}...{self.verification_commit}", "status", "diverged")]:
             with self.subTest(endpoint=endpoint, field=field):
-                row = self.verification_api["repos/the-omega-institute/trureturing/" + endpoint]
+                row = self.verification_api["repos/fixture/cache/" + endpoint]
                 before = row[field]
                 row[field] = value
                 self.save_verification_api()
@@ -257,7 +256,7 @@ os.execv({real_git}, [{real_git}, *sys.argv[1:]])
                     self.save_verification_api()
 
     def test_verification_roundtrip_uses_isolated_exact_tag_and_never_prunes(self):
-        self.verification_fixture()
+        self.verification_fixture(repo="the-omega-institute/trureturing")
         self.assertEqual(0, self.transport("publish", "999").returncode)
         published = self.verification("publish", **self.installation_probe())
         self.assertEqual(0, published.returncode, published.stdout + published.stderr)
@@ -727,7 +726,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertIn("digest mismatch", result.stdout)
         self.assertFalse((self.root / ".lake/build").exists())
         write(manifest, original)
-        run_api = "repos/the-omega-institute/trureturing/actions/runs/123/attempts/"
+        run_api = "repos/fixture/cache/actions/runs/123/attempts/"
         self.verification_api[run_api + "2"] = {**self.verification_api[run_api + "1"], "run_attempt": 2}
         self.save_verification_api()
         result = self.verification("fetch", GITHUB_RUN_ATTEMPT="2")
@@ -759,9 +758,9 @@ if sys.argv[0].endswith("lean_cache_release.py"):
             self.verification_commit, "--tag", tag, *(("--no-build",) if verb == "publish" else ())),
             **{**self.verification_environment, "GITHUB_ACTIONS": "false", **changes})
 
-    def candidate_fixture(self):
-        self.verification_fixture()
-        self.verification_api["repos/the-omega-institute/trureturing/commits/" +
+    def candidate_fixture(self, repo="fixture/cache"):
+        self.verification_fixture(repo=repo)
+        self.verification_api[f"repos/{repo}/commits/" +
                               self.verification_commit] = {"sha": self.verification_commit}
         self.save_verification_api()
 
@@ -788,7 +787,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertEqual(self.verification_commit, manifest["producer_commit_sha"])
         self.assertNotIn("workflow_run_id", manifest)
         calls = self.verification_calls()
-        self.assertTrue(any(call[:2] == ["api", "repos/the-omega-institute/trureturing/commits/" +
+        self.assertTrue(any(call[:2] == ["api", "repos/fixture/cache/commits/" +
                              self.verification_commit] for call in calls))
         self.assertFalse(any(call[:2] in (["api", "graphql"], ["release", "list"], ["release", "delete"]) or
                              (call[0] == "api" and "/branches/dev" in call[1]) for call in calls))
@@ -803,7 +802,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
 
     def test_candidate_publication_rejects_dirty_missing_source_and_ci_callers(self):
         self.candidate_fixture()
-        endpoint = "repos/the-omega-institute/trureturing/commits/" + self.verification_commit
+        endpoint = "repos/fixture/cache/commits/" + self.verification_commit
         for damage in ("dirty", "missing-source", "ci"):
             with self.subTest(damage=damage):
                 changes = {}
@@ -851,7 +850,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         self.assertIn("snapshot does not match this exact publication", result.stdout)
         self.assertEqual("keep current material", (self.root / ".lake/build/keep.txt").read_text())
 
-    def prepare_indexed_candidate(self):
+    def prepare_indexed_candidate(self, repo="fixture/cache"):
         for directory in ("Reg", "tools/lean-inspector-reg", "tools/lean-inspector-interface"):
             name = pathlib.Path(directory).name
             build = pathlib.Path(*([".."] * len(pathlib.Path(directory).parts)), ".lake/build", name)
@@ -860,7 +859,7 @@ if sys.argv[0].endswith("lean_cache_release.py"):
         write(lean, '#!/usr/bin/env python3\nimport json,sys\n'
                     'print(json.dumps({"imports":[{"errors":[],"result":{"imports":[]}} for _ in sys.stdin]}))\n')
         lean.chmod(0o755)
-        self.candidate_fixture()
+        self.candidate_fixture(repo=repo)
 
     def test_protected_producer_restores_exact_production_release_without_an_actions_seed(self):
         self.prepare_indexed_candidate()

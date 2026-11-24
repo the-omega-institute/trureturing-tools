@@ -53,6 +53,11 @@ def standalone():
     check(sys.executable, ".github/scripts/test-adopt-tools.py")
     check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/worktree",
           "-p", "test_lean_compile_layers.py")
+    # Protocol fixtures run without a consumer checkout. The DAG test uses a
+    # real, pinned, zero-dependency Lake project.
+    install_lean()
+    for suite in ("test_lean_cache_generation.py", "test_lean_generation_*.py"):
+        check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/worktree", "-p", suite)
     for name in STANDALONE:
         check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly",
               f"tools/tests/{name}/{name}.csproj", "--no-build")

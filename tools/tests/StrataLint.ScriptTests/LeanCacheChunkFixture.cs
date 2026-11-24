@@ -31,7 +31,10 @@ internal sealed class LeanCacheChunkFixture : IDisposable
         owner = Path.Combine(Path.GetDirectoryName(script)!, "lean_cache_release.py");
         foreach (var directory in new[] { repository, bin, releases, Path.GetDirectoryName(script)!, Path.Combine(repository, ".lake/build") })
             ScriptHarnessScratch.EnsureDirectory(directory);
-        foreach (var name in new[] { "lean-cache-publish.sh", "lean_cache_release.py", "lean_cache_release_io.py", "lean_artifact_inventory.py", "lean_cache_topology.py", "lean_cache.py", "cache_material.py" })
+        foreach (var name in new[] { "lean-cache-publish.sh", "lean_cache_release.py", "lean_cache_release_io.py", "lean_artifact_inventory.py", "lean_cache_topology.py", "lean_cache.py", "cache_material.py",
+            "lean_cache_generation.py", "lean_generation_index.py", "lean_generation_remote.py",
+            "lean_generation_objects.py", "lean_release_index.py", "lean_release_volume_remote.py",
+            "lean_release_volumes.py", "lean_compile_layers.py" })
             ScriptHarnessScratch.CopyScriptInto(
                 Path.Combine(TestRepositoryLayout.FindRoot(), "tools/scripts/worktree", name),
                 Path.Combine(Path.GetDirectoryName(script)!, name));
@@ -301,6 +304,9 @@ internal sealed class LeanCacheChunkFixture : IDisposable
             print(json.dumps(dict(nodes=rows, pageInfo=dict(hasNextPage=False))))
             sys.exit(0)
         if args[0] == "api":
+            if args[1].endswith("/git/ref/heads/lean-cache-published"):
+                print(json.dumps({"status": "404", "message": "Not Found"}))
+                sys.exit(1)
             if args[1].endswith("/branches/dev"):
                 print(json.dumps({"name":"dev", "protected":True, "commit":{"sha":"0123456789abcdef0123456789abcdef01234567"}}))
                 sys.exit(0)

@@ -1362,7 +1362,7 @@ def fetch_candidate(root, partition, tag, producer, *, targets=()):
 
 
 def fetch(root, partition, writer_owned=False, refresh_stale=False, approved_tag=None, approved_producer=None,
-          local_assets=None, *, indexed=False, targets=()):
+          local_assets=None, *, indexed=False, targets=(), generation_tag=None):
     if os.environ.get("GITHUB_ACTIONS") == "true":
         receipt("fetch", "skipped", reason="CI does not consume Release seeds")
         return 0
@@ -1381,9 +1381,14 @@ def fetch(root, partition, writer_owned=False, refresh_stale=False, approved_tag
     try:
         deadline = operation_deadline()
         with contextlib.nullcontext() if writer_owned else cache_guard(root):
+            if approved_tag is None and local_assets is None:
+                from lean_cache_generation import fetch_published
+                result = fetch_published(root, targets, deadline, refresh_stale=refresh_stale, tag=generation_tag)
+                if result is not None:
+                    return result
             return fetch_locked(root, partition, deadline, refresh_stale, approved_tag, approved_producer,
                                 local_assets, indexed=indexed, targets=targets)
-    except (OSError, ImportError, ValueError) as error:
+    except (OSError, ImportError, ValueError, KeyError, tarfile.TarError, subprocess.SubprocessError) as error:
         receipt("fetch", "miss", _error=error, reason=str(error), partition=partition)
         return 1
 
@@ -1746,8 +1751,12 @@ def _main():
             raise ValueError("--target requires an indexed production or exact indexed candidate fetch")
         if args.no_build and args.command != "publish":
             raise ValueError("--no-build requires publish")
-        if args.tag and (args.mode != "candidate" or args.command != "fetch"):
-            raise ValueError("--tag requires candidate fetch")
+        generation_tag = (args.tag if args.mode == "production" and args.command == "fetch"
+                          and re.fullmatch(r"lean-generation-v1-[0-9a-f]{64}", args.tag) else None)
+        if args.tag and not generation_tag and (args.mode != "candidate" or args.command != "fetch"):
+            raise ValueError("--tag requires candidate fetch or an immutable generation tag")
+        if generation_tag and (args.approved_tag or args.local_assets):
+            raise ValueError("an immutable generation tag selects one Release source")
         if args.refresh_stale and (args.command != "fetch" or args.mode != "production"):
             raise ValueError("--refresh-stale requires production fetch")
         if args.approved_tag is not None or args.approved_producer is not None:
@@ -1787,7 +1796,10 @@ def _main():
                 return fetch_verification(args.repository, partition, verification, indexed=args.indexed)
             return fetch(args.repository, partition, args.writer_owned, args.refresh_stale,
                          args.approved_tag, args.approved_producer, args.local_assets,
-                         indexed=args.indexed, targets=args.target)
+                         indexed=args.indexed, targets=args.target, generation_tag=generation_tag)
+        if (not args.prepare_only and args.mode != "verification"
+                and REPO.lower() == "the-omega-institute/trureturing"):
+            raise ValueError("shared Lean cache publication requires Cache Release Publish")
         return publish(args.repository, partition, verification, build_cache=not args.no_build, indexed=args.indexed,
                        prepare_only=args.prepare_only)
     except RollbackFailed as error:

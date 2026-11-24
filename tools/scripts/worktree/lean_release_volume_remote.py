@@ -53,8 +53,36 @@ def asset_for(host, tag, digest, size, deadline):
     return checked_asset(metadata, tag, digest, size)
 
 
-def ensure_asset(host, tag, digest, size, source, deadline, *, serialized=False):
+def pending_generation(host, tag, deadline):
+    # REST tag lookup omits unpublished pending tags. gh release view uses
+    # this GraphQL lookup and then fetches the REST Release by numeric ID.
+    owner, repository = host.REPO.split("/")
+    query = """query($owner:String!,$repo:String!,$tag:String!){
+      repository(owner:$owner,name:$repo){release(tagName:$tag){databaseId isDraft}}
+    }"""
+    response = host.gh(deadline, "api", "graphql", "-f", "query=" + query, "-f", "owner=" + owner,
+                       "-f", "repo=" + repository, "-f", "tag=" + tag)
+    row = json.loads(response)["data"]["repository"]["release"]
+    if row is None:
+        return None
+    release_id = row["databaseId"]
+    if type(release_id) is not int or release_id <= 0:
+        raise ValueError("invalid pending Release identity")
+    metadata = json.loads(host.gh(deadline, "api", f"repos/{host.REPO}/releases/{release_id}"))
+    if (metadata.get("tag_name") != tag or metadata.get("id") != release_id
+            or type(metadata.get("draft")) is not bool or metadata["draft"] != row["isDraft"]):
+        raise ValueError("pending Release identity differs from its exact tag")
+    return metadata
+
+
+def ensure_asset(host, tag, digest, size, source, deadline, *, serialized=False, target=None):
+    generation = (serialized and target is not None and re.fullmatch(r"[0-9a-f]{40}", target)
+                  and index.valid_digest(digest) and tag == "lean-generation-v1-" + digest)
     metadata = host.existing_release(tag, deadline)
+    if generation and metadata is None:
+        metadata = pending_generation(host, tag, deadline)
+    if generation and metadata is not None and metadata["draft"] and metadata.get("target_commitish") != target:
+        raise ValueError("pending generation belongs to another source commit")
     if metadata is not None and not metadata["draft"]:
         checked_asset(metadata, tag, digest, size)
         return False
@@ -62,7 +90,8 @@ def ensure_asset(host, tag, digest, size, source, deadline, *, serialized=False)
         if source is None:
             raise ValueError("prior physical volume is unavailable: " + digest)
         host.gh(deadline, "release", "create", tag, "--repo", host.REPO, "--draft",
-                "--title", tag, "--notes", "Immutable Lean cache volume.")
+                "--title", tag, "--notes", "Immutable Lean cache object.",
+                *(("--target", target) if target is not None else ()))
     uploaded = False
     assets = metadata.get("assets", []) if metadata is not None else []
     if serialized and len(assets) == 1 and assets[0].get("state") == "starter":
@@ -70,7 +99,7 @@ def ensure_asset(host, tag, digest, size, source, deadline, *, serialized=False)
         if (starter.get("name") != digest or type(starter.get("size")) is not int or starter["size"] != 0
                 or starter.get("digest") not in (None, "", "sha256:" + hashlib.sha256(b"").hexdigest())
                 or type(starter.get("id")) is not int or starter["id"] <= 0
-                or not re.fullmatch(r"lean-volume-v1-[0-9a-f]{64}-" + re.escape(digest), tag)
+                or not (generation or re.fullmatch(r"lean-volume-v1-[0-9a-f]{64}-" + re.escape(digest), tag))
                 or source is None or source.stat().st_size != size or archive_sha(source, deadline) != digest):
             raise ValueError("incomplete physical volume does not match the staged upload")
         host.gh(deadline, "api", "--method", "DELETE", f"repos/{host.REPO}/releases/assets/{starter['id']}")
