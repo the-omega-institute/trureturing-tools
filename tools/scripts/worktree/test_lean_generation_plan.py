@@ -56,7 +56,7 @@ class GenerationPlanner(unittest.TestCase):
         remote = Mock()
         remote.get_index.return_value = receipt
         remote.api.return_value = {"repository": {"full_name": planner.checkpoints.host.REPO}, "head_branch": "dev",
-                                   "path": ".github/workflows/lean-cache-publish.yml", "event": "schedule"}
+                                   "path": ".github/workflows/cache-release-publish.yml", "event": "schedule"}
         catalog = [("1" * 64, source, ["other"]), ("2" * 64, source, [key])]
         with patch.object(planner.checkpoints, "descriptors", return_value=catalog):
             self.assertEqual(list(planner.checkpoints.discover(remote, "0" * 64, {key})), [receipt])

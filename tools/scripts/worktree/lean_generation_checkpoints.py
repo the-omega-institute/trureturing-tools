@@ -19,7 +19,7 @@ def publisher():
     repo = env["GITHUB_REPOSITORY"]
     if (repo != host.REPO or env.get("GITHUB_REF") != "refs/heads/dev"
             or env.get("GITHUB_REF_PROTECTED") != "true"
-            or env.get("GITHUB_WORKFLOW_REF") != f"{repo}/.github/workflows/lean-cache-publish.yml@refs/heads/dev"
+            or env.get("GITHUB_WORKFLOW_REF") != f"{repo}/.github/workflows/cache-release-publish.yml@refs/heads/dev"
             or env.get("GITHUB_EVENT_NAME") not in {"workflow_dispatch", "schedule"}
             or env.get("STRATALINT_CACHE_WRITES") != "true"):
         raise ValueError("only the protected generation publisher can stage a checkpoint")
@@ -123,7 +123,7 @@ def discover(remote, domain, keys=None):
                 runs[key] = remote.api(f"actions/runs/{run_id}/attempts/{attempt}")
             run = runs[key]
             if (run["repository"]["full_name"] != host.REPO or run["head_branch"] != "dev"
-                    or run["path"] != ".github/workflows/lean-cache-publish.yml"
+                    or run["path"] != ".github/workflows/cache-release-publish.yml"
                     or run["event"] not in {"schedule", "workflow_dispatch"}
                     or checkpoint["source"] != source):
                 raise ValueError("checkpoint did not originate in the protected dev publisher")
