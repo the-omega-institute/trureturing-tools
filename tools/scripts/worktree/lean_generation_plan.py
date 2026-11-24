@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import time
 import tomllib
 
 import lean_artifact_inventory as inventory
@@ -135,6 +136,7 @@ def batch_frames(root, plan, modules, names, receipt, domain, remote, *, volume_
     from lean_generation_index import MAX_VOLUME
     build = root / inventory.PROJECT_BUILD
     result = {"source": plan["source"], "targets": {}, "volumes": {}}
+    totals = {"uploaded_bytes": 0, "new_volumes": 0}
     receipt.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=receipt.parent) as temporary:
         temp = Path(temporary)
@@ -148,6 +150,8 @@ def batch_frames(root, plan, modules, names, receipt, domain, remote, *, volume_
             budget = min(MAX_VOLUME, volume_limit, max(1, available // 4))
             batch, metrics = stage_frames(remote, plan, frame_dir, budget)
             checkpoints.save(remote, domain, batch, temp)
+            for field in totals:
+                totals[field] += metrics[field]
             print("LEAN_GENERATION_CHECKPOINT " + json.dumps(metrics), flush=True)
             if set(batch["targets"]) != pending.keys():
                 raise ValueError("staged targets differ from generated frames")
@@ -177,7 +181,7 @@ def batch_frames(root, plan, modules, names, receipt, domain, remote, *, volume_
                 used = 0
         if pending:
             flush()
-    return result
+    return result, totals
 
 
 def main():
@@ -248,6 +252,15 @@ def work_batches(root, modules, remote, plan, hits, layer, output, *, batch_size
     order = TopologicalSorter({name: graph[name] & owned for name in sorted(owned)}).static_order()
     result = {"source": plan["source"], "targets": {}, "volumes": {}}
     installed = set()
+    started = time.monotonic()
+    initial_free = shutil.disk_usage(root).free
+    stats = {"compiled_targets": 0, "restored_targets": 0, "downloaded_bytes": 0, "uploaded_bytes": 0,
+             "new_volumes": 0, "sampled_peak_disk_growth_bytes": 0}
+
+    def sample_disk():
+        stats["sampled_peak_disk_growth_bytes"] = max(stats["sampled_peak_disk_growth_bytes"],
+                                                      initial_free - shutil.disk_usage(root).free)
+
     for batch in batched(order, batch_size):
         targets = set(batch)
         required = inventory.import_closure(graph, batch) - targets
@@ -261,10 +274,17 @@ def work_batches(root, modules, remote, plan, hits, layer, output, *, batch_size
             restored = restore(remote, subset, plan, missing, root / inventory.PROJECT_BUILD)
             if restored["restored"] != len(missing):
                 raise ValueError("worker could not restore the planned dependency closure")
+            stats["downloaded_bytes"] += restored["transferred_bytes"]
+            stats["restored_targets"] += restored["restored"]
+            sample_disk()
             compiler.compile_roots(root, modules, sorted(compiler.terminal(missing, graph)), no_build=True)
             installed.update(missing)
         compiler.compile_roots(root, modules, sorted(compiler.terminal(targets, graph)))
-        receipt = batch_frames(root, plan, modules, batch, output, plan["domain"], remote)
+        sample_disk()
+        receipt, staged = batch_frames(root, plan, modules, batch, output, plan["domain"], remote)
+        stats["compiled_targets"] += len(receipt["targets"])
+        stats["uploaded_bytes"] += staged["uploaded_bytes"]
+        stats["new_volumes"] += staged["new_volumes"]
         for field in ("targets", "volumes"):
             result[field].update(receipt[field])
             hits[field].update(receipt[field])
@@ -277,7 +297,10 @@ def work_batches(root, modules, remote, plan, hits, layer, output, *, batch_size
                 for path in hits["targets"][name]["paths"]:
                     (root / inventory.PROJECT_BUILD / path).unlink(missing_ok=True)
             installed.clear()
+    stats["elapsed_seconds"] = round(time.monotonic() - started, 3)
+    result["metrics"] = stats
     write(output, result)
+    print("LEAN_GENERATION_WORKER " + json.dumps(stats), flush=True)
 
 
 if __name__ == "__main__":
