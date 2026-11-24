@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 import lean_cache_release as host
 from lean_generation_index import ConflictingArtifacts, validate
@@ -31,6 +32,30 @@ def prefix(domain):
     return "tags/lean-checkpoint-v1-" + domain + "-"
 
 
+def create_ref(remote, name, tag_sha):
+    for attempt in range(3):
+        try:
+            return remote.api("git/refs", "-X", "POST", "-f", "ref=refs/tags/" + name, "-f", "sha=" + tag_sha)
+        except host.GitHubCommandError as creation:
+            diagnostic = (creation.stderr or "").strip()
+            status = re.search(r"\bHTTP (\d{3})\b", diagnostic)
+            code = int(status[1]) if status else 0
+            throttled = code == 429 or (code == 403 and "rate limit" in diagnostic.lower())
+            ambiguous = (diagnostic == "unexpected end of JSON input" or 500 <= code < 600 or throttled)
+            if not ambiguous and code not in (409, 422):
+                raise
+            try:
+                return remote.api("git/ref/tags/" + name)
+            except host.GitHubCommandError as readback:
+                if not re.search(r"\bHTTP 404\b", readback.stderr or ""):
+                    raise
+            delay = (60 if throttled else 2) * 2 ** attempt
+            if not ambiguous or attempt == 2 or host.remaining(remote.deadline) <= delay:
+                raise
+            print(f"Retrying checkpoint ref {name} after {diagnostic} in {delay}s", file=sys.stderr)
+            time.sleep(delay)
+
+
 def save(remote, domain, receipt, directory):
     from lean_cache_generation import stage_indexes
     validate(receipt, complete=False)
@@ -41,10 +66,7 @@ def save(remote, domain, receipt, directory):
     message = json.dumps(keys, separators=(",", ":"))
     tag = remote.api("git/tags", "-X", "POST", "-f", "tag=" + name, "-f", "message=" + message,
                      "-f", "type=commit", "-f", "object=" + receipt["source"])
-    try:
-        ref = remote.api("git/refs", "-X", "POST", "-f", "ref=refs/tags/" + name, "-f", "sha=" + tag["sha"])
-    except host.GitHubCommandError:
-        ref = remote.api("git/ref/tags/" + name)
+    ref = create_ref(remote, name, tag["sha"])
     if ref["object"]["sha"] != tag["sha"]:
         stored = remote.api("git/tags/" + ref["object"]["sha"])
         if stored["message"] != message or stored["object"]["sha"] != receipt["source"]:

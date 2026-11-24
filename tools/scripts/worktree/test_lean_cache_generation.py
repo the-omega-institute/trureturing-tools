@@ -260,6 +260,50 @@ class Generations(unittest.TestCase):
                     patch.object(generation.host, "gh", side_effect=transport), self.assertRaises(expected):
                 remote.get_index(digest, self.directory / "download", "checkpoint")
 
+    def test_checkpoint_ref_retries_ambiguous_create_only_if_missing(self):
+        name = "checkpoint"
+        tag = "f" * 40
+        ref = {"object": {"sha": tag}}
+        missing = generation.host.GitHubCommandError(1, "gh", stderr="gh: Not Found (HTTP 404)")
+        for diagnostic, delay in (("unexpected end of JSON input", 2), ("gh: Unavailable (HTTP 503)", 2),
+                                  ("gh: API rate limit exceeded (HTTP 403)", 60)):
+            error = generation.host.GitHubCommandError(1, "gh", stderr=diagnostic)
+            with self.subTest(diagnostic=diagnostic), patch.object(checkpoints.time, "sleep") as sleep, \
+                    patch.object(self.remote, "api", create=True, side_effect=[error, missing, ref]) as api:
+                self.assertEqual(checkpoints.create_ref(self.remote, name, tag), ref)
+                create, lookup, retry = api.call_args_list
+                self.assertEqual(create.args, ("git/refs", "-X", "POST", "-f", "ref=refs/tags/checkpoint",
+                                               "-f", "sha=" + tag))
+                self.assertEqual(lookup.args, ("git/ref/tags/checkpoint",))
+                self.assertEqual(retry, create)
+                sleep.assert_called_once_with(delay)
+            with patch.object(checkpoints.time, "sleep") as sleep, \
+                    patch.object(self.remote, "api", create=True, side_effect=[error, ref]) as api:
+                self.assertEqual(checkpoints.create_ref(self.remote, name, tag), ref)
+                self.assertEqual(api.call_count, 2)
+                sleep.assert_not_called()
+
+    def test_checkpoint_ref_preserves_create_failure_and_conflicting_tag(self):
+        tag = "f" * 40
+        denied = generation.host.GitHubCommandError(1, "gh", stderr="gh: Forbidden (HTTP 403)")
+        ambiguous = generation.host.GitHubCommandError(1, "gh", stderr="unexpected end of JSON input")
+        missing = generation.host.GitHubCommandError(1, "gh", stderr="gh: Not Found (HTTP 404)")
+        for sequence, expected in (([denied], denied), ([ambiguous, missing] * 3, ambiguous)):
+            with self.subTest(expected=expected.stderr), patch.object(checkpoints.time, "sleep"), \
+                    patch.object(self.remote, "api", create=True, side_effect=sequence) as api, \
+                    self.assertRaises(generation.host.GitHubCommandError) as raised:
+                checkpoints.create_ref(self.remote, "checkpoint", tag)
+            self.assertIs(raised.exception, expected)
+            self.assertEqual(api.call_count, len(sequence))
+
+        exists = generation.host.GitHubCommandError(1, "gh", stderr="gh: Reference already exists (HTTP 422)")
+        responses = [{"sha": tag}, exists, {"object": {"sha": "e" * 40}},
+                     {"object": {"sha": self.receipt["source"]}, "message": "different targets"}]
+        with patch.object(self.remote, "api", create=True, side_effect=responses), \
+                patch.object(checkpoints, "publisher", return_value={"run": "123", "attempt": "1"}), \
+                self.assertRaisesRegex(ValueError, "checkpoint metadata differs"):
+            checkpoints.save(self.remote, sha(b"domain"), self.receipt, self.directory)
+
     def test_partial_checkpoint_discoverable_before_ci_quota_failure(self):
         remote = self.remote
         discovered = []
