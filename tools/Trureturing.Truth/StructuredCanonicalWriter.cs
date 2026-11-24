@@ -130,17 +130,24 @@ public static class StructuredCanonicalWriter
         }
 
         output.Write("\""u8);
+        WriteJsonStringContent(output.Write, value);
+        output.Write("\""u8);
+    }
+
+    /// <summary>Writes escaped UTF-8 JSON string content without the enclosing quotes.</summary>
+    /// <remarks>Callers writing successive chunks must split at Unicode scalar boundaries.</remarks>
+    public static void WriteJsonStringContent(Action<ReadOnlySpan<byte>> write, ReadOnlySpan<char> value)
+    {
         for (var offset = 0; offset < value.Length;)
         {
             // Keep serializer tokens bounded without splitting a UTF-16 scalar.
             var length = Math.Min(16 * 1024, value.Length - offset);
             if (length < value.Length - offset && char.IsHighSurrogate(value[offset + length - 1])
                 && char.IsLowSurrogate(value[offset + length])) length--;
-            var encoded = JsonSerializer.SerializeToUtf8Bytes(value.Substring(offset, length), StringOptions);
-            output.Write(encoded.AsSpan(1, encoded.Length - 2));
+            var encoded = JsonSerializer.SerializeToUtf8Bytes(new string(value.Slice(offset, length)), StringOptions);
+            write(encoded.AsSpan(1, encoded.Length - 2));
             offset += length;
         }
-        output.Write("\""u8);
     }
 
     private static string CanonicalNumber(JsonElement element)

@@ -350,6 +350,48 @@ public sealed class RawLeanReportArtifactTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public void ScopedValidationChecksSharedMaterialWithoutForcingDemandReads(bool invalidSecondIdentity)
+    {
+        const string sourcePath = "Trureturing.lean";
+        using var temporary = new TemporaryDirectory();
+        var path = Path.Combine(temporary.Path, "scoped.json");
+        // The first byte of the supplementary scalar ends the first input chunk.
+        var value = new string('a', 65535) + "🌍\b\f\r\n\t\\\"<>&\u2028\u2029" + new string('z', 65536);
+        var first = new LeanDeclaration("first", "theorem", value, []);
+        var second = new LeanDeclaration("second", "def", value, []) { IncludeInStatement = false };
+        var snapshot = Snapshot();
+        RawLeanReportArtifact.WriteFile(path, snapshot, LeanAxiomReport.Create(
+            new Dictionary<string, LeanFileReport> { [sourcePath] = new(["Init"], [first, second]) }));
+        var bytes = File.ReadAllText(path).Replace(RawLeanReportArtifact.Schema,
+            RawLeanReportArtifact.ScopedSchema, StringComparison.Ordinal);
+        var target = RepoPath.CreateKnown(sourcePath);
+        if (invalidSecondIdentity)
+        {
+            bytes = bytes.Replace(CanonicalStatementWriter.DeclarationStatementId(target, second),
+                CanonicalStatementWriter.DeclarationStatementId(target, first), StringComparison.Ordinal);
+        }
+        File.WriteAllText(path, bytes);
+        var scope = LeanReportScope.Create(snapshot, [target]);
+
+        if (invalidSecondIdentity)
+        {
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                RawLeanReportArtifact.ReadFileForScope(path, scope, validateMaterials: true));
+            Assert.Contains("statement identity does not match material: Trureturing.lean:second",
+                exception.Message, StringComparison.Ordinal);
+            return;
+        }
+
+        var report = RawLeanReportArtifact.ReadFileForScope(path, scope, validateMaterials: true);
+        var declarations = report.Files[target].Declarations;
+        Assert.All(declarations, declaration => Assert.False(DeclarationMaterial(declaration)!.IsValueCreated));
+        Assert.Equal(value, declarations[0].LoadTypeRepresentation());
+        Assert.Same(declarations[0].LoadTypeRepresentation(), declarations[1].LoadTypeRepresentation());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public void FileReaderReturnsTheExactBytesValidatedBeforeTheFileChanges(bool validateMaterials)
     {
         const string material = "statement-v1(∀ α, Ω𝒪😀)";
@@ -554,6 +596,7 @@ public sealed class RawLeanReportArtifactTests
     [Theory]
     [InlineData("hash", "hash mismatch")]
     [InlineData("utf8", "strict UTF-8")]
+    [InlineData("utf8-incomplete", "strict UTF-8")]
     [InlineData("missing", "missing")]
     [InlineData("extra", "unreferenced")]
     [InlineData("duplicate", "duplicate")]
@@ -575,7 +618,7 @@ public sealed class RawLeanReportArtifactTests
             using var archive = ZipFile.Open(materials, ZipArchiveMode.Update);
             var entry = Assert.Single(archive.Entries);
             var name = entry.FullName;
-            if (corruption is "hash" or "utf8" or "missing" or "address") entry.Delete();
+            if (corruption is "hash" or "utf8" or "utf8-incomplete" or "missing" or "address") entry.Delete();
             if (corruption != "missing")
             {
                 var replacement = archive.CreateEntry(corruption switch
@@ -585,12 +628,26 @@ public sealed class RawLeanReportArtifactTests
                     _ => name,
                 });
                 using var stream = replacement.Open();
-                stream.Write(corruption == "utf8" ? [0xff] : Encoding.UTF8.GetBytes("statement-v1(changed)"));
+                stream.Write(corruption switch
+                {
+                    "utf8" => [0xff],
+                    "utf8-incomplete" => [0xf0, 0x9f, 0x8c],
+                    _ => Encoding.UTF8.GetBytes("statement-v1(changed)"),
+                });
             }
         }
 
         var exception = Assert.Throws<InvalidDataException>(() =>
             RawLeanReportArtifact.ReadFile(path, Snapshot(), validateMaterials: true));
+        Assert.Contains(diagnostic, exception.ToString(), StringComparison.OrdinalIgnoreCase);
+
+        var scoped = File.ReadAllText(path).Replace(RawLeanReportArtifact.Schema,
+            RawLeanReportArtifact.ScopedSchema, StringComparison.Ordinal)
+            .Replace("\"imports\": []", "\"imports\": [\"Init\"]", StringComparison.Ordinal);
+        File.WriteAllText(path, scoped);
+        var scope = LeanReportScope.Create(Snapshot(), [RepoPath.CreateKnown("Trureturing.lean")]);
+        exception = Assert.Throws<InvalidDataException>(() =>
+            RawLeanReportArtifact.ReadFileForScope(path, scope, validateMaterials: true));
         Assert.Contains(diagnostic, exception.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
@@ -682,6 +739,9 @@ public sealed class RawLeanReportArtifactTests
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "material")]
     private static extern ref ConcurrentDictionary<string, Lazy<string>> MaterialCache(
         [UnsafeAccessorType(MaterialArchiveType)] object archive);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "typeMaterial")]
+    private static extern ref Lazy<string>? DeclarationMaterial(LeanDeclaration declaration);
 
     private static string WriteMaterialFixture(string path, string material)
     {
