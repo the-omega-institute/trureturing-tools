@@ -87,7 +87,7 @@ unsafe def Context.fromArtifacts (store : RawArtifacts.Store) (mainModule : Name
         identity := { name, owner, typeIdentity, bodyIdentity }
         levelCount := info.levelParams.length : PrimitivePin }
   let session ← IO.mkRef ({} : RegistrationGates.ProvenanceSession)
-  let axioms ← IO.mkRef ({} : CompiledAxioms.AxiomClosureState)
+  let axioms ← IO.mkRef ({ closure := store.metadata.axioms } : CompiledAxioms.AxiomClosureState)
   let configured := maxHeartbeats.get options
   let capped := if configured == 0 then 100000 else min 100000 configured
   let profiling := (← IO.getEnv "STRATALINT_INSPECTOR_PROFILE") == some "1"
@@ -104,7 +104,7 @@ unsafe def Context.fromArtifacts (store : RawArtifacts.Store) (mainModule : Name
     registeredTheorems
     implementedBy := fun name => (store.metadata.implementedBy.find? name).isSome
     extern := store.metadata.externs.contains
-    collectAxioms := CompiledAxioms.collectAxiomsShared (store.reportConstants #[mainModule]) axioms }
+    collectAxioms := CompiledAxioms.collectAxiomsShared (store.constants.find?) axioms }
 
 private def fail [Monad m] [MonadLiftT IO m] (reason : String) : m α :=
   liftM (m := IO) (throw (IO.userError reason) : IO α)
