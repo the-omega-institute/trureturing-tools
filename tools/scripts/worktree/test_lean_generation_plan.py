@@ -62,10 +62,11 @@ class GenerationPlanner(unittest.TestCase):
             self.assertEqual(list(planner.checkpoints.discover(remote, "0" * 64, {key})), [receipt])
         self.assertEqual(remote.get_index.call_count, 1)
         self.assertEqual(remote.get_index.call_args.args[-1], "checkpoint")
-        remote.get_index.side_effect = [FileNotFoundError("expired"), receipt]
-        one_missing = [("4" * 64, source, [key]), ("5" * 64, source, [key])]
-        with patch.object(planner.checkpoints, "descriptors", return_value=one_missing):
-            self.assertEqual(list(planner.checkpoints.discover(remote, "0" * 64, {key})), [receipt])
+        candidates = [("4" * 64, source, [key]), ("5" * 64, source, [key])]
+        for error in (planner.checkpoints.MissingCheckpoint("expired"), planner.checkpoints.InvalidIndexBody("digest")):
+            remote.get_index.side_effect = [error, receipt]
+            with self.subTest(error=error), patch.object(planner.checkpoints, "descriptors", return_value=candidates):
+                self.assertEqual(list(planner.checkpoints.discover(remote, "0" * 64, {key})), [receipt])
         remote.get_index.side_effect = None
         remote.api.return_value["event"] = "push"
         with patch.object(planner.checkpoints, "descriptors", return_value=catalog):

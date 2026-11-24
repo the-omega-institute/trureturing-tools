@@ -17,6 +17,14 @@ MARKER = "heads/lean-cache-published"
 INDEX_PREFIX = "lean-generation-v1-"
 
 
+class InvalidIndexBody(ValueError):
+    """The downloaded bytes do not encode the immutable index at their address."""
+
+
+class MissingCheckpoint(FileNotFoundError):
+    """The advertised checkpoint body is no longer present in its object bucket."""
+
+
 def decode_marker(commit):
     marker = json.loads(commit["message"])
     if (marker["schema"] != SCHEMA or not valid_digest(marker["index"])
@@ -102,13 +110,19 @@ class GitHub:
             name = "checkpoint-" + digest
             tag, asset = self.objects.locate(digest, name)
             if asset is None:
-                raise FileNotFoundError("missing durable checkpoint index: " + digest)
+                raise MissingCheckpoint("missing durable checkpoint index: " + digest)
             if (not 0 < asset["size"] <= MAX_INDEX
                     or not self.objects.checked(asset, digest, asset["size"])):
                 raise ValueError("checkpoint index is unavailable or invalid")
             with tempfile.TemporaryDirectory(dir=path.parent) as temp:
-                host.gh(self.deadline, "release", "download", tag, "--repo", host.REPO, "--dir", temp,
-                        "--pattern", name)
+                try:
+                    host.gh(self.deadline, "release", "download", tag, "--repo", host.REPO, "--dir", temp,
+                            "--pattern", name)
+                except host.GitHubCommandError as error:
+                    diagnostic = (error.stderr or "").strip()
+                    if re.search(r"\bHTTP 404\b", diagnostic) or diagnostic == "no assets match the file pattern":
+                        raise MissingCheckpoint("checkpoint asset disappeared: " + digest) from error
+                    raise
                 os.replace(Path(temp) / name, path)
         else:
             tag = INDEX_PREFIX + digest
@@ -124,10 +138,14 @@ class GitHub:
                         temporary, "--pattern", digest)
                 os.replace(Path(temporary) / digest, path)
         if path.stat().st_size > MAX_INDEX or host.archive_sha(path, self.deadline) != digest:
-            raise ValueError("generation index readback digest mismatch")
-        index = read(path)
-        if sha(encode(index)) != digest:
-            raise ValueError("generation index encoding differs from its canonical digest")
+            raise InvalidIndexBody("generation index readback digest mismatch")
+        try:
+            index = read(path)
+            canonical = sha(encode(index))
+        except ValueError as error:
+            raise InvalidIndexBody("generation index body is malformed") from error
+        if canonical != digest:
+            raise InvalidIndexBody("generation index encoding differs from its canonical digest")
         return index
 
     def advance(self, expected, marker):

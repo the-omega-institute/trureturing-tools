@@ -10,7 +10,7 @@ from unittest.mock import patch
 import lean_cache_generation as generation
 import lean_generation_checkpoints as checkpoints
 from lean_generation_objects import BUCKET, CAPACITY, Objects
-from lean_generation_remote import INDEX_PREFIX
+from lean_generation_remote import GitHub, INDEX_PREFIX, InvalidIndexBody, MissingCheckpoint
 from lean_generation_index import encode, read, sha, validate
 
 
@@ -182,16 +182,34 @@ class Generations(unittest.TestCase):
         self.assertEqual(first["marker"], replay["marker"])
         self.assertEqual(self.remote.range_requests, 2)
         actual = self.remote.get_index
-        def evicted(digest, path, transport):
-            if transport == "ci":
-                raise subprocess.CalledProcessError(4, "get")
-            return actual(digest, path, transport)
-        with patch.object(self.remote, "get_index", side_effect=evicted):
-            self.assertTrue(generation.latest(self.remote, "ci", self.directory / "resolved"))
-            next_plan = {**self.plan, "source": "c"*40}
-            with self.assertRaises(subprocess.CalledProcessError):
-                generation.publish(self.remote, next_plan, read(self.directory / "resolved"), [], first["marker"])
+        next_plan = {**self.plan, "source": "c"*40}
+        for code in (4, 5):
+            def unavailable(digest, path, transport):
+                if transport == "ci":
+                    raise subprocess.CalledProcessError(code, "get")
+                self.assertEqual(digest, first["ci_index_sha256"])
+                return actual(digest, path, transport)
+            with self.subTest(code=code), patch.object(self.remote, "get_index", side_effect=unavailable):
+                self.assertTrue(generation.latest(self.remote, "ci", self.directory / "resolved"))
+                with self.assertRaises(subprocess.CalledProcessError):
+                    generation.publish(self.remote, next_plan, read(self.directory / "resolved"), [], first["marker"])
         self.assertEqual(first["marker"], self.remote.revision)
+
+    def test_valid_checkpoint_metadata_with_corrupt_or_vanished_body(self):
+        remote = GitHub(self.directory, None)
+        digest = sha(b"expected")
+        name = "checkpoint-" + digest
+        asset = {"id": 5, "name": name, "size": 8, "digest": "sha256:" + digest, "state": "uploaded"}
+        def corrupt(_deadline, *args):
+            (Path(args[args.index("--dir") + 1]) / name).write_bytes(b"corrupt!")
+        errors = [(corrupt, InvalidIndexBody),
+                  (generation.host.GitHubCommandError(1, "gh", stderr="HTTP 404: Not Found"), MissingCheckpoint),
+                  (generation.host.GitHubCommandError(1, "gh", stderr="HTTP 403: Forbidden"),
+                   generation.host.GitHubCommandError)]
+        for transport, expected in errors:
+            with self.subTest(transport=transport), patch.object(remote.objects, "locate", return_value=("tag", asset)), \
+                    patch.object(generation.host, "gh", side_effect=transport), self.assertRaises(expected):
+                remote.get_index(digest, self.directory / "download", "checkpoint")
 
     def test_partial_checkpoint_discoverable_before_ci_quota_failure(self):
         remote = self.remote
@@ -207,7 +225,7 @@ class Generations(unittest.TestCase):
             self.assertEqual(endpoint, "actions/runs/123/attempts/1")
             return {"repository": {"full_name": generation.host.REPO}, "head_branch": "dev",
                     "head_sha": self.receipt["source"], "event": "schedule",
-                    "path": ".github/workflows/lean-cache-publish.yml"}
+                    "path": ".github/workflows/cache-release-publish.yml"}
         def deny(operation, digest, path):
             self.assertEqual(operation, "put")
             self.assertEqual(discovered[0][0], digest)

@@ -11,7 +11,7 @@ import tempfile
 
 import lean_cache_release as host
 from lean_generation_index import validate
-from lean_generation_remote import GitHub
+from lean_generation_remote import GitHub, InvalidIndexBody, MissingCheckpoint
 
 
 def publisher():
@@ -108,7 +108,7 @@ def discover(remote, domain, keys=None):
                 continue
             try:
                 checkpoint = remote.get_index(digest, Path(directory) / "checkpoint", "checkpoint")
-            except FileNotFoundError as error:
+            except (MissingCheckpoint, InvalidIndexBody) as error:
                 print(f"Skipping unavailable checkpoint {digest}: {error}", file=sys.stderr)
                 continue
             if sorted(advertised) != sorted(row["key"] for row in checkpoint["targets"].values()):

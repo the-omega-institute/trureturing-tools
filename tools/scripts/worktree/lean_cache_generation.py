@@ -6,6 +6,7 @@ import datetime
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 import tarfile
 import tempfile
@@ -13,7 +14,7 @@ import tempfile
 import lean_cache_release as host
 import lean_release_index as frames
 from lean_generation_index import MAX_VOLUME, SCHEMA, assemble, encode, matches, read, sha, validate
-from lean_generation_remote import GitHub, INDEX_PREFIX
+from lean_generation_remote import GitHub, INDEX_PREFIX, InvalidIndexBody
 
 
 def latest(remote, transport, output, marker_output=None):
@@ -25,10 +26,12 @@ def latest(remote, transport, output, marker_output=None):
         return False
     try:
         index = remote.get_index(marker["index"], output, transport)
-    except subprocess.CalledProcessError as error:
-        if transport != "ci" or error.returncode != 4:
+    except (subprocess.CalledProcessError, InvalidIndexBody) as error:
+        if transport != "ci" or (isinstance(error, subprocess.CalledProcessError) and error.returncode not in (4, 5)):
             raise
-        # The evictable CI index and durable Release share the exact address.
+        missing = isinstance(error, subprocess.CalledProcessError) and error.returncode == 4
+        reason = "missing" if missing else "corrupt"
+        print(f"Actions index {reason}, reading pinned Release index {marker['index']}", file=sys.stderr)
         index = remote.get_index(marker["index"], output, "release")
     if index["source"] != marker["source"] or index.get("schema") != SCHEMA:
         raise ValueError("published marker and generation index disagree")
