@@ -4,6 +4,9 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
+import sys
+import sys
 import tempfile
 
 import lean_cache_release as host
@@ -48,6 +51,15 @@ def save(remote, domain, receipt, directory):
         if stored["message"] != message or stored["object"]["sha"] != receipt["source"]:
             raise ValueError("checkpoint metadata differs from the existing tag")
 
+    # The durable index and its discovery ref already exist. Eviction, write
+    # quota, or a transient cache-service outage cannot invalidate this batch.
+    try:
+        remote.ci("put", digest, Path(directory) / "index")
+        if remote.get_index(digest, Path(directory) / "ci", "ci") != checkpoint:
+            raise ValueError("checkpoint CI index readback differs")
+    except subprocess.CalledProcessError as error:
+        print(f"Lean checkpoint {digest} retained after CI cache failure ({error.returncode})", file=sys.stderr)
+
 
 def descriptors(remote, domain):
     # Read candidate key metadata in pages. The actual partial index is fetched
@@ -71,8 +83,18 @@ def descriptors(remote, domain):
             digest = row["name"].removeprefix(tag_prefix)
             if not re.fullmatch("[0-9a-f]{64}", digest):
                 continue
-            descriptor = row["target"]
-            yield digest, descriptor["target"]["oid"], json.loads(descriptor["message"])
+            try:
+                descriptor = row["target"]
+                advertised = json.loads(descriptor["message"])
+                source = descriptor["target"]["oid"]
+                if (not re.fullmatch("[0-9a-f]{40}", source) or not isinstance(advertised, list)
+                        or not advertised or not all(isinstance(k, str) and re.fullmatch("[0-9a-f]{64}", k)
+                                                     for k in advertised)):
+                    raise ValueError("malformed checkpoint descriptor")
+            except (KeyError, ValueError, TypeError) as error:
+                print(f"Skipping unusable checkpoint descriptor {digest}: {error}", file=sys.stderr)
+                continue
+            yield digest, source, advertised
         if not page["pageInfo"]["hasNextPage"]:
             break
         cursor = ["-f", "cursor=" + page["pageInfo"]["endCursor"]]
@@ -84,7 +106,11 @@ def discover(remote, domain, keys=None):
         for digest, source, advertised in descriptors(remote, domain):
             if keys is not None and keys.isdisjoint(advertised):
                 continue
-            checkpoint = remote.get_index(digest, Path(directory) / "checkpoint", "checkpoint")
+            try:
+                checkpoint = remote.get_index(digest, Path(directory) / "checkpoint", "checkpoint")
+            except FileNotFoundError as error:
+                print(f"Skipping unavailable checkpoint {digest}: {error}", file=sys.stderr)
+                continue
             if sorted(advertised) != sorted(row["key"] for row in checkpoint["targets"].values()):
                 raise ValueError("checkpoint targets differ from its advertised keys")
             validate(checkpoint, complete=False)

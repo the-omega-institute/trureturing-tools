@@ -2,12 +2,14 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 import unittest
 from unittest.mock import Mock, patch
 
@@ -60,6 +62,11 @@ class GenerationPlanner(unittest.TestCase):
             self.assertEqual(list(planner.checkpoints.discover(remote, "0" * 64, {key})), [receipt])
         self.assertEqual(remote.get_index.call_count, 1)
         self.assertEqual(remote.get_index.call_args.args[-1], "checkpoint")
+        remote.get_index.side_effect = [FileNotFoundError("expired"), receipt]
+        one_missing = [("4" * 64, source, [key]), ("5" * 64, source, [key])]
+        with patch.object(planner.checkpoints, "descriptors", return_value=one_missing):
+            self.assertEqual(list(planner.checkpoints.discover(remote, "0" * 64, {key})), [receipt])
+        remote.get_index.side_effect = None
         remote.api.return_value["event"] = "push"
         with patch.object(planner.checkpoints, "descriptors", return_value=catalog):
             with self.assertRaisesRegex(ValueError, "protected dev publisher"):
@@ -147,8 +154,61 @@ class GenerationPlanner(unittest.TestCase):
         next_plan, recovered = planner.plan_layers("b" * 40, targets, saved)
         self.assertEqual(set(recovered["targets"]), set(names[:3]))
         self.assertEqual({tuple(layer["owned"]) for layer in next_plan["stages"].values()}, {(names[3],)})
+        failed_stage = next(s for s, layer in plan["stages"].items() if names[3] in layer["owned"])
+        original_layer = plan["stages"][failed_stage]
+        with patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "2"}), \
+                patch.object(planner.checkpoints, "discover", return_value=list(saved)), \
+                patch.object(planner.checkpoints, "save", side_effect=record):
+            rerun = directory / "failed jobs only"
+            checkout(rerun)
+            output = rerun / "result.json"
+            planner.work_batches(rerun, modules, remote, plan, deepcopy(common), original_layer, output, batch_size=1)
+            finished = read(output)
+        self.assertEqual(finished["metrics"]["compiled_targets"], 1)
+        self.assertEqual(finished["metrics"]["checkpoint_targets"], 1)
+        self.assertEqual(set(finished["targets"]), {names[2], names[3]})
+        self.assertEqual(finished["targets"][names[2]], recovered["targets"][names[2]])
         print(f"LEAN_GENERATION_FIXTURE exclusive_compile_overlap_seconds={hi-lo:.3f} "
               f"shared_compiles=1 recovered_after_interruption={len(recovered['targets'])}")
+
+    @unittest.skipUnless(shutil.which("lake"), "pinned Lake required for compiler fixture")
+    def test_lake_rebuilds_only_the_library_with_changed_compiler_settings(self):
+        with tempfile.TemporaryDirectory(prefix="generation Lake config ") as directory:
+            root = Path(directory)
+            pkg = root / "tools/lean-inspector-reg"
+            pkg.mkdir(parents=True)
+            cfg = pkg / "lakefile.toml"
+            fixture_config = ('name = "fixture"\nsrcDir = "../.."\nbuildDir = "../../.lake/build"\n'
+                              '[[lean_lib]]\nname = "Unchanged"\n[[lean_lib]]\nname = "Changed"\n')
+            cfg.write_text(fixture_config)
+            (root / "lean-toolchain").write_bytes((Path(__file__).resolve().parents[3] / "lean-toolchain").read_bytes())
+            (root / "Unchanged.lean").write_text("def original := 1\n")
+            (root / "Changed.lean").write_text(
+                'import Lean\nopen Lean Elab Term\nelab "settingValue" : term => do\n'
+                '  return mkNatLit (if (← getOptions).getBool `autoImplicit true then 1 else 2)\n'
+                'def configured : Nat := settingValue\n')
+            modules = {name: Module("fixture", Path(name + ".lean"), Path(".")) for name in ("Changed", "Unchanged")}
+            wrapper = root / "tools/scripts/worktree/lean-cache-run.sh"
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_text('exec "$@"\n')
+            def inputs(_):
+                return "fixture compiler", {"fixture": tomllib.loads(cfg.read_text())}
+            def keys():
+                return planner.module_targets(root, modules, {name: set() for name in modules})
+            def values():
+                (pkg / "Probe.lean").write_text("import Changed\n#eval configured\n")
+                return subprocess.check_output(["lake", "env", "lean", "Probe.lean"], cwd=pkg, text=True).strip()
+            with patch.object(planner, "package_inputs", side_effect=inputs):
+                old = keys()
+                planner.compiler.compile_roots(root, modules, sorted(modules))
+                self.assertEqual(values(), "1")
+                cfg.write_text(fixture_config + "leanOptions = { autoImplicit = false }\n")
+                new = keys()
+                self.assertEqual(old["Unchanged"], new["Unchanged"])
+                self.assertNotEqual(old["Changed"], new["Changed"])
+                planner.compiler.compile_roots(root, modules, ["Unchanged"], no_build=True)
+                planner.compiler.compile_roots(root, modules, ["Changed"])
+                self.assertEqual(values(), "2")
 
 
 if __name__ == "__main__":

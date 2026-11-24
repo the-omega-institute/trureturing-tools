@@ -114,6 +114,19 @@ def checked_hits(targets, snapshots):
     return valid, {row["volume"]: volumes[row["volume"]] for row in valid.values()}
 
 
+def verified_inputs(remote, domain, targets, base):
+    """Reconcile a committed plan or a failed-job retry with durable partials."""
+    validate(base, complete=False)
+    snapshots = [base]
+    gaps = targets.keys() - checked_hits(targets, snapshots)[0].keys()
+    if gaps:
+        snapshots.extend(checkpoints.discover(remote, domain, {targets[name]["key"] for name in gaps}))
+    rows, sizes = checked_hits(targets, snapshots)
+    confirmed = remote.confirmed_volumes(sizes)
+    rows = {name: row for name, row in rows.items() if row["volume"] in confirmed}
+    return checked_hits(targets, [{"targets": rows, "volumes": confirmed}])
+
+
 def plan_layers(source, targets, snapshots):
     hits, volumes = checked_hits(targets, snapshots)
     missing = targets.keys() - hits.keys()
@@ -204,16 +217,9 @@ def main():
         remote = checkpoints.remote_for(root)
         targets = module_targets(root)
         base = json.loads(args.base.read_bytes())
-        validate(base, complete=False)
         domain, _ = package_inputs(root)
-        snapshots = [base]
-        gaps = targets.keys() - checked_hits(targets, snapshots)[0].keys()
-        if gaps:
-            snapshots.extend(checkpoints.discover(remote, domain, {targets[name]["key"] for name in gaps}))
-        candidates, sizes = checked_hits(targets, snapshots)
-        present = remote.confirmed_volumes(sizes)
-        candidates = {n: r for n, r in candidates.items() if r["volume"] in present}
-        plan, hits = plan_layers(source, targets, [{"targets": candidates, "volumes": present}])
+        rows, volumes = verified_inputs(remote, domain, targets, base)
+        plan, hits = plan_layers(source, targets, [{"targets": rows, "volumes": volumes}])
         plan["domain"] = domain
         write(output / "plan.json", plan)
         write(output / "hits.json", hits)
@@ -249,12 +255,24 @@ def work_batches(root, modules, remote, plan, hits, layer, output, *, batch_size
     from lean_cache_generation import restore
     graph = {name: set(row["deps"]) for name, row in plan["targets"].items()}
     owned = set(layer["owned"])
-    order = TopologicalSorter({name: graph[name] & owned for name in sorted(owned)}).static_order()
-    result = {"source": plan["source"], "targets": {}, "volumes": {}}
+    scope = inventory.import_closure(graph, owned)
+    # When only failed jobs rerun, Actions keeps the original plan and hits
+    # artifacts. Reopen checkpoints written since that plan before compiling.
+    if int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")) > 1:
+        inputs = {name: plan["targets"][name] for name in scope}
+        rows, sizes = verified_inputs(remote, plan["domain"], inputs, hits)
+        if scope - owned - rows.keys():
+            raise ValueError("a prerequisite of the pinned stage is unavailable")
+        hits = {"source": plan["source"], "targets": rows, "volumes": sizes}
+    reused = {name: hits["targets"][name] for name in owned & hits["targets"].keys()}
+    result = {"source": plan["source"], "targets": reused.copy(),
+              "volumes": {r["volume"]: hits["volumes"][r["volume"]] for r in reused.values()}}
+    pending = owned - reused.keys()
+    order = TopologicalSorter({name: graph[name] & pending for name in sorted(pending)}).static_order()
     installed = set()
     started = time.monotonic()
     initial_free = shutil.disk_usage(root).free
-    stats = {"compiled_targets": 0, "restored_targets": 0, "downloaded_bytes": 0, "uploaded_bytes": 0,
+    stats = {"compiled_targets": 0, "checkpoint_targets": len(reused), "restored_targets": 0, "downloaded_bytes": 0, "uploaded_bytes": 0,
              "new_volumes": 0, "sampled_peak_disk_growth_bytes": 0}
 
     def sample_disk():
