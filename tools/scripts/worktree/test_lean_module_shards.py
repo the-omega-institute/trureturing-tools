@@ -60,12 +60,16 @@ class ShardCompilerTransport(unittest.TestCase):
         path.parent.mkdir(parents=True)
         path.write_bytes(b'excluded report')
         self.archive = self.root / 'rev-Demo.tar.gz'
-        self.descriptor = pack_shard(self.root, self.modules, self.modules, self.archive)
+        self.descriptor = pack_shard(self.root, self.modules, self.modules, self.archive, 'c'*64)
 
     def test_real_compiler_archives_are_stable_scoped_and_full(self):
         again = self.root / 'second.tar.gz'
-        self.assertEqual(pack_shard(self.root, self.modules, reversed(self.modules), again), self.descriptor)
+        self.assertEqual(pack_shard(self.root, self.modules, reversed(self.modules), again, 'c'*64), self.descriptor)
         self.assertEqual(self.archive.read_bytes(), again.read_bytes())
+        with self.archive.open('rb') as archive:
+            header = archive.read(75)
+        self.assertEqual(header[:4], b'\x1f\x8b\x08\x08')
+        self.assertEqual(header[10:], b'c'*64 + b'\0')
         with tarfile.open(self.archive) as bundle:
             self.assertFalse(any('lean-inspector' in p for p in bundle.getnames()))
         for names in (['Demo.A'], ['Demo.B'], list(self.modules)):

@@ -66,13 +66,24 @@ def matching(plan, rows):
             and row['members'] == plan['shards'][name]['members']}
 
 
+def recover_partials(plan, rows, remote):
+    missing = {name: shard for name, shard in plan['shards'].items() if name not in rows}
+    if missing:
+        rows.update(matching(plan, remote.partials(dict(plan, shards=missing))))
+    return rows
+
+
+def shard_fingerprint(mathlib, targets, members):
+    return digest([SCHEMA, mathlib, [(n, targets[n]['key']) for n in sorted(members)]])
+
+
 def shard_row(mathlib, mathlib_version, targets, name, members):
     members = sorted(members)
     key = mathlib_version + '-' + name + '.tar.gz'
     if len(key) > 512:
         raise ValueError('Actions key exceeds 512 characters: ' + key)
     return {'members': members, 'key': key, 'asset': key,
-            'fingerprint': digest([SCHEMA, mathlib, [(n, targets[n]['key']) for n in members]])}
+            'fingerprint': shard_fingerprint(mathlib, targets, members)}
 
 
 def expanded(plan, splits):
@@ -120,8 +131,7 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
     plan = expanded(plan, remote.splits(plan)) if planned.keys() - matching(plan, previous).keys() else plan
     planned = plan['shards']
     existing = remote.confirmed(matching(plan, previous))
-    if planned.keys() - existing.keys():
-        existing.update(matching(plan, remote.partials(plan)))
+    recover_partials(plan, existing, remote)
     plan['inherited'] = existing
     missing = sorted(planned.keys() - existing.keys(), key=lambda s: (-sum(sizes[n] for n in planned[s]['members']), s))
     lanes = [[] for _ in range(min(len(missing), workers))]
@@ -189,9 +199,10 @@ def restore_legacy(remote, index, names, destination):
     return set(rows) if report['restored'] == len(rows) else set()
 
 
-def measured_archives(root, modules, name, members, directory, capacity):
+def measured_archives(root, modules, name, members, directory, plan):
+    capacity = plan['capacity']
     path = directory / (name + '.tar.gz')
-    row = pack_shard(root, modules, members, path)
+    row = pack_shard(root, modules, members, path, shard_fingerprint(plan['mathlib'], plan['targets'], members))
     if row['bytes'] <= capacity or len(members) == 1:
         return {name: row}
     path.unlink()
@@ -201,7 +212,7 @@ def measured_archives(root, modules, name, members, directory, capacity):
     layout = plan_shards(sizes, effective, previous={name: members})
     archives = {}
     for child, selected in layout.items():
-        archives.update(measured_archives(root, modules, child, selected, directory, capacity))
+        archives.update(measured_archives(root, modules, child, selected, directory, plan))
     return archives
 
 
@@ -215,7 +226,7 @@ def work(root, plan, lane, remote, output):
     targets = plan['targets']
     graph = {n: set(row['deps']) for n, row in targets.items()}
     base = remote.latest(plan['base_version']) if plan['base_version'] else None
-    complete = {**plan['inherited'], **matching(plan, remote.partials(plan))}
+    complete = recover_partials(plan, matching(plan, plan['inherited']), remote)
     installed = set()
     compiled = uploaded = 0
     legacy = plan.get('legacy')
@@ -246,7 +257,7 @@ def work(root, plan, lane, remote, output):
         output.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=output) as temporary:
             directory = Path(temporary)
-            archives = measured_archives(root, modules, name, sorted(members), directory, plan['capacity'])
+            archives = measured_archives(root, modules, name, sorted(members), directory, plan)
             if len(archives) > 1:
                 layout = {child: archive['members'] for child, archive in archives.items()}
                 remote.save_split(original, name, layout)
@@ -268,9 +279,7 @@ def work(root, plan, lane, remote, output):
 def finish(plan, remote):
     if plan['shards'].keys() - plan['inherited'].keys():
         plan = expanded(plan, remote.splits(plan))
-    rows = matching(plan, plan['inherited'])
-    if plan['shards'].keys() - rows.keys():
-        rows.update(matching(plan, remote.partials(plan)))
+    rows = recover_partials(plan, matching(plan, plan['inherited']), remote)
     missing = plan['shards'].keys() - rows.keys()
     if missing:
         raise ValueError(f'{len(missing)} planned shards unavailable, including {min(missing)}')

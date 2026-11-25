@@ -13,7 +13,7 @@ from lean_artifact_inventory import Module, PROJECT_BUILD, lean_artifact_paths
 from lean_cache_release import has_unsafe_parent, install_scoped
 from lean_cache_release_io import archive_sha, copy_chunks
 from lean_compile_layers import check_outputs
-from lean_release_index import safe_path
+from lean_release_index import safe_path, valid_digest
 
 DEFAULT_CAPACITY = 256 * 1024**2
 MANIFEST = 'shard-members.json'
@@ -83,7 +83,9 @@ def lookup_shard(name, module_to_shard, shards):
     return owner
 
 
-def pack_shard(root, modules, members, output):
+def pack_shard(root, modules, members, output, fingerprint):
+    if not valid_digest(fingerprint):
+        raise ValueError('invalid module shard fingerprint')
     build = root / PROJECT_BUILD
     if build.is_symlink() or build.parent.is_symlink():
         raise ValueError('unsafe build directory')
@@ -109,7 +111,7 @@ def pack_shard(root, modules, members, output):
         candidate = Path(directory) / 'shard.tar.gz'
         module_sizes = {}
         with candidate.open('wb') as raw, gzip.GzipFile(
-            filename='', fileobj=raw, mode='wb', compresslevel=1, mtime=0,
+            filename=fingerprint, fileobj=raw, mode='wb', compresslevel=1, mtime=0,
         ) as compressed, tarfile.open(fileobj=compressed, mode='w') as archive:
             entry = tarfile.TarInfo(MANIFEST)
             entry.size = len(manifest)

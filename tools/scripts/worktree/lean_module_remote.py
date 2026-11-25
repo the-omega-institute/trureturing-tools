@@ -1,5 +1,6 @@
 """Release shards shared by immutable version indexes and their Actions cache copies."""
 
+from collections import Counter
 from functools import cache
 import hashlib
 from itertools import chain
@@ -10,8 +11,9 @@ import re
 import subprocess
 import sys
 import tempfile
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
+from lean_cache import publication_mathlib
 import lean_cache_release as host
 from lean_generation_checkpoints import publisher
 from lean_generation_index import MAX_INDEX, read
@@ -27,6 +29,51 @@ CAPACITY = 900
 
 def json_body(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+
+
+def release_page(index, checkout_version=None):
+    source = index['source']
+    tag = index['version']
+    repo = 'https://github.com/' + host.REPO
+    shards = index['shards']
+    current = []
+    historical = Counter()
+    version = checkout_version or ''
+    for name, row in sorted(shards.items()):
+        owner = row['version']
+        if owner == tag or owner.startswith(tag + '-part-'):
+            current.append(row)
+        else:
+            historical[owner] += 1
+        # Historical indexes can address assets by their original mathlib commit.
+        prefix = row['asset'].removesuffix('-' + name + '.tar.gz')
+        if re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?', prefix):
+            version = prefix
+
+    title = 'Lean 编译缓存' + (f' · mathlib {version}' if version else '') + ' · ' + source[:8]
+    index_url = f'{repo}/releases/download/{tag}/{INDEX}'
+    lines = [f'[下载完整索引（index.json）]({index_url}) · [查看源码（{source[:8]}）]({repo}/tree/{source})', '',
+             f'覆盖 **{len(index["targets"]):,}** 个模块，共 **{len(shards):,}** 个分片。'
+             f'本版发布 **{len(current):,}** 个，复用历史分片 **{sum(historical.values()):,}** 个。']
+    if current:
+        lines.extend(['', '### 本版下载', '', '| 文件 | 模块数 | 压缩大小 |', '| --- | ---: | ---: |'])
+        for row in current[:32]:
+            asset = row['asset']
+            url = f'{repo}/releases/download/{row["version"]}/{quote(asset)}'
+            lines.append(f'| [{asset}]({url}) | {len(row["members"]):,} | {row["bytes"] / 1024**2:,.2f} MiB |')
+        if len(current) > 32:
+            lines.extend(['', f'其余 {len(current) - 32:,} 个本版分片可通过[完整索引]({index_url})定位。'])
+    if historical:
+        lines.extend(['', '### 历史分片来源', '', '| Release | 复用分片数 |', '| --- | ---: |'])
+        for owner, count in historical.most_common(16):
+            parts = TAG.fullmatch(owner)
+            label = parts[1][:8] + (f' / part {parts[2]}' if parts[2] else '')
+            lines.append(f'| [{label}]({repo}/releases/tag/{owner}) | {count:,} |')
+        if len(historical) > 16:
+            lines.extend(['', f'其余 {len(historical) - 16:,} 个来源见[完整索引]({index_url})。'])
+    lines.extend(['', '按模块下载时，在索引中查 `targets[模块].shard`，'
+                  '再用 `shards[分片].version` 和 `.asset` 定位文件。'])
+    return title, '\n'.join(lines)
 
 
 def missing(error):
@@ -46,6 +93,7 @@ class Remote:
         self.deadline = deadline if deadline is not None else host.operation_deadline()
         self.http = GitHubHTTP(self.deadline)
         self.inventory = {}
+        self.release_pages = {}
 
     def current(self):
         try:
@@ -84,9 +132,25 @@ class Remote:
         if release['tag_name'] != tag or release['draft']:
             raise ValueError('unexpected module Release: ' + tag)
         assets = {row['name']: row for row in release['assets']}
+        self.release_pages[tag] = release.get('name'), release.get('body')
         entry = release['id'], assets
         self.inventory[tag] = entry
         return entry
+
+    def present(self, index):
+        tag = index['version']
+        release, _ = self.catalog(tag)
+        version = None
+        if (self.root / 'lake-manifest.json').is_file():
+            revision, checkout_version = publication_mathlib(self.root)
+            if revision == index['mathlib']:
+                version = checkout_version
+        title, body = release_page(index, version)
+        if self.release_pages[tag] != (title, body):
+            updated = self.api(f'releases/{release}', 'PATCH', name=title, body=body)
+            if (updated['name'], updated['body']) != (title, body):
+                raise ValueError('module Release page update failed: ' + tag)
+            self.release_pages[tag] = title, body
 
     @cache
     def tags(self, current, base):
@@ -159,7 +223,7 @@ class Remote:
             catalog = self.catalog(row['version'])
             asset = catalog[1].get(row['asset']) if catalog else None
             if (asset and asset['state'] == 'uploaded' and asset['size'] == row['bytes']
-                    and asset['digest'] == 'sha256:' + row['sha256'] and asset['label'] == row['fingerprint']):
+                    and asset['digest'] == 'sha256:' + row['sha256']):
                 confirmed[name] = row
         return confirmed
 
@@ -171,11 +235,11 @@ class Remote:
         entry = self.catalog(row['version'])
         asset = entry[1].get(row['asset']) if entry else None
         if (not asset or asset['size'] != row['bytes'] or asset['digest'] != 'sha256:' + digest
-                or asset['label'] != row['fingerprint']):
+                or asset.get('state') != 'uploaded'):
             raise ValueError('versioned shard metadata differs from index: ' + row['asset'])
         self.fetch(row['version'], asset, path)
 
-    def stage(self, version, name, path, label, digest, *, index=False):
+    def stage(self, version, name, path, digest, *, index=False):
         publisher()
         # The planner owns the shared Release. Each worker alone creates its overflow parts.
         first_overflow = 2 + (self.lane or 0)
@@ -189,7 +253,7 @@ class Remote:
             if not existing and not index and len(assets) >= CAPACITY:
                 continue
             if not existing:
-                params = urlencode({'name': name, 'label': label})
+                params = urlencode({'name': name})
                 url = f'https://uploads.github.com/repos/{host.REPO}/releases/{release}/assets?{params}'
                 try:
                     with self.http.request(url, method='POST', path=path) as response:
@@ -211,9 +275,9 @@ class Remote:
                 with self.http.request(url, method='DELETE'):
                     pass
                 assets.pop(INDEX)
-                return self.stage(version, name, path, label, digest, index=True)
+                return self.stage(version, name, path, digest, index=True)
             if (existing['state'] != 'uploaded' or existing['digest'] != 'sha256:' + digest
-                    or existing['size'] != path.stat().st_size or existing['label'] != label):
+                    or existing['size'] != path.stat().st_size):
                 raise ValueError('immutable Release asset conflicts: ' + name)
             assets[name] = existing
             return tag, existing
@@ -244,6 +308,16 @@ class Remote:
             raise ValueError('module index identity differs from its version')
         return data
 
+    def matches_checkpoint(self, tag, asset, fingerprint):
+        if asset.get('label'):
+            return asset['label'] == fingerprint
+        # RFC 1952 FNAME follows the ten-byte fixed header in archives produced by pack_shard.
+        size = 10 + 64 + 1
+        if asset['size'] < size:
+            return False
+        header = b''.join(self.http.asset(asset, tag, 0, size))
+        return header[:4] == b'\x1f\x8b\x08\x08' and header[10:] == fingerprint.encode('ascii') + b'\0'
+
     def partials(self, plan):
         expected = {}
         for name, row in plan['shards'].items():
@@ -257,7 +331,7 @@ class Remote:
                 asset = assets[name]
                 digest = (asset.get('digest') or '').removeprefix('sha256:')
                 if (asset.get('state') != 'uploaded' or not valid_digest(digest)
-                        or asset.get('label') != row['fingerprint'] or asset['size'] <= 0):
+                        or asset['size'] <= 0 or not self.matches_checkpoint(tag, asset, row['fingerprint'])):
                     continue
                 candidate = {**row, 'sha256': digest, 'bytes': asset['size'], 'version': tag}
                 if result.setdefault(shard, candidate)['sha256'] != digest:
@@ -270,7 +344,7 @@ class Remote:
         publisher()
         if path.stat().st_size != row['bytes'] or host.archive_sha(path, self.deadline) != row['sha256']:
             raise ValueError('local shard differs from its advertised payload')
-        tag, _ = self.stage(plan['version'], row['asset'], path, row['fingerprint'], row['sha256'])
+        tag, _ = self.stage(plan['version'], row['asset'], path, row['sha256'])
         self.actions('put', row['key'], row['sha256'], path)
         return {**row, 'version': tag}
 
@@ -284,7 +358,7 @@ class Remote:
                     continue
                 asset = assets[filename]
                 fingerprint = plan['shards'][group]['fingerprint']
-                if asset.get('state') != 'uploaded' or asset.get('label') != fingerprint or not 0 < asset['size'] <= MAX_INDEX:
+                if asset.get('state') != 'uploaded' or not 0 < asset['size'] <= MAX_INDEX:
                     continue
                 with tempfile.TemporaryDirectory() as temp:
                     path = Path(temp) / filename
@@ -303,7 +377,57 @@ class Remote:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'split.json'
             path.write_bytes(data)
-            self.stage(plan['version'], 'split-' + fingerprint + '.json', path, fingerprint, hashlib.sha256(data).hexdigest())
+            self.stage(plan['version'], 'split-' + fingerprint + '.json', path, hashlib.sha256(data).hexdigest())
+
+    def clear_label(self, asset, fingerprint, size, digest):
+        if (not asset or asset.get('label') != fingerprint or asset.get('state') != 'uploaded'
+                or asset.get('size') != size or asset.get('digest') != 'sha256:' + digest):
+            return
+        updated = self.api(f'releases/assets/{asset["id"]}', 'PATCH', label='')
+        if (updated.get('label') or any(updated[k] != asset[k] for k in ('id', 'name', 'size', 'digest', 'state'))):
+            raise ValueError('Release asset metadata differs after clearing label: ' + asset['name'])
+        asset.update(updated)
+
+    def clear_indexed_labels(self, index, *, local_only=False):
+        version = index['version']
+        local_tags = {version}
+        for row in index['shards'].values():
+            tag = row['version']
+            if tag == version or tag.startswith(version + '-part-'):
+                local_tags.add(tag)
+            elif local_only:
+                continue
+            catalog = self.catalog(tag)
+            if catalog:
+                self.clear_label(catalog[1].get(row['asset']), row['fingerprint'], row['bytes'], row['sha256'])
+        for tag in local_tags:
+            catalog = self.catalog(tag)
+            if not catalog:
+                continue
+            for name, asset in catalog[1].items():
+                fingerprint = asset.get('label')
+                if not valid_digest(fingerprint) or name != 'split-' + fingerprint + '.json':
+                    continue
+                if asset.get('state') != 'uploaded' or not 0 < asset['size'] <= MAX_INDEX:
+                    continue
+                with tempfile.TemporaryDirectory() as temp:
+                    path = Path(temp) / 'split.json'
+                    self.fetch(tag, asset, path)
+                    split = read(path)
+                layout = split.get('layout', {})
+                if (split.get('fingerprint') != fingerprint or not layout
+                        or any(k not in index['shards'] or index['shards'][k]['members'] != v
+                               for k, v in layout.items())):
+                    continue
+                from lean_module_cache import shard_fingerprint
+                members = [n for part in layout.values() for n in part]
+                if shard_fingerprint(index['mathlib'], index['targets'], members) == fingerprint:
+                    self.clear_label(asset, fingerprint, asset['size'], asset['digest'][7:])
+        catalog = self.catalog(version)
+        if catalog:
+            data = json_body(index)
+            digest = hashlib.sha256(data).hexdigest()
+            self.clear_label(catalog[1].get(INDEX), digest, len(data), digest)
 
     def publish(self, index):
         publisher()
@@ -323,12 +447,19 @@ class Remote:
         with tempfile.TemporaryDirectory() as stage:
             path = Path(stage) / INDEX
             path.write_bytes(data)
-            version, asset = self.stage(index['version'], INDEX, path, digest, digest, index=True)
+            version, asset = self.stage(index['version'], INDEX, path, digest, index=True)
             readback = Path(stage) / 'readback'
             self.fetch(version, asset, readback)
             key = 'lean-module-index-' + source
             self.actions('put', key, digest, path)
+        if current and current != source:
+            previous = self.latest(PREFIX + current)
+            self.clear_indexed_labels(previous, local_only=True)
+            self.present(previous)
+        self.present(index)
         if current is None:
             self.api('git/refs', 'POST', ref='refs/' + MARKER, sha=source)
         elif current != source:
             self.api('git/refs/' + MARKER, 'PATCH', sha=source, force=False)
+        # A legacy partial can lose its label once readers can recover it from the complete index.
+        self.clear_indexed_labels(index)
