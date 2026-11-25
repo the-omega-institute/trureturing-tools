@@ -1,6 +1,7 @@
 """End-to-end compiler shard selection, incremental publication and restart with real Lake artifacts."""
 
 from pathlib import Path
+import json
 import shutil
 import subprocess
 import tempfile
@@ -59,6 +60,7 @@ class ModuleReleases(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         self.pin = '1' * 40
+        self.version = 'v4.35.0'
         self.source = 'a' * 40
         self.remote = MemoryRemote()
         self.modules = {}
@@ -90,7 +92,7 @@ class ModuleReleases(unittest.TestCase):
 
     def plan(self, base=None, capacity=cache.DEFAULT_CAPACITY):
         _, targets = cache.checkout_targets(self.root)
-        return cache.make_plan(self.source, self.pin, targets, base, self.remote, capacity, 2)
+        return cache.make_plan(self.source, self.pin, targets, base, self.remote, capacity, 2, mathlib_version=self.version)
 
     def workers(self, plan):
         return [cache.work(self.root, plan, i, self.remote, self.root / 'receipts') for i in range(len(plan['lanes']))]
@@ -101,7 +103,7 @@ class ModuleReleases(unittest.TestCase):
         self.workers(plan)
         first = cache.finish(plan, self.remote)
         self.assertEqual(self.remote.saves, ['D5'])
-        old_archive = self.remote.assets[first['version'], self.pin + '-D5.tar.gz']
+        old_archive = self.remote.assets[first['version'], self.version + '-D5.tar.gz']
         for subset in (None, ['D5.A'], ['D5.C']):
             destination = self.root / ('consumer-' + str(subset))
             result = cache.restore(self.root, first, subset, self.remote, destination)
@@ -124,12 +126,35 @@ class ModuleReleases(unittest.TestCase):
         self.assertNotEqual(first['shards']['D5']['sha256'], second['shards']['D5']['sha256'])
         self.assertEqual(self.workers(self.plan(second)), [])
 
+    def test_new_names_use_the_mathlib_release_and_inherit_original_addresses(self):
+        manifest = self.root / 'lake-manifest.json'
+        manifest.write_text(json.dumps({'packages': [
+            {'name': 'mathlib', 'rev': self.pin, 'inputRev': self.version}]}))
+        self.assertEqual(cache.publication_mathlib(self.root), (self.pin, 'v4.35.0'))
+        manifest.write_text(json.dumps({'packages': [{'name': 'mathlib', 'rev': self.pin, 'inputRev': self.pin}]}))
+        with self.assertRaisesRegex(ValueError, 'mathlib release version'):
+            cache.publication_mathlib(self.root)
+
+        _, targets = cache.checkout_targets(self.root)
+        criteria = cache.shard_row(self.pin, self.version, targets, 'D5', list(targets))
+        self.assertEqual(criteria['asset'], 'v4.35.0-D5.tar.gz')
+        self.assertEqual(criteria['key'], criteria['asset'])
+        historical = dict(criteria, key=self.pin + '-D5', asset=self.pin + '-D5.tar.gz',
+                          version='lean-modules-' + self.source, bytes=123, sha256='c'*64)
+        base = {'source': self.source, 'version': historical['version'], 'targets': targets,
+                'shards': {'D5': historical}}
+        plan = cache.make_plan('b'*40, self.pin, targets, base, self.remote, cache.DEFAULT_CAPACITY, 2,
+                               mathlib_version=self.version)
+        self.assertEqual(plan['lanes'], [])
+        self.assertEqual(cache.finish(plan, self.remote)['shards']['D5'], historical)
+        self.assertEqual(self.remote.saves, [])
+
     def test_first_plan_uses_verified_compressed_sizes_for_layout(self):
         _, targets = cache.checkout_targets(self.root)
         legacy = {'targets': {n: {'bytes': 12} for n in targets}}
         guessed = self.plan(capacity=40)
         self.assertEqual(len(guessed['shards']), 3)
-        measured = cache.make_plan(self.source, self.pin, targets, None, self.remote, 40, 2, legacy=legacy)
+        measured = cache.make_plan(self.source, self.pin, targets, None, self.remote, 40, 2, mathlib_version=self.version, legacy=legacy)
         self.assertEqual(measured['shards'].keys(), {'D5'})
         self.assertEqual(measured['legacy'], legacy)
 
@@ -155,7 +180,7 @@ class ModuleReleases(unittest.TestCase):
             self.source = 'c' * 40
             upgraded = self.plan(first, capacity=200)
             self.assertFalse(upgraded['inherited'])
-            self.assertTrue(all(row['key'].startswith(self.pin + '-') for row in upgraded['shards'].values()))
+            self.assertTrue(all(row['key'].startswith(self.version + '-') for row in upgraded['shards'].values()))
 
 
 if __name__ == '__main__':

@@ -14,14 +14,29 @@ def resolved_mathlib(root: pathlib.Path) -> str:
 
 
 def manifest_mathlib(manifest: object) -> str:
+    revision = mathlib_package(manifest).get("rev")
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("manifest requires exactly one mathlib package with a resolved 40-hex revision")
+    return revision
+
+
+def mathlib_package(manifest):
     packages = manifest.get("packages") if isinstance(manifest, dict) else None
     if not isinstance(packages, list) or any(not isinstance(item, dict) for item in packages):
         raise ValueError("manifest packages must be an array of objects")
     mathlib = [item for item in packages if item.get("name") == "mathlib"]
-    revision = mathlib[0].get("rev") if len(mathlib) == 1 else None
-    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+    if len(mathlib) != 1:
         raise ValueError("manifest requires exactly one mathlib package with a resolved 40-hex revision")
-    return revision
+    return mathlib[0]
+
+
+def publication_mathlib(root):
+    manifest = json.loads((root / "lake-manifest.json").read_text(encoding="utf-8"))
+    revision = manifest_mathlib(manifest)
+    version = mathlib_package(manifest).get("inputRev")
+    if not isinstance(version, str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", version):
+        raise ValueError("module shard publication requires a mathlib release version in lake-manifest.json inputRev")
+    return revision, version
 
 
 def binary_platform() -> tuple[str, str]:
