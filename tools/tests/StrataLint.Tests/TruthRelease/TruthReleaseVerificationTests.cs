@@ -18,6 +18,8 @@ public sealed class TruthReleaseVerificationTests
     private const string OtherTree = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     private const string Repo = "the-omega-institute/trureturing";
     private const string OtherRepo = "the-omega-institute/some-other-repo";
+    private const string OfficialTypeAddress = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+    private const string OtherTypeAddress = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
 
     private static string Digest(byte[] bytes) =>
         "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes));
@@ -93,11 +95,12 @@ public sealed class TruthReleaseVerificationTests
         string manifestRepo = Repo,
         string? snapshotTruthGraphDigest = null,
         byte[]? truthGraph = null,
-        byte[]? truthExport = null)
+        byte[]? truthExport = null,
+        byte[]? rawLeanReport = null)
     {
         truthGraph ??= MinimalTruthGraphBytes();
         truthExport ??= TruthExportBytes(exportCommit, exportTree);
-        var rawLeanReport = Utf8.GetBytes("raw_lean_report");
+        rawLeanReport ??= Utf8.GetBytes("raw_lean_report");
         var sourceSnapshot = SourceSnapshotBytes(
             snapshotCommit,
             snapshotTree,
@@ -265,27 +268,166 @@ public sealed class TruthReleaseVerificationTests
     [InlineData(true)]
     public void RejectsDigestBoundGraphWithMissingOrDifferentStrictMeasurement(bool includeDifferentPair)
     {
+        var (graph, export) = PairedArtifacts(includeDifferentPair ? "different" : "absent");
+        AssertCompositionRejected(() => BuildBundle(truthGraph: graph, truthExport: export,
+            rawLeanReport: PairedRawReport()));
+    }
+
+    [Fact]
+    public void VerifiesStrictMeasurementWithMatchingRawStatementTypeAddress()
+    {
+        var (graph, export) = PairedArtifacts();
+        var (directory, digest) = BuildBundle(truthGraph: graph, truthExport: export, rawLeanReport: PairedRawReport());
+        try
+        {
+            var verified = TruthReleaseVerification.Verify(directory, digest);
+            var declaration = Assert.Single(Assert.Single(verified.ReadTruthExport().Nodes).Declarations);
+            Assert.Equal(OfficialTypeAddress, declaration.StrictOmega!.OfficialStatementTypeAddress);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("type address")]
+    [InlineData("missing type address")]
+    [InlineData("name key")]
+    [InlineData("kind")]
+    [InlineData("module")]
+    [InlineData("source path")]
+    [InlineData("absent")]
+    [InlineData("historical")]
+    public void RejectsStrictMeasurementWithoutMatchingRawStatement(string difference)
+    {
+        var (graph, export) = PairedArtifacts();
+        var report = difference switch
+        {
+            "type address" => PairedRawReport(typeAddress: OtherTypeAddress),
+            "missing type address" => PairedRawReport(typeAddress: null),
+            "name key" => PairedRawReport(nameKey: "nk-A"),
+            "kind" => PairedRawReport(kind: "def"),
+            "module" => PairedRawReport(module: "D5.S0.B"),
+            "source path" => PairedRawReport(sourcePath: "D5/S0/B.lean"),
+            "absent" => Utf8.GetBytes("""{"modules":[],"schema":"stratalint-raw-lean-report-v4"}"""),
+            "historical" => Utf8.GetBytes("""{"modules":[],"schema":"stratalint-raw-lean-report-v3"}"""),
+            _ => throw new ArgumentOutOfRangeException(nameof(difference)),
+        };
+        var (directory, digest) = BuildBundle(truthGraph: graph, truthExport: export, rawLeanReport: report);
+        try
+        {
+            var error = Assert.Throws<FormatException>(() => TruthReleaseVerification.Verify(directory, digest));
+            Assert.Contains("raw_lean_report", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void VerifiesUnannotatedBundleWithHistoricalRawReport()
+    {
+        var report = Utf8.GetBytes("""{"modules":[],"schema":"stratalint-raw-lean-report-v3"}""");
+        var (directory, digest) = BuildBundle(rawLeanReport: report);
+        try
+        {
+            Assert.Equal(digest, TruthReleaseVerification.Verify(directory, digest).ReleaseDigest);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RejectsTamperedRawReportEvenWhenThePairedStatementMatches()
+    {
+        var (graph, export) = PairedArtifacts();
+        var (directory, digest) = BuildBundle(truthGraph: graph, truthExport: export, rawLeanReport: PairedRawReport());
+        try
+        {
+            File.WriteAllBytes(Path.Combine(directory, TruthReleaseBundleWriter.RawLeanReportFileName),
+                PairedRawReport(ignoredMetadata: "[false]"));
+
+            var error = Assert.Throws<FormatException>(() => TruthReleaseVerification.Verify(directory, digest));
+            Assert.Contains("content does not match its recorded sha256", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void VerifiesLargePairedRawReportWithoutAllocatingTheWholeReport()
+    {
+        var (graph, export) = PairedArtifacts();
+        var report = PairedRawReport(ignoredMetadata: "[\"" + new string('x', 70_000) + "\","
+            + string.Concat(Enumerable.Repeat("[false,1234],", 850_000)) + "null]");
+        var (directory, digest) = BuildBundle(truthGraph: graph, truthExport: export, rawLeanReport: report);
+        try
+        {
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            var verified = TruthReleaseVerification.Verify(directory, digest);
+            var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+            Assert.Equal(digest, verified.ReleaseDigest);
+            Assert.True(allocated < report.Length / 2, $"Verification allocated {allocated:N0} bytes for a {report.Length:N0}-byte raw report.");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static byte[] PairedRawReport(
+        string? typeAddress = OfficialTypeAddress,
+        string nameKey = "nk-a",
+        string kind = "theorem",
+        string module = "D5.S0.A",
+        string sourcePath = "D5/S0/A.lean",
+        string ignoredMetadata = "{}")
+    {
+        var typeField = typeAddress is null ? "" : $", \"type_sha256\": \"{typeAddress}\"";
+        return Utf8.GetBytes($$"""
+            {"modules": [{
+              "declarations": [{"axioms": ["propext"], "include_in_statement": true, "kind": "{{kind}}",
+                "name": "a", "name_key": "{{nameKey}}", "statement_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111"{{typeField}}}],
+              "imports": [], "information_templates": {{ignoredMetadata}}, "module": "{{module}}", "source_path": "{{sourcePath}}",
+              "source_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }], "schema": "stratalint-raw-lean-report-v4"}
+            """);
+    }
+
+    private static (byte[] Graph, byte[] Export) PairedArtifacts(string graphPair = "matching")
+    {
         var export = TruthExportJsonReader.Read(TruthExportBytes(Commit, Tree));
         var node = Assert.Single(export.Nodes);
         var declaration = Assert.Single(node.Declarations) with
         {
             Libraries = ["Init", "OmegaMath"], Axioms = ["propext"],
-            StrictOmega = new("nk-a", "theorem", "sha256:" + new string('2', 64), "sha256:" + new string('3', 64),
+            StrictOmega = new("nk-a", "theorem", "sha256:" + new string('2', 64), OfficialTypeAddress,
                 ["OmegaInit", "OmegaMath"], []),
         };
         var exportBytes = TruthExportJsonWriter.Write(export with { Nodes = [node with { Declarations = [declaration] }] });
         var graph = TruthGraphJsonReader.Read(MinimalTruthGraphBytes());
         var graphNode = new TruthGraphNode(node.RepoPath, null, "closed", null, 0)
         {
-            StrictOmegaDeclarations = includeDifferentPair
-                ? [declaration with { StrictOmega = declaration.StrictOmega! with { Axioms = ["propext"] } }]
-                : null,
+            StrictOmegaDeclarations = graphPair switch
+            {
+                "matching" => [declaration],
+                "different" => [declaration with { StrictOmega = declaration.StrictOmega! with { Axioms = ["propext"] } }],
+                "absent" => null,
+                _ => throw new ArgumentOutOfRangeException(nameof(graphPair)),
+            },
         };
         var graphBytes = TruthGraphJsonWriter.Write(graph with
         {
             Truth = graph.Truth with { Nodes = [graphNode], StateCounts = new(1, 0, 0, 0) },
         });
-        AssertCompositionRejected(() => BuildBundle(truthGraph: graphBytes.ToArray(), truthExport: exportBytes.ToArray()));
+        return (graphBytes.ToArray(), exportBytes.ToArray());
     }
 
     [Fact]

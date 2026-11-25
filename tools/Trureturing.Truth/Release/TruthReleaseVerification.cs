@@ -78,7 +78,7 @@ public static class TruthReleaseVerification
             throw new FormatException("SHA256SUMS does not cover exactly the manifest's artifact files.");
         }
 
-        // 5. Every artifact's bytes must hash to the value both SHA256SUMS and the manifest record.
+        // 5. Check each manifest digest against SHA256SUMS. The raw report is hashed when streamed below.
         foreach (var artifact in artifacts)
         {
             var manifestHex = StripDigestPrefix(artifact.Sha256);
@@ -87,15 +87,11 @@ public static class TruthReleaseVerification
                 throw new FormatException($"artifact '{artifact.File}' hash disagrees between SHA256SUMS and the manifest.");
             }
 
-            var actualHex = Sha256Sums.HashHex(ReadContainedBytes(bundleDirectory, artifact.File));
-            if (!string.Equals(actualHex, manifestHex, StringComparison.Ordinal))
-            {
-                throw new FormatException($"artifact '{artifact.File}' content does not match its recorded sha256.");
-            }
+            if (artifact != manifest.Artifacts.RawLeanReport)
+                RequireArtifactHash(artifact, Sha256Sums.HashHex(ReadContainedBytes(bundleDirectory, artifact.File)));
         }
 
-        // 6. Only after every artifact has passed byte-integrity verification, parse the three
-        //    composition-bearing artifacts and require them to describe one source revision. The graph
+        // 6. Require the composition-bearing artifacts to describe one source revision. The graph
         //    digest is computed from the exact verified graph bytes, never accepted from a producer field.
         var sourceSnapshotBytes = ReadVerifiedArtifactBytes(bundleDirectory, manifest.Artifacts.SourceSnapshot);
         var truthExportBytes = ReadVerifiedArtifactBytes(bundleDirectory, manifest.Artifacts.TruthExport);
@@ -111,7 +107,17 @@ public static class TruthReleaseVerification
             manifest,
             computedTruthGraphDigest);
 
+        var reportArtifact = manifest.Artifacts.RawLeanReport;
+        using var rawReport = File.OpenRead(ContainedFilePath(bundleDirectory, reportArtifact.File));
+        RequireArtifactHash(reportArtifact, TruthReleaseRawLeanReportValidator.HashAndValidate(rawReport, truthExport));
+
         return VerifiedTruthRelease.Create(manifest, expectedReleaseDigest, bundleDirectory);
+    }
+
+    private static void RequireArtifactHash(TruthReleaseArtifact artifact, string actualHex)
+    {
+        if (!string.Equals(actualHex, StripDigestPrefix(artifact.Sha256), StringComparison.Ordinal))
+            throw new FormatException($"artifact '{artifact.File}' content does not match its recorded sha256.");
     }
 
     /// <summary>
@@ -198,7 +204,10 @@ public static class TruthReleaseVerification
         }
     }
 
-    private static byte[] ReadContainedBytes(string bundleDirectory, string name)
+    private static byte[] ReadContainedBytes(string bundleDirectory, string name) =>
+        File.ReadAllBytes(ContainedFilePath(bundleDirectory, name));
+
+    private static string ContainedFilePath(string bundleDirectory, string name)
     {
         var info = new FileInfo(Path.Combine(bundleDirectory, name));
         if (!info.Exists)
@@ -213,7 +222,7 @@ public static class TruthReleaseVerification
             throw new FormatException($"bundle entry '{name}' is a symbolic link; a release bundle must contain real files.");
         }
 
-        return File.ReadAllBytes(info.FullName);
+        return info.FullName;
     }
 
     private static string DecodeStrict(byte[] bytes)
