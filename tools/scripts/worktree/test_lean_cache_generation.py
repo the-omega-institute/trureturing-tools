@@ -161,7 +161,7 @@ class Generations(unittest.TestCase):
         self.assertEqual((self.directory / ".lake/build/lib/lean/B.olean").read_bytes(), b"consumer")
 
     def test_uploaded_receipt_and_conflict_refresh(self):
-        import lean_generation_http as http
+        import lean_generation_objects as http
         from unittest.mock import Mock
 
         path = self.directory / 'payload'
@@ -209,7 +209,7 @@ class Generations(unittest.TestCase):
         from unittest.mock import Mock
         from email.message import Message
         from urllib.parse import urlsplit
-        import lean_generation_http as http
+        import lean_generation_objects as http
 
         now = 'Tue, 24 Nov 2026 23:00:00 GMT'
         date = int(http.timestamp(now))
