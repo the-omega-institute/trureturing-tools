@@ -102,22 +102,6 @@ def manual_source_is_valid() -> bool:
     return source_commit == os.environ.get("STRATALINT_CACHE_CHECKED_OUT_SHA", "")
 
 
-def preparation_source_is_valid() -> bool:
-    """Identify validated PR preparations when reading candidate releases."""
-    source_ref = os.environ.get("STRATALINT_CACHE_SOURCE_REF", "")
-    target_ref = os.environ.get("STRATALINT_CACHE_TARGET_REF", "")
-    source_commit = os.environ.get("STRATALINT_CACHE_SOURCE_COMMIT", "")
-    return (os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-            and os.environ.get("GITHUB_REF_PROTECTED") == "true"
-            and os.environ.get("STRATALINT_CACHE_PR_SOURCE_VALIDATED") == "true"
-            and re.fullmatch(r"refs/pull/[1-9][0-9]*/merge", source_ref) is not None
-            and re.fullmatch(r"refs/heads/(?:dev|integration-[A-Za-z0-9._/-]+)", target_ref) is not None
-            and target_ref == os.environ.get("GITHUB_REF")
-            and re.fullmatch(r"[0-9a-f]{40}", source_commit) is not None
-            and source_commit != "0" * 40
-            and source_commit == os.environ.get("STRATALINT_CACHE_CHECKED_OUT_SHA"))
-
-
 def actions_keys(root: pathlib.Path) -> dict:
     revision = resolved_mathlib(root)
     system, machine = binary_platform()
@@ -217,9 +201,6 @@ def discard_retired_reports(build):
 
 
 def restore_dependency(root, keys, key, outcome):
-    if adoption_record(root) is not None:
-        receipt("project", "preparation-retained", reason="validated PR artifact already adopted")
-        return False
     spec = keys["dependency"]
     record = dependency_restored_record(root)
     record.unlink(missing_ok=True)
@@ -251,26 +232,6 @@ def restore_dependency(root, keys, key, outcome):
             shutil.rmtree(target)
         receipt("dependency", "miss", reason=str(error))
         return False
-
-
-def adoption_record(root):
-    """Invocation-local acceptance, outside every transported native path."""
-    path = root / "build/lean-cache/pr-adopted.json"
-    try:
-        if path.is_symlink():
-            return None
-        value = json.loads(path.read_text())
-        checkout = os.environ.get("STRATALINT_CACHE_CHECKED_OUT_SHA", os.environ.get("GITHUB_SHA"))
-        if (value["run"] != os.environ.get("GITHUB_RUN_ID")
-                or value["attempt"] != os.environ.get("GITHUB_RUN_ATTEMPT")
-                or value["repository"] != str(root.resolve()) or value["checkout"] != checkout
-                or value["ref"] != os.environ.get("GITHUB_REF")
-                or type(value["artifact"]) is not int or value["artifact"] <= 0
-                or type(value["merged"]) is not bool):
-            return None
-        return value
-    except (OSError, ValueError, TypeError, KeyError):
-        return None
 
 
 def resume_marker(root):
@@ -421,9 +382,6 @@ def project_publication(root):
     work = project_work(root)
     if work is None:
         return False, "build-work-unknown", work
-    adopted = adoption_record(root)
-    if adopted is not None and adopted["merged"]:
-        return True, "adopted-merged-preparation", work
     if work == 0:
         if os.environ.get("STRATALINT_RELEASE_CACHE_SEEDED") == "1" and manual_source_is_valid():
             return True, "accepted-explicit-release-seed", work

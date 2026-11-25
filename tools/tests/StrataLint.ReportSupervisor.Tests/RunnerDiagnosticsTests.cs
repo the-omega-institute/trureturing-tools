@@ -11,7 +11,6 @@ public sealed class RunnerDiagnosticsTests
     [InlineData("test_observer_failure_preserves_exit_and_redacts_error")]
     [InlineData("test_missing_tool_permissions_and_early_observer_exit_fail_open")]
     [InlineData("test_memory_uses_cgroup_current_limit_and_oom_events")]
-    [InlineData("test_dispatch_adds_diagnostics_only_for_literal_true")]
     [InlineData("test_cleanup_failure_is_redacted_and_keeps_business_exit")]
     [InlineData("test_stale_process_or_group_identity_cannot_receive_cleanup")]
     [InlineData("test_partial_tracer_start_failure_still_reaps_real_process")]

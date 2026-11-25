@@ -15,7 +15,6 @@ public sealed class LeanCacheStampPersistenceTests
     [InlineData("dependency-matched-key-missing", false, 0)]
     [InlineData("dependency-matched-key-missing", false, 23)]
     [InlineData("transfer-miss", false, 0)]
-    [InlineData("preparation-adopted", true, 0)]
     [InlineData("publication-failed", false, 0)]
     [InlineData("foreign-mathlib", false, 0)]
     [InlineData("foreign-platform", false, 0)]
@@ -68,13 +67,6 @@ public sealed class LeanCacheStampPersistenceTests
                 matched = matched.replace('a' * 40, 'b' * 40)
             if scenario == 'foreign-platform':
                 matched = matched.replace(keys['arch'], 'foreign-arch')
-            if scenario == 'preparation-adopted':
-                os.environ['STRATALINT_CACHE_CHECKED_OUT_SHA'] = 'a' * 40
-                actions.write_small_record(root / 'build/lean-cache/pr-adopted.json', {
-                    'run': '17', 'attempt': '2', 'repository': str(root.resolve()), 'checkout': 'a' * 40,
-                    'ref': 'refs/heads/dev', 'artifact': 3, 'merged': True})
-                actions.stamp_restored_dependency(root, keys)
-                matched, outcome = '', 'failure'
             if scenario.startswith('existing-') or scenario == 'stamp-publication-failed':
                 stamp.parent.mkdir(parents=True, exist_ok=True)
                 if scenario.startswith(('existing-mismatch', 'existing-platform')):
@@ -92,9 +84,8 @@ public sealed class LeanCacheStampPersistenceTests
         var receiptLine = Assert.Single(Encoding.UTF8.GetString(restore.StandardOutput).Split('\n'),
             line => line.StartsWith("LEAN_ACTIONS_CACHE ", StringComparison.Ordinal));
         using var restoreReceipt = JsonDocument.Parse(receiptLine["LEAN_ACTIONS_CACHE ".Length..]);
-        var adopted = scenario == "preparation-adopted";
-        Assert.Equal(adopted ? "project" : "dependency", restoreReceipt.RootElement.GetProperty("layer").GetString());
-        var status = adopted ? "preparation-retained" : dependencyAccepted ? "restored" : "miss";
+        Assert.Equal("dependency", restoreReceipt.RootElement.GetProperty("layer").GetString());
+        var status = dependencyAccepted ? "restored" : "miss";
         Assert.Equal(status, restoreReceipt.RootElement.GetProperty("status").GetString());
         Assert.Equal(dependencyAccepted, Directory.Exists(Path.Combine(lake, "packages")));
         if (dependencyAccepted)

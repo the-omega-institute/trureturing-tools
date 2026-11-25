@@ -1307,10 +1307,10 @@ def fetch_candidate(root, partition, tag, producer, *, targets=()):
     deadline = operation_deadline()
     protected_build = False
     if os.environ.get("GITHUB_ACTIONS") == "true":
-        from lean_actions import manual_source_is_valid, preparation_source_is_valid
+        from lean_actions import manual_source_is_valid
         protected_build = manual_source_is_valid()
         head = checked_run(["git", "-C", str(root), "rev-parse", "--verify", "HEAD"], deadline).stdout.strip()
-        if (not (protected_build or preparation_source_is_valid())
+        if (not protected_build
                 or head != os.environ.get("STRATALINT_CACHE_CHECKED_OUT_SHA")):
             raise ValueError("candidate fetch in CI requires a validated long producer source")
     cache_key = release_key(root)
@@ -1539,42 +1539,25 @@ def publisher_run(run, attempt, workflow, request):
 
 def rolling_source(args, deadline, request):
     env = os.environ
-    verification = args.mode == "verification"
     ref = args.source_ref
-    workflow_ref = env.get("GITHUB_REF", "")
-    manual_dev = not verification and env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-    workflow = (".github/workflows/ci-publication-verify.yml" if verification
-                else ".github/workflows/lean-cache-publish.yml")
-    events = ("push", "workflow_dispatch") if verification else ("push", "schedule", "workflow_dispatch")
-    if (args.mode not in ("verification", "production") or REPO != "the-omega-institute/trureturing"
+    workflow = ".github/workflows/ci-publication-verify.yml"
+    events = ("push", "workflow_dispatch")
+    if (args.mode != "verification" or REPO != "the-omega-institute/trureturing"
             or env.get("GITHUB_ACTIONS") != "true" or env.get("GITHUB_REPOSITORY") != REPO
-            or env.get("GITHUB_REF_PROTECTED") != "true"
-            or env.get("GITHUB_WORKFLOW_REF") != f"{REPO}/{workflow}@{workflow_ref}"
-            or (ref != workflow_ref and not manual_dev)
+            or env.get("GITHUB_REF_PROTECTED") != "true" or env.get("GITHUB_REF") != ref
+            or env.get("GITHUB_WORKFLOW_REF") != f"{REPO}/{workflow}@{ref}"
             or env.get("GITHUB_EVENT_NAME") not in events
-            or not (re.fullmatch(r"refs/heads/integration-ci-[A-Za-z0-9._/-]+-tests", ref)
-                    if verification else ref == "refs/heads/dev")):
-        raise ValueError("rolling base requires the matching protected Release publisher")
+            or not re.fullmatch(r"refs/heads/integration-ci-[A-Za-z0-9._/-]+-tests", ref)):
+        raise ValueError("rolling base requires the matching protected Release verification workflow")
     run, attempt = env.get("GITHUB_RUN_ID", ""), env.get("GITHUB_RUN_ATTEMPT", "")
     if not all(re.fullmatch(r"[1-9][0-9]*", value) for value in (run, attempt)):
         raise ValueError("rolling base requires a valid publisher run and attempt")
     event = env["GITHUB_EVENT_NAME"]
     record = publisher_run(run, attempt, workflow, request)
     run_sha = record["head_sha"]
-    if (record["event"] != event or "refs/heads/" + record["head_branch"] != workflow_ref
-            or run_sha != env.get("GITHUB_SHA") or (not manual_dev and run_sha != args.source_commit)):
+    if (record["event"] != event or "refs/heads/" + record["head_branch"] != ref
+            or run_sha != env.get("GITHUB_SHA") or run_sha != args.source_commit):
         raise ValueError("publisher event commit differs from the checked-out source")
-    if manual_dev:
-        if (not re.fullmatch(r"refs/heads/(?:dev|integration-[A-Za-z0-9._/-]+)", workflow_ref)
-                or any(env.get(name) != "loning" for name in ("GITHUB_ACTOR", "GITHUB_TRIGGERING_ACTOR"))
-                or any(record[name]["login"] != "loning" for name in ("actor", "triggering_actor"))):
-            raise ValueError("manual dev Release requires the authorized actor and protected workflow ref")
-        inputs = json.loads(pathlib.Path(env["GITHUB_EVENT_PATH"]).read_bytes())["inputs"]
-        if (inputs.get("operation"), inputs.get("source_ref"), inputs.get("source_sha")) != (
-                "release", ref, args.source_commit):
-            raise ValueError("manual Release event does not select the requested dev source")
-        if workflow_ref != ref or run_sha != args.source_commit:
-            validate_source_ref(REPO, workflow_ref, run_sha, request)
     git = ["git", "-C", str(args.repository)]
     head = checked_run([*git, "rev-parse", "--verify", "HEAD"], deadline).stdout.strip()
     dirty = checked_run([*git, "status", "--porcelain", "--untracked-files=normal"], deadline).stdout
@@ -1586,29 +1569,13 @@ def rolling_source(args, deadline, request):
 
 def rolling_producer(manifest, args, workflow, events, request):
     producer = manifest["producer_commit_sha"]
-    verification = args.mode == "verification"
-    if manifest.get("source_ref") != (args.source_ref if verification else None):
+    if manifest.get("source_ref") != args.source_ref or not manifest["publication_id"].startswith("ci-"):
         return False
-    if manifest["publication_id"].startswith("ci-"):
-        run = manifest["workflow_run_id"]
-        attempt = manifest["workflow_run_attempt"]
-        prior = publisher_run(run, attempt, workflow, request)
-        if prior["event"] not in events:
-            return False
-        prior_ref = "refs/heads/" + prior["head_branch"]
-        if not verification and prior["event"] == "workflow_dispatch":
-            if (not re.fullmatch(r"refs/heads/(?:dev|integration-[A-Za-z0-9._/-]+)", prior_ref)
-                    or any(prior[name]["login"] != "loning" for name in ("actor", "triggering_actor"))):
-                return False
-            # GitHub does not expose historical dispatch inputs in the run response.
-            # Bind its manifest to the authorized workflow and a protected dev ancestor.
-            validate_source_ref(REPO, prior_ref, prior["head_sha"], request)
-        elif prior_ref != args.source_ref:
-            return False
-        elif prior["head_sha"] != producer:
-            raise ValueError("published manifest producer differs from its workflow run")
-    elif verification:
+    prior = publisher_run(manifest["workflow_run_id"], manifest["workflow_run_attempt"], workflow, request)
+    if prior["event"] not in events or "refs/heads/" + prior["head_branch"] != args.source_ref:
         return False
+    if prior["head_sha"] != producer:
+        raise ValueError("published manifest producer differs from its workflow run")
     comparison = request(f"repos/{REPO}/compare/{producer}...{args.source_commit}")
     status = comparison["status"]
     if status in ("behind", "diverged"):
