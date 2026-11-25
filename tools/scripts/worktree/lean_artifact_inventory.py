@@ -33,6 +33,7 @@ class Module:
     source: Path
     build: Path
     extra_builds: tuple[Path, ...] = ()
+    conditional_backends: bool = False
 
 
 @dataclass(frozen=True)

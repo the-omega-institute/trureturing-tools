@@ -1,6 +1,7 @@
 """Plan stable namespace shards and transport the compiler outputs of their member modules."""
 
 from collections import defaultdict
+from dataclasses import replace
 import gzip
 import io
 import json
@@ -90,7 +91,7 @@ def verify_backend_hashes(root, build, modules, grouped):
     """Check every compiler variant of paired modules using the portable reader's Lake hasher."""
     hashes = {}
     for name, module in modules.items():
-        if not module.extra_builds:
+        if not (module.extra_builds or module.conditional_backends):
             continue
         for variant in compiler_variants(module):
             trace = compiler_path(name, variant, 'lib/lean', 'trace')
@@ -162,7 +163,7 @@ def pack_shard(root, modules, members, output, fingerprint):
                 raise ValueError('unsafe compiler artifact: ' + str(path))
             if file.is_file():
                 paths.add(path)
-                if module.extra_builds:
+                if module.extra_builds or module.conditional_backends:
                     verified_files[path.as_posix()] = file_identity(file.stat())
         grouped[name] = paths
     check_outputs(build, selected, grouped)
@@ -232,6 +233,7 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
                 raise ValueError('shard manifest differs from the version index')
             owners = {}
             grouped = {}
+            selected = {}
             for name, row in manifest.items():
                 if not NAME.fullmatch(name):
                     raise ValueError('invalid archived module name')
@@ -239,8 +241,15 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
                 module = Module('', Path(), Path(row['build']), extra_builds)
                 if len(set((module.build, *extra_builds))) != 1 + len(extra_builds):
                     raise ValueError('duplicate compiler build path: ' + name)
-                if name in wanted and (module.build, extra_builds) != (modules[name].build, modules[name].extra_builds):
-                    raise ValueError('module build path differs from the checkout: ' + name)
+                if name in wanted:
+                    expected = modules[name]
+                    # Identical checkout inputs may yield just the official variant when
+                    # the producer read a Mathlib-only marker from the compiled closure.
+                    if expected.conditional_backends and not extra_builds:
+                        expected = replace(expected, extra_builds=())
+                    if (module.build, extra_builds) != (expected.build, expected.extra_builds):
+                        raise ValueError('module build path differs from the checkout: ' + name)
+                    selected[name] = expected
                 paths = {safe_path(p) for p in row['paths']}
                 if (not paths or len(paths) != len(row['paths']) or not paths <= lean_artifact_paths(name, module)
                         or owners.keys() & paths):
@@ -262,7 +271,6 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
             if owners:
                 raise ValueError('shard omits indexed compiler artifacts')
 
-        selected = {n: modules[n] for n in wanted}
         check_outputs(stage, selected, grouped)
         verify_backend_hashes(root, stage, selected, grouped)
         install = set()
@@ -277,7 +285,7 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
                     missing.add(path)
                 elif not live.is_file():
                     break
-                elif module.extra_builds and path.suffix == '.trace':
+                elif (module.extra_builds or module.conditional_backends) and path.suffix == '.trace':
                     if not traces_match(live, stage / path):
                         break
                 elif archive_sha(live, None) != archive_sha(stage / path, None):
@@ -286,4 +294,5 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
                 install.update(missing)
                 restored.add(name)
         install_scoped(destination, stage, install, None)
+        modules.update({n: selected[n] for n in restored})
     return restored

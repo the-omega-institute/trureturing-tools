@@ -65,12 +65,19 @@ def omega_build_plan(root, modules, graph):
         strict_modules[name] = replace(modules[name], source=source)
     strict_graph = dict(graph)
     strict_graph.update(inventory.project_imports(root, strict_modules, sources=sorted(basis)))
+    # The command is a Lean elaborator. Its import makes selection possible;
+    # only the official compiled metadata can say that it was actually invoked.
+    command = 'OmegaBuild.Commands'
+    may_select = {command}
+    for name in TopologicalSorter(graph).static_order():
+        if graph[name] & may_select:
+            may_select.add(name)
     touched = {}
     for name in TopologicalSorter(strict_graph).static_order():
-        touched[name] = namespace(name) in OMEGA_LIBRARIES or any(touched[dep] for dep in strict_graph[name])
+        touched[name] = namespace(name) in OMEGA_LIBRARIES or name == command or any(touched[dep] for dep in strict_graph[name])
     # The strict check builds all Omega library and check modules. The dual
     # compilation also builds every downstream consumer and its local imports.
-    consumers = {n for n in strict_graph if touched[n] and namespace(n) != 'OmegaChecks'}
+    consumers = {n for n in strict_graph if touched[n] and namespace(n) not in {'OmegaChecks', 'OmegaBuild'}}
     strict = inventory.import_closure(strict_graph, consumers | omega_roots(root, modules))
     clients = {n for n in strict_graph if n.startswith('OmegaChecks.Portable.') and touched[n]}
     common_roots = basis | clients | ({OMEGA_CERTIFICATE} & graph.keys())
@@ -102,7 +109,10 @@ def omega_build_plan(root, modules, graph):
         if name in common:
             builds.append(omega_build_dir(module, OMEGA_OVERLAYS[1]))
             values.extend([str(builds[1]), common_inputs])
-        augmented[name] = replace(module, extra_builds=tuple(builds))
+        conditional = name != command and name in may_select
+        if conditional:
+            values.append('compiled-backend-selection-v1')
+        augmented[name] = replace(module, extra_builds=tuple(builds), conditional_backends=conditional)
         inputs[name] = values
     return augmented, {n: graph[n] | (strict_graph[n] if n in strict else set()) for n in graph}, inputs
 
@@ -137,7 +147,6 @@ def compile_omega_outputs(root, modules, names, common_prepared):
     strict = {n for n in names if modules[n].extra_builds}
     if not strict:
         return common_prepared
-    common = {n for n in strict if len(modules[n].extra_builds) == 2}
     # The overlay configuration is owned by the consumer checkout. Use the
     # same implementation that the Omega audit uses for the real Lake builds.
     sys.path.insert(0, str(root / OMEGA_CHECKS))
@@ -146,6 +155,18 @@ def compile_omega_outputs(root, modules, names, common_prepared):
         portable = importlib.import_module('portable')
         if strict_lake.ROOT != root.resolve() or portable.ROOT != root.resolve():
             raise ValueError('Omega overlay loaded from another checkout')
+        candidates = sorted(n for n in strict if modules[n].conditional_backends)
+        for offset in range(0, len(candidates), 128):
+            batch = candidates[offset:offset + 128]
+            lake, _ = strict_lake.lake_layout(False, any(modules[n].package != 'trureturing' for n in batch))
+            search_path = portable.output(*lake, 'env', 'printenv', 'LEAN_PATH').strip()
+            skipped = portable.backend_plan(search_path, batch)['mathlibOnly']
+            for name in skipped:
+                modules[name] = replace(modules[name], extra_builds=())
+            strict.difference_update(skipped)
+        if not strict:
+            return common_prepared
+        common = {n for n in strict if len(modules[n].extra_builds) == 2}
         lake, _ = strict_lake.lake_layout(True, any(modules[n].package != 'trureturing' for n in strict))
         build_omega_targets(root, lake, modules, strict)
         if common:
