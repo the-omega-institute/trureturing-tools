@@ -99,6 +99,15 @@ def omega_build_plan(root, modules, graph):
                              for n in sorted(basis)],
                             [(str(p), file_digest(root / p)) for p in
                              (OMEGA_CHECKS / 'portable.py', OMEGA_CHECKS / 'Portable/Exports.lean')]])
+    # The cache records the layouts chosen by this checkout's compiled planner.
+    # Follow its own imports even when none of the released modules imports it.
+    conditional_modules = (strict & may_select) - {command}
+    if conditional_modules:
+        reader = compiler.scoped_imports(root, modules, {'OmegaBuild.Plan'})
+        selection_inputs = digest([
+            file_digest(root / OMEGA_CHECKS / 'portable.py'),
+            [(name, file_digest(root / modules[name].source)) for name in sorted(reader)],
+        ])
     augmented = dict(modules)
     inputs = {}
     for name in strict:
@@ -109,9 +118,9 @@ def omega_build_plan(root, modules, graph):
         if name in common:
             builds.append(omega_build_dir(module, OMEGA_OVERLAYS[1]))
             values.extend([str(builds[1]), common_inputs])
-        conditional = name != command and name in may_select
+        conditional = name in conditional_modules
         if conditional:
-            values.append('compiled-backend-selection-v1')
+            values.append(selection_inputs)
         augmented[name] = replace(module, extra_builds=tuple(builds), conditional_backends=conditional)
         inputs[name] = values
     return augmented, {n: graph[n] | (strict_graph[n] if n in strict else set()) for n in graph}, inputs

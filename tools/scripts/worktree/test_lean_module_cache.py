@@ -319,6 +319,11 @@ def main : IO Unit := do
         self.modules[name] = Module('trureturing', source, Path('.'))
         (self.root / source).parent.mkdir(parents=True)
         (self.root / source).write_text('def commandProvider := true\n')
+        for reader_name, code in [('OmegaBuild.Plan', 'import OmegaBuild.Parts'),
+                                  ('OmegaBuild.Parts', 'def planSetting := 1')]:
+            source = Path('src', *reader_name.split('.')).with_suffix('.lean')
+            self.modules[reader_name] = Module('trureturing', source, Path('.'))
+            (self.root / source).write_text(code + '\n')
         marked = self.root / 'D5/A.lean'
         marked.write_text('import OmegaBuild.Commands\nimport OmegaMathlib\ndef valueA := omegaValue\n')
         (self.root / 'D5/B.lean').write_text('import OmegaBuild.Commands\ndef valueB := commandProvider\n')
@@ -353,6 +358,17 @@ def main : IO Unit := do
             self.assertFalse((build / 'omega-strict' / base).exists())
             self.assertFalse((build / 'omega-common' / base).exists())
         self.assertTrue((build / 'omega-strict/lib/lean/D5/B.olean').is_file())
+        for filename in ('src/OmegaBuild/Plan.lean', 'src/OmegaBuild/Parts.lean', 'src/OmegaChecks/portable.py'):
+            reader_file = self.root / filename
+            original = reader_file.read_bytes()
+            reader_file.write_bytes(original + b'\n')
+            changed = self.plan(index)
+            for name in set(reasons) | {'D5.B'}:
+                self.assertNotEqual(changed['targets'][name]['key'], plan['targets'][name]['key'])
+            stale = self.root / ('stale-' + reader_file.name)
+            cache.restore(self.root, index, ['D5.C'], self.remote, stale)
+            self.assertFalse((stale / 'lib/lean/D5/C.olean').exists())
+            reader_file.write_bytes(original)
         self.source = 'b' * 40
         marked.write_text(marked.read_text().replace('def valueA', '-- removed marker\ndef valueA'))
         reasons.clear()
