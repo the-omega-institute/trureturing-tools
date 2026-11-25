@@ -57,18 +57,20 @@ def utility_inputs(root):
     return {row['modulePath']: row for row in rows}
 
 
-def all_targets(root, module_rows=None):
+def all_targets(root, module_rows=None, *, include_reports=True):
     targets = dict(module_targets(root) if module_rows is None else module_rows)
+    for exe, (package, main, _) in PROGRAMS.items():
+        name = 'native/' + exe
+        deps = [main]
+        targets[name] = {'key': digest(['native-v1', binary_platform(), package, exe, targets[main]['key']]), 'deps': deps}
+    if not include_reports:
+        return targets
     selection = report_selection.Selection(root)
     # The module facet traces its compiler exports, claim inputs and report
     # format. Aggregate configuration and production provenance have their
     # own checks when the report is consumed.
     report_format = report_selection.REPORT_FORMAT
     utilities = utility_inputs(root)
-    for exe, (package, main, _) in PROGRAMS.items():
-        name = 'native/' + exe
-        deps = [main]
-        targets[name] = {'key': digest(['native-v1', binary_platform(), package, exe, targets[main]['key']]), 'deps': deps}
     # A module cannot contain typed registration inputs without the contract
     # types in its import closure. These are the same runtime roots used by
     # scoped report preparation.

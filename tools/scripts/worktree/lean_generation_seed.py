@@ -1,6 +1,7 @@
 """Migrate a pinned protected-dev Actions shard index into checked target frames."""
 
 import argparse
+import ast
 from collections import defaultdict
 import hashlib
 import json
@@ -18,7 +19,7 @@ import lean_compile_layers as compiler
 import lean_generation_checkpoints as checkpoints
 from lean_cache_generation import stage_frames
 from lean_cache_release_io import archive_sha
-from lean_generation_facets import all_targets, facet_paths, report_has_inputs, use_known_projections
+from lean_generation_facets import all_targets, facet_paths, report_has_inputs, report_publication, use_known_projections
 from lean_generation_index import matches, read
 from lean_generation_plan import module_targets, package_inputs, write
 from lean_release_index import safe_path, write_frame
@@ -43,6 +44,20 @@ def pinned_seed(seed, directory):
     return descriptor, record
 
 
+def seed_report_schema(seed):
+    # Read the schema declared by the installed producer without executing its code.
+    producer = seed / "tools/lean-inspector/materials.py"
+    try:
+        statements = ast.parse(producer.read_bytes()).body
+    except (FileNotFoundError, SyntaxError):
+        return None
+    for stmt in statements:
+        match stmt:
+            case ast.Assign(targets=[ast.Name(id="REPORT_SCHEMA")], value=ast.Constant(value=str() as schema)):
+                return schema
+    return None
+
+
 def shareable(seed, root, record):
     modules = inventory.workspace_modules(seed)
     graph = inventory.project_imports(seed, modules)
@@ -50,7 +65,8 @@ def shareable(seed, root, record):
     required = legacy.required_outputs(seed, modules, graph, owners)
     if required != record["required"]:
         raise ValueError("seed required outputs differ from its producer's target inventory")
-    before = all_targets(seed, module_targets(seed, modules, graph))
+    before = all_targets(seed, module_targets(seed, modules, graph),
+                         include_reports=seed_report_schema(seed) == report_publication.materials.REPORT_SCHEMA)
     after = all_targets(root)
     groups = defaultdict(dict)
     for name in before.keys() & after.keys():
