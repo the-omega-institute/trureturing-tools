@@ -22,7 +22,7 @@ internal static class FrozenDependencyMeasurement
         {
             var request = Path.Combine(temporary.FullName, "request.json");
             var output = Path.Combine(temporary.FullName, "response.json");
-            foreach (var batch in reports.Keys.Chunk(32))
+            foreach (var batch in reports.Keys.Chunk(16))
             {
                 var expected = batch.ToDictionary(LeanImportClosure.ModuleName, StringComparer.Ordinal);
                 File.WriteAllBytes(request, JsonSerializer.SerializeToUtf8Bytes(expected.Keys));
