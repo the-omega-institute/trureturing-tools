@@ -133,6 +133,15 @@ class ModuleReleases(unittest.TestCase):
         self.assertTrue((destination/'lib/lean/D5/A.olean').is_file())
         self.assertFalse((destination/'lean-inspector/modules/D5.A.zip').exists())
 
+        # The example is a consumer of the requested source and cannot be found through its imports.
+        def example_scope(root, subset, *, scope_inputs):
+            scope_inputs['D5/A.lean'] = ['D5.C']
+            return {'D5/A.lean': utility}
+        with patch.object(facets, 'utility_inputs', side_effect=example_scope):
+            expanded = cache.restore(self.root, index, ['D5.A'], self.remote, self.root / 'example-scope')
+            self.assertEqual(expanded['requested'], 2)
+            self.assertTrue((self.root / 'example-scope/lib/lean/D5/C.olean').is_file())
+
         with patch.object(facets, 'utility_inputs', side_effect=FileNotFoundError('dotnet')) as reader:
             plain = cache.restore(self.root, index, ['D5.B'], self.remote, self.root / 'ordinary')
             self.assertEqual(plain['restored'], 1)

@@ -47,16 +47,18 @@ def facet_paths(name):
     return path, path + '.hash', path + '.trace'
 
 
-def utility_inputs(root, requested=None):
+def utility_inputs(root, requested=None, *, scope_inputs=None):
     project = 'tools/StrataLint.Lean/StrataLint.Lean.csproj'
     # Run the snapshot's own utility parser to bind claims outside Lean imports.
     subprocess.run(['dotnet', 'build', project, '-c', 'Release', '--nologo',
                     '--verbosity', 'quiet'], cwd=root, check=True, stdout=subprocess.DEVNULL)
     dll = 'tools/StrataLint.Lean/bin/Release/net10.0/StrataLint.Lean.dll'
     command = ['dotnet', dll, 'lean-utility-input']
-    if requested is not None:
-        command.extend(['--targets', ' '.join(sorted(requested))])
-    rows = json.loads(subprocess.check_output(command, cwd=root))
+    args = [] if requested is None else ['--targets', ' '.join(sorted(requested))]
+    if scope_inputs is not None:
+        references = json.loads(subprocess.check_output([*command, '--scope', *args], cwd=root))
+        scope_inputs.update((row['modulePath'], row['inputModules']) for row in references)
+    rows = json.loads(subprocess.check_output([*command, *args], cwd=root))
     return {row['modulePath']: row for row in rows}
 
 

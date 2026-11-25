@@ -245,19 +245,25 @@ module_facet report (mod : Module) : System.FilePath := withCurrPackage mod.pkg 
                     pack_shard(self.root, self.modules, [name], self.root/'bad.tar.gz', 'c'*64)
         path.write_text(json.dumps(dict(native_trace, synthetic=True, inputs=[])))
         pack_shard(self.root, self.modules, [name], self.root/'synthetic.tar.gz', 'd'*64)
+        duplicate = '{"inputs":false,' + json.dumps(native_trace)[1:]
+        path.write_text(duplicate)
+        with self.assertRaisesRegex(ValueError, 'duplicate JSON field'):
+            pack_shard(self.root, self.modules, [name], self.root/'duplicate.tar.gz', 'c'*64)
         path.write_text(json.dumps(native_trace))
-        dest = self.root / 'conflict'
-        (dest / relative).parent.mkdir(parents=True)
-        invalid_live = json.dumps(dict(native_trace, inputs='malformed'))
-        (dest / relative).write_text(invalid_live)
-        hits = set()
-        self.assertEqual(restore_shard(self.archive, descriptor, [name], self.modules, dest,
-                                       root=self.root, compiler_hits=hits), set())
-        self.assertEqual(hits, {name})
-        self.assertTrue((dest/'lib/lean/Demo/A.olean').is_file())
-        self.assertEqual((dest / relative).read_text(), invalid_live)
-        self.assertFalse((dest / report_paths(name)[0]).exists())
-        self.assertFalse((dest / report_paths(name)[1]).exists())
+        for label, invalid_live in [('malformed', json.dumps(dict(native_trace, inputs='malformed'))),
+                                    ('duplicate', duplicate)]:
+            with self.subTest(local=label):
+                dest = self.root / label
+                (dest / relative).parent.mkdir(parents=True)
+                (dest / relative).write_text(invalid_live)
+                hits = set()
+                self.assertEqual(restore_shard(self.archive, descriptor, [name], self.modules, dest,
+                                               root=self.root, compiler_hits=hits), set())
+                self.assertEqual(hits, {name})
+                self.assertTrue((dest/'lib/lean/Demo/A.olean').is_file())
+                self.assertEqual((dest / relative).read_text(), invalid_live)
+                self.assertFalse((dest / report_paths(name)[0]).exists())
+                self.assertFalse((dest / report_paths(name)[1]).exists())
 
     def test_crossed_missing_unsafe_and_corrupt_report_material(self):
         name = 'Demo.A'

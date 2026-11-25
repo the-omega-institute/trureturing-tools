@@ -160,7 +160,7 @@ def compile_omega_outputs(root, modules, names, common_prepared):
     return common_prepared
 
 
-def checkout_targets(root, *, requested=None, restore_only=False):
+def checkout_targets(root, *, requested=None, restore_only=False, scope_roots=None):
     modules = inventory.workspace_modules(root)
     roots = inventory.release_roots(modules) | omega_roots(root, modules)
     graph = compiler.scoped_imports(root, modules, roots)
@@ -179,9 +179,17 @@ def checkout_targets(root, *, requested=None, restore_only=False):
         selected = {n: reported[n] for n in reported.keys() & wanted}
         if selected:
             # The CLI accepts an explicit scope. Large selections use one snapshot parse.
-            subset = sorted(selected) if requested is not None and sum(len(n)+1 for n in selected) < 64000 else None
+            roots = set(requested or ()) & selected.keys()
+            scope_inputs = {} if roots and scope_roots is not None else None
+            subset = sorted(selected) if requested is not None and sum(len(n) + 1 for n in selected) < 64000 else None
             try:
-                utilities = utility_inputs(root, subset)
+                utilities = utility_inputs(root, subset, scope_inputs=scope_inputs)
+                if scope_inputs is not None:
+                    # Match the scoped inspector's utility references on explicitly requested roots.
+                    for name in roots:
+                        scope_roots.update(scope_inputs.get(reported[name], ()))
+                    wanted |= inventory.import_closure(graph, scope_roots & scope)
+                    selected = {n: reported[n] for n in reported.keys() & wanted}
             except (OSError, subprocess.CalledProcessError) as error:
                 if not restore_only:
                     raise
@@ -521,9 +529,10 @@ def finish(plan, remote):
 
 
 def restore(root, index, requested, remote, destination):
-    modules, targets = checkout_targets(root, requested=requested, restore_only=True)
+    roots = set(requested or ())
+    modules, targets = checkout_targets(root, requested=requested, restore_only=True, scope_roots=roots)
     graph = {n: row['deps'] for n, row in targets.items()}
-    wanted = inventory.import_closure(graph, set(requested) & targets.keys()) if requested is not None else set(targets)
+    wanted = inventory.import_closure(graph, roots & targets.keys()) if requested is not None else set(targets)
     prerequisites = {d for n in wanted for d in targets[n].get('report_inputs', ()) if d in graph}
     supporting = inventory.import_closure(graph, prerequisites) - wanted
     seeds = set()

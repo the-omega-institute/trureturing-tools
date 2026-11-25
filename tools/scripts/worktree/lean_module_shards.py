@@ -15,7 +15,7 @@ import tempfile
 import zipfile
 
 from lean_artifact_inventory import Module, PROJECT_BUILD, compiler_path, compiler_variants, lean_artifact_paths
-from lean_cache_release import has_unsafe_parent, install_scoped
+from lean_cache_release import has_unsafe_parent, install_scoped, report_selection
 from lean_cache_release_io import archive_sha, copy_chunks
 from lean_compile_layers import check_outputs
 from lean_release_index import safe_path, valid_digest
@@ -94,6 +94,10 @@ def report_paths(name):
     return tuple(directory / (name + suffix) for suffix in ('.zip', '.zip.hash', '.zip.trace'))
 
 
+def read_trace(path):
+    return json.loads(path.read_bytes(), object_pairs_hook=report_selection.unique_object)
+
+
 def inspector_publication():
     # Compiler-only consumers can run from a reduced transport-tools installation.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'lean-inspector'))
@@ -126,7 +130,7 @@ def check_report_utility(root, name, row, module, public):
 def verify_report(root, build, name, module, hashes):
     archive, sidecar, trace = report_paths(name)
     public = inspector_publication()
-    document = public.read_json((build / trace).read_bytes())
+    document = read_trace(build / trace)
     output = document.get('outputs') if isinstance(document, dict) else None
     if (not isinstance(output, str) or not re.fullmatch(r'[0-9a-f]{16}\.zip', output)
             or not isinstance(document.get('depHash'), str) or not re.fullmatch(r'[0-9a-f]{16}', document['depHash'])
@@ -170,7 +174,7 @@ def verify_backend_hashes(root, build, modules, grouped, *, destination=None):
             continue
         for variant in compiler_variants(module):
             trace = compiler_path(name, variant, 'lib/lean', 'trace')
-            outputs = json.loads((build / trace).read_bytes())['outputs']
+            outputs = read_trace(build / trace)['outputs']
             descriptors = dict(zip(('olean', 'olean.server', 'olean.private'), outputs['o']))
             descriptors.update(ilean=outputs['i'], c=outputs['c'])
             for key, suffix in (('rs', 'ir.sig'), ('r', 'ir'), ('b', 'bc')):
@@ -216,10 +220,10 @@ def file_identity(info):
 def traces_match(live, staged):
     # Lake records checkout-specific paths in the diagnostic inputs and log.
     try:
-        current = json.loads(live.read_bytes())
+        current = read_trace(live)
     except ValueError:
         return False
-    published = json.loads(staged.read_bytes())
+    published = read_trace(staged)
     return (isinstance(current, dict) and isinstance(published.get('depHash'), str)
             and all(current.get(key) == published.get(key) for key in ('schemaVersion', 'depHash', 'outputs')))
 
