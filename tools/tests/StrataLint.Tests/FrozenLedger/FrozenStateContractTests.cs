@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Text;
 using StrataLint.Engine;
+using Trureturing.Truth;
 
 namespace StrataLint.Tests;
 
@@ -85,6 +86,85 @@ public sealed class FrozenStateContractTests
         Assert.Empty(record.Declarations[1].Libraries!.Value);
         Assert.Empty(record.Declarations[1].Axioms!.Value);
         Assert.Equal(Encoding.UTF8.GetBytes(text), FrozenStateRecord.Encode(record.StatementId, record.Declarations).ToArray());
+    }
+
+    [Fact]
+    public void PairedRecordRoundTripsFullOfficialAndEmptyStrictAxiomArrays()
+    {
+        const string key = "ns(n0,1:a)";
+        using var temporary = new TemporaryDirectory();
+        var strict = new StrictOmegaMeasurement(key, "theorem", Pin, "sha256:" + new string('b', 64),
+            ["OmegaInit", "OmegaMath"], []);
+        var declarations = ImmutableArray.Create(new FrozenDeclaration(key, "theorem", ["Init", "OmegaMath"],
+            ["Classical.choice", "Quot.sound", "propext"], strict), new FrozenDeclaration("ns(n0,1:b)", "theorem"));
+        var module = RepoPath.CreateKnown("D5/S0/Carrier/Probe.lean");
+        Assert.True(FrozenStateWriter.Write(temporary.Path, module, StatementId.Create(Pin), declarations));
+        var text = System.IO.File.ReadAllText(System.IO.Path.Combine(temporary.Path, Path));
+        var read = FrozenStateRecordLoader.Load(File(text));
+        var measured = read.Declarations[0];
+        Assert.Equal(declarations[0].Axioms!.Value.ToArray(), measured.Axioms!.Value.ToArray());
+        Assert.Equal(strict.StatementTypeAddress, measured.StrictOmega!.StatementTypeAddress);
+        Assert.Equal(strict.OfficialStatementTypeAddress, measured.StrictOmega.OfficialStatementTypeAddress);
+        Assert.Equal(strict.Libraries.ToArray(), measured.StrictOmega.Libraries.ToArray());
+        Assert.Empty(measured.StrictOmega.Axioms);
+        Assert.Null(read.Declarations[1].StrictOmega);
+        Assert.False(FrozenStateWriter.Write(temporary.Path, module, read.StatementId, read.Declarations));
+    }
+
+    [Theory]
+    [InlineData("name")]
+    [InlineData("kind")]
+    [InlineData("address")]
+    [InlineData("official-address")]
+    [InlineData("missing-axioms")]
+    [InlineData("extra-field")]
+    [InlineData("null-libraries")]
+    [InlineData("duplicate-axioms")]
+    [InlineData("missing-primary")]
+    public void RejectsInvalidPairedRecords(string defect)
+    {
+        const string key = "ns(n0,1:a)";
+        var strict = new StrictOmegaMeasurement(key, "theorem", Pin, Pin, ["OmegaMath"], []);
+        var canonical = FrozenStateRecord.Encode(StatementId.Create(Pin), [new(key, "theorem", [], [], strict)]);
+        var root = System.Text.Json.Nodes.JsonNode.Parse(Encoding.UTF8.GetString(canonical.AsSpan()))!;
+        var declaration = root["declarations"]![0]!.AsObject();
+        var nested = declaration["strict_omega"]!.AsObject();
+        switch (defect)
+        {
+            case "name": nested["declaration_name_key"] = "ns(n0,1:b)"; break;
+            case "kind": nested["kind"] = "def"; break;
+            case "address": nested["statement_type_address"] = "sha256:bad"; break;
+            case "official-address": nested["official_statement_type_address"] = "sha256:bad"; break;
+            case "missing-axioms": nested.Remove("axioms"); break;
+            case "extra-field": nested["replayed"] = true; break;
+            case "null-libraries": nested["libraries"] = null; break;
+            case "duplicate-axioms": nested["axioms"] = new System.Text.Json.Nodes.JsonArray("propext", "propext"); break;
+            case "missing-primary": declaration.Remove("axioms"); break;
+        }
+        Assert.Throws<FormatException>(() => FrozenStateRecordLoader.Load(File(root.ToJsonString() + "\n")));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CurrentStateChecksPairedOfficialStatementAddress(bool stale)
+    {
+        var fixture = new RuleFixture();
+        const string module = "D5/S0/Carrier/Probe.lean";
+        fixture.Files[module] = "theorem probe : True := by trivial\n";
+        var declaration = new LeanDeclaration("probe", "theorem", "True", ["propext"]) { NameKey = "ns(n0,5:probe)" };
+        var report = new LeanFileReport([], [declaration]);
+        fixture.Reports[module] = report;
+        var pin = FrozenContentAddress.ComputeModuleStatementId(RepoPath.CreateKnown(module), report);
+        var strict = new StrictOmegaMeasurement(declaration.NameKey, declaration.Kind, Pin,
+            stale ? Pin : declaration.StatementTypeAddress, ["OmegaMath"], []);
+        fixture.Files[Path] = Encoding.UTF8.GetString(FrozenStateRecord.Encode(pin,
+            [new(declaration.NameKey, declaration.Kind, ["Init", "OmegaMath"], ["propext"], strict)]).AsSpan());
+        var result = RuleCatalog.Default.EvaluateSingle(RuleId.CreateKnown(8), fixture.Build(RawChangeSet.Create([Path])));
+        if (stale)
+            Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Message.Contains("strict_omega official statement address", StringComparison.Ordinal));
+        else
+            Assert.Empty(result.Diagnostics);
     }
 
     [Theory]

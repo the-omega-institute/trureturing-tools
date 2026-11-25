@@ -12,7 +12,9 @@ internal sealed record FrozenDeclaration(
     [property: JsonPropertyName("libraries"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     ImmutableArray<string>? Libraries = null,
     [property: JsonPropertyName("axioms"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    ImmutableArray<string>? Axioms = null)
+    ImmutableArray<string>? Axioms = null,
+    [property: JsonPropertyName("strict_omega"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    StrictOmegaMeasurement? StrictOmega = null)
 {
     internal (string NameKey, string Kind) Identity => (DeclarationNameKey, Kind);
 }
@@ -31,6 +33,20 @@ internal sealed record FrozenStateRecord(StatementId StatementId, ImmutableArray
     internal bool HasInventory(ImmutableArray<FrozenDeclaration> declarations) =>
         Declarations.Select(static declaration => declaration.Identity)
             .SequenceEqual(declarations.Select(static declaration => declaration.Identity));
+
+    internal void ValidatePairedStatements(LeanFileReport report)
+    {
+        if (!Declarations.Any(static declaration => declaration.StrictOmega is not null)) return;
+        var current = report.Declarations.Where(static declaration => declaration.IncludeInStatement)
+            .ToDictionary(static declaration => (declaration.NameKey, declaration.Kind));
+        foreach (var declaration in Declarations)
+        {
+            if (declaration.StrictOmega is { } strict
+                && (!current.TryGetValue(declaration.Identity, out var official)
+                    || strict.OfficialStatementTypeAddress != official.StatementTypeAddress))
+                throw new FormatException($"strict_omega official statement address does not match current report: {declaration.DeclarationNameKey}");
+        }
+    }
 
     internal static ImmutableArray<byte> Encode(StatementId statementId,
         ImmutableArray<FrozenDeclaration> declarations = default)
@@ -57,8 +73,15 @@ internal sealed record FrozenStateRecord(StatementId StatementId, ImmutableArray
             if (declaration.Axioms is { } axioms)
             {
                 ValidateSet(axioms, "axioms");
-                if (axioms.Length >= LeanAxiomFacts.StandardAxioms.Count || axioms.Any(axiom => !LeanAxiomFacts.IsStandard(axiom)))
-                    throw new FormatException("axioms must be a proper subset of the standard Lean axioms");
+                if (axioms.Any(axiom => !LeanAxiomFacts.IsStandard(axiom))
+                    || axioms.Length == LeanAxiomFacts.StandardAxioms.Count && declaration.Libraries is null)
+                    throw new FormatException("axioms must be standard Lean axioms and a full measured set requires libraries");
+            }
+            if (declaration.StrictOmega is { } strict)
+            {
+                if (declaration.Libraries is null || declaration.Axioms is null)
+                    throw new FormatException("strict_omega requires measured official libraries and axioms");
+                strict.RequireValid(declaration.DeclarationNameKey, declaration.Kind);
             }
             if (previous is not null)
             {
@@ -126,12 +149,13 @@ internal static class FrozenStateRecordLoader
             var declarations = ImmutableArray.CreateBuilder<FrozenDeclaration>();
             foreach (var item in array.EnumerateArray())
             {
-                RequireKeys(item, ["declaration_name_key", "kind"], "declaration", ["libraries", "axioms"]);
+                RequireKeys(item, ["declaration_name_key", "kind"], "declaration", ["libraries", "axioms", "strict_omega"]);
                 if (item.GetProperty("declaration_name_key").ValueKind is not JsonValueKind.String
                     || item.GetProperty("kind").ValueKind is not JsonValueKind.String)
                     throw new FormatException("declaration fields must be strings");
                 declarations.Add(new(item.GetProperty("declaration_name_key").GetString()!, item.GetProperty("kind").GetString()!,
-                    OptionalSet(item, "libraries"), OptionalSet(item, "axioms")));
+                    OptionalSet(item, "libraries"), OptionalSet(item, "axioms"),
+                    item.TryGetProperty("strict_omega", out var strict) ? StrictOmegaMeasurement.Read(strict) : null));
             }
             var record = new FrozenStateRecord(StatementId.Create(value), declarations.ToImmutable());
             if (!bytes.SequenceEqual(FrozenStateRecord.Encode(record.StatementId, record.Declarations).AsSpan()))
