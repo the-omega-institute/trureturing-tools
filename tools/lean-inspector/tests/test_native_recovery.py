@@ -281,9 +281,9 @@ class NativeBatchCapacityConsumerTests:
         self.assertGreaterEqual(prepare('--regenerate')['report'], len(expected))
 
 class NativeRecoveryConsumerTests:
-    def _exercise_chunk_durability(self, interruption):
+    def _exercise_chunk_durability(self, interruption, extra_modules=100):
         # More than one real native chunk, with the existing four fixture roots.
-        for index in range(100):
+        for index in range(extra_modules):
             self.write(f'D5/Durable{index:03}.lean', f'def durable{index:03} : Nat := {index}\n')
         fixture = self.root / 'Fixture.lean'
         fixture.write_text(fixture.read_text() + '\nnamespace LeanInformationAudit.Contract\n'
@@ -311,12 +311,14 @@ class NativeRecoveryConsumerTests:
         result = self.build(success=False)
         state = self.root / '.lake/build/lean-inspector'
         names = json.loads((state / 'module-inputs.json').read_text())['modules']
-        self.assertEqual(len(names), 104)
+        self.assertEqual(len(names), extra_modules + 4)
         first = sorted(name for name in names if name != 'Fixture')
         remaining = ['Fixture']
         projection = json.loads((state / 'judge-inputs/Fixture.json').read_text())
         self.assertEqual([row['name'] for row in projection['inputs']], ['durabilityInput'])
-        self.assertIn('Fixture', json.loads((self.root / 'interrupted-chunk.json').read_text()))
+        interrupted = self.root / 'interrupted-chunk.json'
+        self.assertTrue(interrupted.exists(), result.stdout + result.stderr)
+        self.assertIn('Fixture', json.loads(interrupted.read_text()))
         self.assertFalse((state / 'report.zip').exists())
         before = self.stamps()
         self.record_result('interrupted', dict(mode=interruption, exit=result.returncode,
@@ -361,6 +363,36 @@ class NativeRecoveryConsumerTests:
         self.record_result('complete-resume', dict(mode=interruption, exit=resumed.returncode,
             changed_source_extractions=1, resumed_extractions=len(remaining),
             registered_modules=len(names), aggregate_modules=len(self.report()[0])))
+
+    def test_paired_groups_preserve_earlier_artifacts_on_failure(self):
+        self.env['STRATALINT_NATIVE_REPORT_WORKERS'] = '2'
+        self._exercise_chunk_durability('failure', extra_modules=97)
+
+    def test_paired_groups_preserve_earlier_artifacts_on_cancellation(self):
+        self.env['STRATALINT_NATIVE_REPORT_WORKERS'] = '2'
+        self._exercise_chunk_durability('cancel', extra_modules=97)
+
+    def test_paired_and_serial_collection_bytes_match(self):
+        source = self.root / 'Fixture.lean'
+        source.write_text(source.read_text() + '\nnamespace LeanInformationAudit.Contract\n'
+            'structure Registration where\n  value : Nat\nend LeanInformationAudit.Contract\n'
+            'def pairedInput : LeanInformationAudit.Contract.Registration := { value := 1 }\n')
+        self.env['STRATALINT_INSPECTOR_REGENERATE_REPORTS'] = '1'
+        snapshots = []
+        for workers in ('1', '2'):
+            self.env['STRATALINT_NATIVE_REPORT_WORKERS'] = workers
+            outputs = native.state(self.root) / 'modules'
+            if outputs.exists():
+                shutil.rmtree(outputs)
+            self.build()
+            activity = [json.loads(line) for line in (self.root / 'activity.jsonl').read_text().splitlines()]
+            self.assertEqual(sum(row['count'] for row in activity if row['kind'] == 'extract'), 4)
+            archive = self.root / f'collection-{workers}.zip'
+            self.collection(archive)
+            snapshots.append(({p.name: publication.digest(p) for p in outputs.glob('*.zip')},
+                              publication.digest(archive)))
+        self.assertEqual(len(snapshots[0][0]), 4)
+        self.assertEqual(snapshots[0], snapshots[1])
 
     def test_completed_chunk_survives_later_failure(self):
         self._exercise_chunk_durability('failure')
