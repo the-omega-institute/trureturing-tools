@@ -1382,8 +1382,14 @@ def fetch(root, partition, writer_owned=False, refresh_stale=False, approved_tag
         deadline = operation_deadline()
         with contextlib.nullcontext() if writer_owned else cache_guard(root):
             if approved_tag is None and local_assets is None:
+                if generation_tag is None or generation_tag.startswith('lean-modules-'):
+                    from lean_module_cache import fetch_published as fetch_modules
+                    result = fetch_modules(root, targets, refresh_stale=refresh_stale, version=generation_tag)
+                    if result is not None or generation_tag:
+                        return 1 if result is None else result
                 from lean_cache_generation import fetch_published
-                result = fetch_published(root, targets, deadline, refresh_stale=refresh_stale, tag=generation_tag)
+                result = fetch_published(root, targets, deadline, refresh_stale=refresh_stale,
+                                         tag=generation_tag, compiler_only=True)
                 if result is not None:
                     return result
             return fetch_locked(root, partition, deadline, refresh_stale, approved_tag, approved_producer,
@@ -1752,7 +1758,7 @@ def _main():
         if args.no_build and args.command != "publish":
             raise ValueError("--no-build requires publish")
         generation_tag = (args.tag if args.mode == "production" and args.command == "fetch"
-                          and re.fullmatch(r"lean-generation-v1-[0-9a-f]{64}", args.tag) else None)
+                          and re.fullmatch(r"lean-generation-v1-[0-9a-f]{64}|lean-modules-[0-9a-f]{40}", args.tag) else None)
         if args.tag and not generation_tag and (args.mode != "candidate" or args.command != "fetch"):
             raise ValueError("--tag requires candidate fetch or an immutable generation tag")
         if generation_tag and (args.approved_tag or args.local_assets):
