@@ -288,10 +288,10 @@ def restore(root, index, requested, remote, destination):
     return {'requested': len(wanted), 'restored': len(restored), 'source': index['source']}
 
 
-def fetch_published(root, names, *, refresh_stale, version=None):
+def fetch_published(root, names, deadline, *, refresh_stale, version=None):
     from lean_cache_release import receipt
     from lean_module_remote import Remote
-    remote = Remote(root)
+    remote = Remote(root, deadline)
     index = remote.latest(version)
     if index is None:
         return None

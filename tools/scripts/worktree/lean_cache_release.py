@@ -1384,7 +1384,7 @@ def fetch(root, partition, writer_owned=False, refresh_stale=False, approved_tag
             if approved_tag is None and local_assets is None:
                 if generation_tag is None or generation_tag.startswith('lean-modules-'):
                     from lean_module_cache import fetch_published as fetch_modules
-                    result = fetch_modules(root, targets, refresh_stale=refresh_stale, version=generation_tag)
+                    result = fetch_modules(root, targets, deadline, refresh_stale=refresh_stale, version=generation_tag)
                     if result is not None or generation_tag:
                         return 1 if result is None else result
                 from lean_cache_generation import fetch_published

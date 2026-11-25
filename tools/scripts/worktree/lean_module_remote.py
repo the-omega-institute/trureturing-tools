@@ -36,9 +36,9 @@ def missing(error):
 
 
 class Remote:
-    def __init__(self, root):
+    def __init__(self, root, deadline=None):
         self.root = root
-        self.deadline = host.operation_deadline()
+        self.deadline = deadline if deadline is not None else host.operation_deadline()
         self.http = GitHubHTTP(self.deadline)
         self.inventory = {}
 

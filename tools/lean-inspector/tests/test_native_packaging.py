@@ -38,7 +38,8 @@ class NativeReleaseSupport:
         for name in ('lean-cache-publish.sh', 'lean_cache_release.py', 'lean_cache_release_io.py',
                      'lean_cache_topology.py', 'lean_artifact_inventory.py', 'lean_compile_layers.py', 'lean_release_index.py',
                      'lean_cache_generation.py', 'lean_generation_index.py', 'lean_generation_remote.py',
-                     'lean_generation_objects.py', 'lean_release_volumes.py', 'lean_release_volume_remote.py'):
+                     'lean_module_cache.py', 'lean_module_shards.py', 'lean_module_remote.py', 'lean_generation_plan.py',
+                     'lean_generation_checkpoints.py', 'lean_generation_objects.py', 'lean_release_volumes.py', 'lean_release_volume_remote.py'):
             self.copy('tools/scripts/worktree/' + name)
         policy = json.loads((self.root / 'lean-report-inputs.json').read_text())
         # Use the production root-module address for this Release consumer.
@@ -100,7 +101,8 @@ elif a[:2] == ['release', 'download']:
             matches = list((root / a[2]).glob(a[index + 1]))
             if not matches: raise SystemExit(1)
             for item in matches: shutil.copyfile(item, destination / item.name)
-elif a[:2] == ['api', 'repos/fixture/cache/git/ref/heads/lean-cache-published']:
+elif a[0] == 'api' and a[1] in ('repos/fixture/cache/git/ref/heads/lean-cache-published',
+                                 'repos/fixture/cache/git/ref/heads/lean-modules-published'):
     print(json.dumps(dict(message='Not Found', status='404')))
     raise SystemExit(1)
 elif a[0] == 'api' and '/releases/tags/' in a[1]:
@@ -554,7 +556,8 @@ class NativePackageConsumerTests(NativeReleaseSupport):
         missed = self.release_run('fetch', success=False)
         self.assertIn('"status":"miss"', missed.stdout)
         self.assertFalse((self.root / '.lake/build').exists())
-        self.assertEqual([['api', 'repos/fixture/cache/git/ref/heads/lean-cache-published'], ['api', 'graphql']],
+        self.assertEqual([['api', 'repos/fixture/cache/git/ref/heads/lean-modules-published'],
+                          ['api', 'repos/fixture/cache/git/ref/heads/lean-cache-published'], ['api', 'graphql']],
             [json.loads(line)[:2] for line in (self.root / 'gh-calls.jsonl').read_text().splitlines()])
         first = self.guarded_command(['make', 'lean-cache-to-github-without-mathlib'],
             env=dict(self.env, STRATALINT_ACCEPT_COLD_BUILD='1'))

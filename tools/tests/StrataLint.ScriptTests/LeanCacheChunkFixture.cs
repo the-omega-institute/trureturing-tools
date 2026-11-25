@@ -33,7 +33,8 @@ internal sealed class LeanCacheChunkFixture : IDisposable
             ScriptHarnessScratch.EnsureDirectory(directory);
         foreach (var name in new[] { "lean-cache-publish.sh", "lean_cache_release.py", "lean_cache_release_io.py", "lean_artifact_inventory.py", "lean_cache_topology.py", "lean_cache.py", "cache_material.py",
             "lean_cache_generation.py", "lean_generation_index.py", "lean_generation_remote.py",
-            "lean_generation_objects.py", "lean_release_index.py", "lean_release_volume_remote.py",
+            "lean_module_cache.py", "lean_module_shards.py", "lean_module_remote.py", "lean_generation_plan.py",
+            "lean_generation_checkpoints.py", "lean_generation_objects.py", "lean_release_index.py", "lean_release_volume_remote.py",
             "lean_release_volumes.py", "lean_compile_layers.py" })
             ScriptHarnessScratch.CopyScriptInto(
                 Path.Combine(TestRepositoryLayout.FindRoot(), "tools/scripts/worktree", name),
@@ -304,7 +305,7 @@ internal sealed class LeanCacheChunkFixture : IDisposable
             print(json.dumps(dict(nodes=rows, pageInfo=dict(hasNextPage=False))))
             sys.exit(0)
         if args[0] == "api":
-            if args[1].endswith("/git/ref/heads/lean-cache-published"):
+            if args[1].endswith(("/git/ref/heads/lean-cache-published", "/git/ref/heads/lean-modules-published")):
                 print(json.dumps({"status": "404", "message": "Not Found"}))
                 sys.exit(1)
             if args[1].endswith("/branches/dev"):
