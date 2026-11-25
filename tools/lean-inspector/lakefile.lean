@@ -489,9 +489,21 @@ script frozenDependencies args do
   let exe ← runBuild (cfg := {outLv := .error, noBuild := true}) do
     let exports ← modules.mapM (·.exportInfo.fetch)
     return (← reportInspector.fetch).add (mixModuleJobs exports)
-  return ← IO.Process.spawn {
+  let root ← repositoryDir ws.root
+  let status ← IO.Process.spawn {
     cmd := exe.toString, args := #["--frozen-dependencies-v1", request, output],
-    cwd := some (← repositoryDir ws.root), env := ws.augmentedEnvVars
+    cwd := some root, env := ws.augmentedEnvVars
+  } >>= (·.wait)
+  unless status == 0 do return status
+  let portable := root / "src/OmegaChecks/portable.py"
+  -- Older checkouts and standalone tools fixtures have only the official backend.
+  unless ← portable.pathExists do return 0
+  -- Remain within the canonical cache guard for compilation and the paired read.
+  return ← IO.Process.spawn {
+    cmd := "python3",
+    args := #["-B", portable.toString, "--frozen-request", request,
+      "--official-measurement", output, "--inspector", exe.toString, "--frozen-output", output],
+    cwd := some root
   } >>= (·.wait)
 
 private def collectNativeReports (pkg : Package) (config : Json) :
