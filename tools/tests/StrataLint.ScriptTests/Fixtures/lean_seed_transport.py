@@ -49,6 +49,8 @@ exit "${FAKE_BUILD_EXIT:-0}"
         for name in ("lean-cache-publish.sh", "cache_material.py", "lean_cache.py", "lean_cache_release.py", "lean_cache_release_io.py", "lean_cache_topology.py", "lean_actions.py",
                      "lean_artifact_inventory.py", "lean_release_index.py", "lean_cache_generation.py",
                      "lean_generation_index.py", "lean_generation_remote.py", "lean_generation_objects.py",
+                     "lean_generation_plan.py", "lean_generation_checkpoints.py", "lean_module_cache.py",
+                     "lean_module_shards.py", "lean_module_remote.py",
                      "lean_release_volume_remote.py", "lean_release_volumes.py", "lean_compile_layers.py"):
             shutil.copy2(PUBLISH.with_name(name), helper_dir / name)
         prepare_release_report(self.root)
@@ -827,7 +829,7 @@ subprocess.run = transfer_run
         self.assertIn('"status":"unpacked"', result.stdout)
         self.assertEqual([None, None], [call["timeout"] for call in self.asset_calls()])
         metadata = [call for call in self.gh_budgets() if call not in self.asset_calls()]
-        self.assertEqual([10, 10, 9, 8, 7, 6], [call["timeout"] for call in metadata])
+        self.assertEqual([10, 10, 10, 9, 8, 7, 6], [call["timeout"] for call in metadata])
         self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
 
     def test_failed_long_transfers_stop_after_five_of_seven_actual_candidates(self):
@@ -939,7 +941,7 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         result = self.fetch_then_build(**self.deadline_probe(3, step=1), FAKE_FAIL="download")
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("deadline exhausted", result.stdout)
-        self.assertEqual([3, 3, 2, 1], [call["timeout"] for call in self.gh_budgets()])
+        self.assertEqual([3, 3, 3, 2, 1], [call["timeout"] for call in self.gh_budgets()])
         snapshots = [call for call in self.gh_budgets() if call["args"][0] == "api" and "/releases/tags/" in call["args"][1]]
         self.assertEqual(1, len(snapshots))
         self.assertIn("502-1", snapshots[0]["args"][1])
@@ -949,8 +951,8 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         for run in (503, 504):
             self.assertEqual(0, self.transport("publish", str(run)).returncode)
         shutil.rmtree(self.root / ".lake/build")
-        for configured, step, expected in ((None, 1000, [1800, 1800, 800]),
-                                           (21600, 10000, [21600, 21600, 11600, 1600])):
+        for configured, step, expected in ((None, 1000, [1800, 1800, 1800, 800]),
+                                           (21600, 10000, [21600, 21600, 21600, 11600, 1600])):
             with self.subTest(configured=configured):
                 (self.root / "gh-budgets").unlink(missing_ok=True)
                 result = self.fetch_then_build(**self.deadline_probe(configured, step=step),
