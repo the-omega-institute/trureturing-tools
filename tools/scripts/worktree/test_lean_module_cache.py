@@ -124,6 +124,15 @@ class ModuleReleases(unittest.TestCase):
         self.assertNotEqual(first['shards']['D5']['sha256'], second['shards']['D5']['sha256'])
         self.assertEqual(self.workers(self.plan(second)), [])
 
+    def test_first_plan_uses_verified_compressed_sizes_for_layout(self):
+        _, targets = cache.checkout_targets(self.root)
+        legacy = {'targets': {n: {'bytes': 12} for n in targets}}
+        guessed = self.plan(capacity=40)
+        self.assertEqual(len(guessed['shards']), 3)
+        measured = cache.make_plan(self.source, self.pin, targets, None, self.remote, 40, 2, legacy=legacy)
+        self.assertEqual(measured['shards'].keys(), {'D5'})
+        self.assertEqual(measured['legacy'], legacy)
+
     def test_actual_oversize_split_survives_interruption_and_upgrade(self):
         # Start with a cold underestimate so real compressed bytes trigger the split in the worker.
         with patch.object(cache, 'DEFAULT_MODULE_BYTES', 1):

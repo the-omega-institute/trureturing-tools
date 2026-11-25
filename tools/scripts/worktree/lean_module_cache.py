@@ -91,11 +91,13 @@ def expanded(plan, splits):
     return dict(plan, targets=targets, shards=groups)
 
 
-def make_plan(source, mathlib, targets, base, remote, capacity, workers):
+def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, legacy=None):
     if workers < 1 or workers > 256:
         raise ValueError('worker count must be within the Actions matrix limit')
     previous = base['shards'] if base else {}
     sizes = {n: DEFAULT_MODULE_BYTES for n in targets}
+    if legacy:
+        sizes.update({n: row['bytes'] for n, row in legacy['targets'].items() if n in targets})
     for row in previous.values():
         average = max(1, row['bytes'] // len(row['members']))
         for name in row['members']:
@@ -129,6 +131,8 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers):
         lanes[lane].append(name)
         loads[lane] += sum(sizes[n] for n in planned[name]['members'])
     plan['lanes'] = lanes
+    if legacy and lanes:
+        plan['legacy'] = legacy
     return plan
 
 
@@ -351,13 +355,15 @@ def run():
     if args.command == 'plan':
         modules, targets = checkout_targets(root)
         base = json.loads(args.base.read_bytes()) if args.base else remote.latest()
-        result = make_plan(compiler.checkout(root), resolved_mathlib(root), targets, base, remote,
-                           args.capacity, args.workers)
-        if args.legacy_checkpoints and not base and result['lanes']:
+        source = compiler.checkout(root)
+        legacy = None
+        if args.legacy_checkpoints and not base:
             try:
-                result['legacy'] = legacy_compiler_inputs(root, modules, targets, result['source'])
+                legacy = legacy_compiler_inputs(root, modules, targets, source)
             except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
                 print(f'Compiler checkpoints unavailable; continuing with Lake: {error}', file=sys.stderr)
+        result = make_plan(source, resolved_mathlib(root), targets, base, remote,
+                           args.capacity, args.workers, legacy=legacy)
         write(args.output, result)
         if path := os.environ.get('GITHUB_OUTPUT'):
             with open(path, 'a') as output:
