@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 from urllib.parse import urlencode
 
@@ -77,15 +78,7 @@ class Remote:
                 release = self.api('releases/tags/' + tag)
         if release['tag_name'] != tag or release['draft']:
             raise ValueError('unexpected module Release: ' + tag)
-        # GitHub paginates the asset endpoint independently from release metadata.
-        assets = {}
-        page = 1
-        while True:
-            subset = self.api(f'releases/{release["id"]}/assets?per_page=100&page={page}')
-            assets.update({row['name']: row for row in subset})
-            if len(subset) < 100:
-                break
-            page += 1
+        assets = {row['name']: row for row in release['assets']}
         entry = release['id'], assets
         self.inventory[tag] = entry
         return entry
@@ -137,9 +130,13 @@ class Remote:
             return False
         cmd = ['node', self.root / '.github/actions/lean-cache-shards/run.mjs',
                'module-' + operation, key, digest, path.resolve()]
-        result = subprocess.run(cmd, cwd=self.root, timeout=host.remaining(self.deadline), check=False)
-        if result.returncode and operation == 'put':
-            raise ValueError('failed to verify Actions cache write: ' + key)
+        try:
+            result = subprocess.run(cmd, cwd=self.root, timeout=host.remaining(self.deadline), check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print(f'Actions cache {operation} unavailable for {key}: {error}', file=sys.stderr)
+            return False
+        if result.returncode and (operation == 'put' or result.returncode != 4):
+            print(f'Actions cache {operation} unavailable for {key} (exit {result.returncode})', file=sys.stderr)
         return result.returncode == 0
 
     def fetch(self, tag, asset, path):
@@ -258,9 +255,10 @@ class Remote:
         if not TAG.fullmatch(plan['version']) or plan['shards'][name]['fingerprint'] != row['fingerprint']:
             raise ValueError('shard does not belong to its plan')
         publisher()
-        # Only a durable Release asset with a verified Actions write is advertised as a reusable shard.
-        self.actions('put', row['key'], row['sha256'], path)
+        if path.stat().st_size != row['bytes'] or host.archive_sha(path, self.deadline) != row['sha256']:
+            raise ValueError('local shard differs from its advertised payload')
         tag, _ = self.stage(plan['version'], row['asset'], path, row['fingerprint'], row['sha256'])
+        self.actions('put', row['key'], row['sha256'], path)
         return {**row, 'version': tag}
 
     def splits(self, plan):

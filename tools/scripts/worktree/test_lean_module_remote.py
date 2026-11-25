@@ -143,6 +143,28 @@ class VersionedShards(unittest.TestCase):
             self.assertEqual(self.remote.latest(), index)
             self.assertNotIn((shard['version'], 'index.json'), self.service.files)
 
+    def test_cache_failure_preserves_release_checkpoint_and_index(self):
+        plan = self.plan('a'*40)
+        self.remote.actions = transport.Remote.actions.__get__(self.remote)
+        with patch.dict(transport.os.environ, {'LEAN_MODULE_ACTIONS_CACHE':'1'}), \
+                patch.object(transport.subprocess, 'run', side_effect=OSError('cache offline')), \
+                patch.object(transport.sys, 'stderr', new_callable=io.StringIO) as warnings:
+            row = self.save(plan, b'payload')
+            self.assertEqual(self.service.uploads, 1)
+            self.assertEqual(self.save(plan, b'payload'), row)
+            self.assertEqual(self.service.uploads, 1)
+            index = {**plan, 'shards':{'Small':row}}
+            self.remote.publish(index)
+            self.assertEqual(self.service.uploads, 2)
+            self.assertEqual(self.remote.latest(), index)
+            self.remote.download(row, self.root/'response')
+            self.assertEqual((self.root/'response').read_bytes(), b'payload')
+            self.assertIn('cache offline', warnings.getvalue())
+            self.remote.publish(index)
+            self.assertEqual(self.service.uploads, 2)
+            with self.assertRaisesRegex(ValueError, 'local shard'):
+                self.remote.save(plan, 'Small', self.root/'response', {**row, 'sha256':'0'*64})
+
     def test_removed_shard_cannot_be_inherited_in_a_new_version(self):
         plan = self.plan('a'*40)
         row = self.save(plan, b'payload')
