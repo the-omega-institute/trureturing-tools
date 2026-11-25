@@ -120,6 +120,7 @@ public sealed class FrozenStateContractTests
     [InlineData("extra-field")]
     [InlineData("null-libraries")]
     [InlineData("duplicate-axioms")]
+    [InlineData("unadmitted-axiom")]
     [InlineData("missing-primary")]
     public void RejectsInvalidPairedRecords(string defect)
     {
@@ -138,6 +139,7 @@ public sealed class FrozenStateContractTests
             case "missing-axioms": nested.Remove("axioms"); break;
             case "extra-field": nested["replayed"] = true; break;
             case "null-libraries": nested["libraries"] = null; break;
+            case "unadmitted-axiom": nested["axioms"] = new System.Text.Json.Nodes.JsonArray("sorryAx"); break;
             case "duplicate-axioms": nested["axioms"] = new System.Text.Json.Nodes.JsonArray("propext", "propext"); break;
             case "missing-primary": declaration.Remove("axioms"); break;
         }

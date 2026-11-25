@@ -211,7 +211,7 @@ def exercise(directory):
     for name in ("plain", "dependent"):
         key = f"ns(ns(ns(n0,13:FrozenFixture),11:AxiomFamily),{len(name)}:{name})"
         assert family[key]["axioms"] == ["propext"], family[key]
-    assert "axioms" not in rows["fullAxioms"], rows
+    assert rows["fullAxioms"]["axioms"] == ["Classical.choice", "Quot.sound", "propext"], rows
     run("dotnet", CLI, "ledger-frozen", "--target", MODULE)
     assert list(STATE.rglob("*.json")) == [RECORD]
 

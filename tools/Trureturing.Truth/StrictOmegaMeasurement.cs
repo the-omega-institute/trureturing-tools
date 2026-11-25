@@ -22,6 +22,8 @@ public sealed record StrictOmegaMeasurement(
         TruthExportValidation.RequireSha256Id(OfficialStatementTypeAddress, "strict_omega official_statement_type_address");
         RequireSet(Libraries, "libraries");
         RequireSet(Axioms, "axioms");
+        if (Axioms.Any(static axiom => axiom is not ("Classical.choice" or "Quot.sound" or "propext")))
+            throw new FormatException("strict_omega axioms must be admitted Lean axioms");
     }
 
     public static StrictOmegaMeasurement Read(JsonElement element)
