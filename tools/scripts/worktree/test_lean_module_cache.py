@@ -104,6 +104,62 @@ class ModuleReleases(unittest.TestCase):
     def workers(self, plan):
         return [cache.work(self.root, plan, i, self.remote, self.root / 'receipts') for i in range(len(plan['lanes']))]
 
+    def test_reports_share_the_target_identity_and_compile_only_seeds(self):
+        from lean_cache_release import report_selection
+        import lean_generation_facets as facets
+
+        old = self.plan()
+        self.workers(old)
+        index = cache.finish(old, self.remote)
+        (self.root / 'lean-report-inputs.json').write_text('{}')
+        selection = self.enterContext(patch.object(report_selection, 'Selection')).return_value
+        selection.modules.return_value = {'D5.A': 'D5/A.lean'}
+        utility = {'modulePath': 'D5/A.lean', 'claimModule': 'D5.B'}
+        self.enterContext(patch.object(facets, 'utility_inputs', return_value={'D5/A.lean': utility}))
+
+        modules, with_reports = cache.checkout_targets(self.root)
+        self.assertTrue(modules['D5.A'].report)
+        self.assertEqual(sorted(with_reports['D5.A']['report_inputs']), ['D5.A', 'D5.B'])
+        self.assertEqual(index['targets']['D5.A']['key'], with_reports['D5.A']['compiler_input'])
+        self.assertNotEqual(index['targets']['D5.A']['key'], with_reports['D5.A']['key'])
+        # The old reader cannot open a mixed namespace archive, even for an ordinary sibling.
+        self.assertNotEqual(index['targets']['D5.C']['key'], with_reports['D5.C']['key'])
+        self.assertEqual(index['targets']['D5.C']['key'], with_reports['D5.C']['compiler_input'])
+        destination = self.root / 'restored'
+        result = cache.restore(self.root, index, ['D5.C'], self.remote, destination)
+        self.assertEqual((result['requested'], result['restored'], result['compiler_restored']), (2, 1, 2))
+        self.assertEqual((result['reports_requested'], result['reports_restored']), (1, 0))
+        self.assertEqual((result['supporting_compilers_requested'], result['supporting_compilers_restored']), (1, 1))
+        self.assertTrue((destination/'lib/lean/D5/B.olean').is_file())
+        self.assertTrue((destination/'lib/lean/D5/A.olean').is_file())
+        self.assertFalse((destination/'lean-inspector/modules/D5.A.zip').exists())
+
+        # The example is a consumer of the requested source and cannot be found through its imports.
+        def example_scope(root, subset, *, scope_inputs):
+            scope_inputs['D5/A.lean'] = ['D5.C']
+            return {'D5/A.lean': utility}
+        with patch.object(facets, 'utility_inputs', side_effect=example_scope):
+            expanded = cache.restore(self.root, index, ['D5.A'], self.remote, self.root / 'example-scope')
+            self.assertEqual(expanded['requested'], 2)
+            self.assertTrue((self.root / 'example-scope/lib/lean/D5/C.olean').is_file())
+
+        with patch.object(facets, 'utility_inputs', side_effect=FileNotFoundError('dotnet')) as reader:
+            plain = cache.restore(self.root, index, ['D5.B'], self.remote, self.root / 'ordinary')
+            self.assertEqual(plain['restored'], 1)
+            reader.assert_not_called()
+            cold = cache.restore(self.root, index, ['D5.A'], self.remote, self.root / 'compiler-seed')
+            self.assertEqual((cold['reports_restored'], cold['compiler_restored']), (0, 1))
+
+        (self.root / 'D5/B.lean').write_text('def valueB := 8')
+        _, changed = cache.checkout_targets(self.root)
+        self.assertNotEqual(changed['D5.A']['key'], with_reports['D5.A']['key'])
+        self.assertEqual(changed['D5.A']['compiler_input'], with_reports['D5.A']['compiler_input'])
+        self.assertEqual(changed['D5.C']['key'], with_reports['D5.C']['key'])
+        with patch.object(report_selection, 'REPORT_FORMAT', 'changed'):
+            _, new_format = cache.checkout_targets(self.root)
+        self.assertNotEqual(new_format['D5.A']['key'], changed['D5.A']['key'])
+        self.assertEqual(new_format['D5.B']['key'], changed['D5.B']['key'])
+
     def test_incremental_releases_and_scoped_consumers(self):
         plan = self.plan()
         self.assertEqual(set(plan['targets']), {'D5.A', 'D5.B', 'D5.C'})
