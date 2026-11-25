@@ -17,7 +17,7 @@ import tempfile
 
 from lean_artifact_inventory import (
     PROJECT_BUILD, REG_INSPECTOR, build_inventory, import_closure, lake_configuration,
-    lean_artifact_paths, project_imports, required_compiler_paths, workspace_modules, release_roots,
+    compiler_variants, lean_artifact_paths, project_imports, required_compiler_paths, workspace_modules, release_roots,
 )
 from lean_cache import binary_platform
 from lean_cache_release import cache_guard, install_scoped, report_selection
@@ -109,7 +109,7 @@ def checkout(root):
     dirty = subprocess.check_output(
         ["git", "status", "--porcelain=v1", "--untracked-files=all", "--",
          "*.lean", "lean-toolchain", "*lake-manifest.json", "*lakefile.toml",
-         "Meta/tools-release.json", "lean-report-inputs.json"], cwd=root,
+         "Meta/tools-release.json", "lean-report-inputs.json", "src/OmegaChecks/*.py"], cwd=root,
     )
     if dirty:
         raise ValueError("compile inputs differ from the checked-out commit")
@@ -142,13 +142,14 @@ def lake_build(root, batch, no_build):
 
 def check_outputs(build, modules, grouped):
     for name, module in modules.items():
-        paths = grouped[name]
-        if not required_compiler_paths(name, module) <= paths:
-            raise ValueError(f"incomplete compiler artifacts: {name}")
-        check_compiler_outputs(build, {"module": name, "paths": paths})
-        if any(path.with_name(path.name + ".hash") not in paths for path in paths
-               if path.suffix not in (".trace", ".hash")):
-            raise ValueError(f"missing compiler output hash: {name}")
+        for variant in compiler_variants(module):
+            paths = grouped[name] & lean_artifact_paths(name, variant)
+            if not required_compiler_paths(name, variant) <= paths:
+                raise ValueError(f"incomplete compiler artifacts: {name} in {variant.build}")
+            check_compiler_outputs(build, {"module": name, "paths": paths})
+            if any(path.with_name(path.name + ".hash") not in paths for path in paths
+                   if path.suffix not in (".trace", ".hash")):
+                raise ValueError(f"missing compiler output hash: {name} in {variant.build}")
 
 
 def pack(root, modules, destination, identity):

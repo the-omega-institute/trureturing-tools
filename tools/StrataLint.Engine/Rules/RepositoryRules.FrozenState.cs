@@ -74,6 +74,9 @@ internal static partial class RepositoryRules
             if (!record.HasInventory(FrozenStateRecord.Project(report)))
                 findings.Add(new RuleFinding(displayPath, $"selector {modulePath.Value} declaration list mismatch with current report"));
 
+            try { record.ValidatePairedStatements(report); }
+            catch (FormatException exception) { findings.Add(new RuleFinding(displayPath, exception.Message)); }
+
             var actual = FrozenContentAddress.ComputeModuleStatementId(modulePath, report);
             if (record.StatementId != actual)
             {

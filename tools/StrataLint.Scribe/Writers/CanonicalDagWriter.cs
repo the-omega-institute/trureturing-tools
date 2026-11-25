@@ -40,7 +40,10 @@ public static class CanonicalDagWriter
         var markedDeclarations = graph?.Nodes.Where(static node => node.OmegaOnlyAxiomFreeDeclarations is { IsEmpty: false })
             .ToDictionary(static node => node.RepoPath, static node => node.OmegaOnlyAxiomFreeDeclarations!.Value,
                 StringComparer.Ordinal);
-        AppendNodesByDepth(builder, dag, nodes, markedDeclarations);
+        var pairedDeclarations = graph?.Nodes.Where(static node => node.StrictOmegaDeclarations is { IsEmpty: false })
+            .ToDictionary(static node => node.RepoPath, static node => node.StrictOmegaDeclarations!.Value,
+                StringComparer.Ordinal);
+        AppendNodesByDepth(builder, dag, nodes, markedDeclarations, pairedDeclarations);
         return ImmutableArray.CreateRange(StrictUtf8.GetBytes(builder.ToString()));
     }
 
@@ -139,7 +142,8 @@ public static class CanonicalDagWriter
         StringBuilder builder,
         TruthDagProjection dag,
         ImmutableArray<TruthProjectionNode> nodes,
-        IReadOnlyDictionary<string, ImmutableArray<TruthGraphDeclaration>>? markedDeclarations)
+        IReadOnlyDictionary<string, ImmutableArray<TruthGraphDeclaration>>? markedDeclarations,
+        IReadOnlyDictionary<string, ImmutableArray<TruthExportDeclaration>>? pairedDeclarations)
     {
         builder.Append("## Nodes by depth\n\n");
         if (nodes.IsEmpty)
@@ -154,6 +158,9 @@ public static class CanonicalDagWriter
                 .Append(" reflects the last frozen measurement for the declaration and statement pin. "
                     + "A later proof edit can retain that pin.\n\n");
         }
+
+        if (pairedDeclarations is { Count: > 0 })
+            builder.Append("Official and strict Omega arrays describe the paired frozen measurements at their recorded statement pins.\n\n");
 
         var groups = nodes
             .GroupBy(node => dag.Depth(node.RepoPath))
@@ -179,6 +186,24 @@ public static class CanonicalDagWriter
                         builder.Append("  - ");
                         AppendCodeSpan(builder, DeclarationName(declaration.DeclarationNameKey));
                         builder.Append(" (").Append(declaration.Kind).Append(") ").Append(OmegaOnlyBadge).Append('\n');
+                    }
+                }
+                if (pairedDeclarations is not null && pairedDeclarations.TryGetValue(node.RepoPath.Value, out var pairs))
+                {
+                    foreach (var declaration in pairs)
+                    {
+                        var strict = declaration.StrictOmega!;
+                        builder.Append("  - ");
+                        AppendCodeSpan(builder, DeclarationName(declaration.DeclarationNameKey));
+                        builder.Append(" (").Append(declaration.Kind).Append(") — official libraries ");
+                        AppendCodeSpan(builder, JsonSerializer.Serialize(declaration.Libraries!.Value));
+                        builder.Append(", official axioms ");
+                        AppendCodeSpan(builder, JsonSerializer.Serialize(declaration.Axioms!.Value));
+                        builder.Append(" — strict Omega backend libraries ");
+                        AppendCodeSpan(builder, JsonSerializer.Serialize(strict.Libraries));
+                        builder.Append(", strict Omega backend axioms ");
+                        AppendCodeSpan(builder, JsonSerializer.Serialize(strict.Axioms));
+                        builder.Append('\n');
                     }
                 }
             }

@@ -130,22 +130,9 @@ public static class TruthExportValidation
                     throw new FormatException("Truth export declarations must not contain null entries.");
                 }
 
-                if (declaration.DeclarationNameKey is null)
-                {
-                    throw new FormatException("Truth export declaration_name_key must not be null.");
-                }
-
-                RequireSha256Id(declaration.StatementId, "statement_id");
-                RequireKind(declaration.Kind);
-                RequireAnnotation(declaration.Libraries, "libraries");
-                RequireAnnotation(declaration.Axioms, "axioms");
-                if (declaration.OmegaOnlyAxiomFree != (IsOmegaOnlyAxiomFree(declaration.Libraries, declaration.Axioms)
-                        ? true : (bool?)null))
-                {
-                    throw new FormatException("Truth export omega_only_axiom_free disagrees with its declaration annotations.");
-                }
-
-                if (node.FreezeStatus != "frozen" && (declaration.Libraries is not null || declaration.Axioms is not null))
+                RequireValidDeclaration(declaration);
+                if (node.FreezeStatus != "frozen" && (declaration.Libraries is not null || declaration.Axioms is not null
+                    || declaration.StrictOmega is not null))
                 {
                     throw new FormatException("Truth export declaration annotations require frozen membership.");
                 }
@@ -183,6 +170,31 @@ public static class TruthExportValidation
         }
 
         RequireAcyclic(model.Nodes);
+    }
+
+    internal static void RequireValidDeclaration(TruthExportDeclaration declaration)
+    {
+        if (declaration.DeclarationNameKey is null)
+        {
+            throw new FormatException("Truth export declaration_name_key must not be null.");
+        }
+
+        RequireSha256Id(declaration.StatementId, "statement_id");
+        RequireKind(declaration.Kind);
+        RequireAnnotation(declaration.Libraries, "libraries");
+        RequireAnnotation(declaration.Axioms, "axioms");
+        if (declaration.OmegaOnlyAxiomFree != (IsOmegaOnlyAxiomFree(declaration.Libraries, declaration.Axioms)
+                ? true : (bool?)null))
+        {
+            throw new FormatException("Truth export omega_only_axiom_free disagrees with its declaration annotations.");
+        }
+
+        if (declaration.StrictOmega is { } strict)
+        {
+            if (declaration.Libraries is null || declaration.Axioms is null)
+                throw new FormatException("Truth export strict Omega requires both primary measurement arrays.");
+            strict.RequireValid(declaration.DeclarationNameKey, declaration.Kind);
+        }
     }
 
     private static void RequireAnnotation(ImmutableArray<string>? annotation, string field)

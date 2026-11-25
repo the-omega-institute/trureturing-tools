@@ -87,7 +87,13 @@ public static class TruthGraphModelBuilder
                 .Select(static declaration => new TruthGraphDeclaration(
                     declaration.DeclarationNameKey, declaration.Kind, declaration.StatementId))
                 .ToImmutableArray();
-            return markers.IsEmpty ? node : node with { OmegaOnlyAxiomFreeDeclarations = markers };
+            var paired = exported.Declarations.Where(static declaration => declaration.StrictOmega is not null)
+                .ToImmutableArray();
+            return node with
+            {
+                OmegaOnlyAxiomFreeDeclarations = markers.IsEmpty ? null : markers,
+                StrictOmegaDeclarations = paired.IsEmpty ? null : paired,
+            };
         }).ToImmutableArray();
         return graph with { Truth = graph.Truth with { Nodes = nodes } };
     }

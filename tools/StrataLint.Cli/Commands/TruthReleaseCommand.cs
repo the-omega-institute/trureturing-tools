@@ -40,6 +40,7 @@ internal static class TruthReleaseCommand
             var truthExport = TruthExportProjection.Project(
                 prepared.Catalog.ClosedNodes,
                 prepared.Frozen,
+                report,
                 identity.Revision,
                 sourceTree);
             var truthExportBytes = TruthExportJsonWriter.Write(truthExport);
