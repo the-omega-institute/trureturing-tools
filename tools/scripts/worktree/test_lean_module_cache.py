@@ -171,7 +171,7 @@ class ModuleReleases(unittest.TestCase):
         strict_api = SimpleNamespace(ROOT=self.root.resolve(), COMMON_SRC=common, lake_layout=layout)
         portable_api = SimpleNamespace(ROOT=self.root.resolve(), derived_facades=derived_facades,
                                        output=lambda *args: self.lake(*args[1:]).stdout)
-        with patch.object(cache.omega.importlib, 'import_module', side_effect=lambda name: {
+        with patch.object(cache.importlib, 'import_module', side_effect=lambda name: {
             'strict_lake': strict_api, 'portable': portable_api}[name]):
             plan = self.plan()
             modules, _ = cache.checkout_targets(self.root)
