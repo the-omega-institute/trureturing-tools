@@ -11,8 +11,8 @@ namespace StrataLint.Engine;
 
 internal static partial class RawLeanReportArtifact
 {
-    internal const string Schema = "stratalint-raw-lean-report-v3";
-    internal const string ScopedSchema = "stratalint-scoped-lean-report-v1";
+    internal const string Schema = "stratalint-raw-lean-report-v4";
+    internal const string ScopedSchema = "stratalint-scoped-lean-report-v2";
     internal static readonly AsyncLocal<Action?> Reading = new();
 
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);

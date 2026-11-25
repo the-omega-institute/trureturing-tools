@@ -110,7 +110,8 @@ class WarmGeneration(unittest.TestCase):
         commands = [call.args[0] for call in run.call_args_list]
         lake = ['bash', 'tools/scripts/worktree/lean-cache-run.sh', 'lake', '-d', 'tools/lean-inspector-reg', 'build']
         self.assertEqual(commands, [
-            [*lake, '+D5.A:olean', '+External.Claim:olean', '+LeanInformationAudit.TemplateEnrollment:olean',
+            [*lake, 'leanInspector/inputDiscovery', 'leanInspector/reportInspector',
+             '+D5.A:olean', '+External.Claim:olean', '+LeanInformationAudit.TemplateEnrollment:olean',
              '+Reg.B:olean'],
             [*lake, '+D5.A:report', '+Reg.B:report'],
         ])

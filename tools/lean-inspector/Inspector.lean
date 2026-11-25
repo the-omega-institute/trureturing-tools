@@ -258,7 +258,7 @@ def writeMaterial (writer : MaterialWriter) (info : ConstantInfo) : IO Unit := d
     throw <| IO.userError "statement spool writer did not acknowledge the material"
 
 def inspectData (moduleData : ModuleData) (find : Name → Option ConstantInfo)
-    (refute : UtilityInput → IO Bool) (cache : IO.Ref AxiomClosureState)
+    (refute : UtilityInput → IO Bool) (reportConstant? : Name → Option ConstantInfo)
     (writer : MaterialWriter) (materialCounter : IO.Ref Nat)
     (utilities : Array UtilityInput)
     (generatedNames : Array Name) (informationTemplates : Json)
@@ -281,13 +281,14 @@ def inspectData (moduleData : ModuleData) (find : Name → Option ConstantInfo)
   let names := (allNames.filter (!metadata.contains ·)).qsort fun left right =>
     encodeName left < encodeName right
   let enumerationEnd ← if profiling then IO.monoNanosNow else pure 0
+  let cache ← IO.mkRef ({} : AxiomClosureState)
   let sccNanos ← IO.mkRef 0
   let encodingNanos ← IO.mkRef 0
   let declarations ← names.mapM fun name => do
     let some info := find name
       | throw <| IO.userError s!"declaration missing: {name}"
     let sccStart ← if profiling then IO.monoNanosNow else pure 0
-    let axioms ← collectAxiomsShared find cache name
+    let axioms ← collectAxiomsShared reportConstant? cache name
     let encodeStart ← if profiling then IO.monoNanosNow else pure 0
     sccNanos.modify (· + (encodeStart - sccStart))
     let materialIndex ← materialCounter.get
@@ -466,7 +467,6 @@ private def withReportWriter (reportOutput materialSpool : System.FilePath)
       if base.modules.contains owner then count else
         count + ((store.modules.find? owner).map (·.constants.size)).getD 0) 0
     (← IO.getStderr).putStrLn s!"LEAN_INSPECTOR_TARGET_LOADED module={target} target_regions={store.regions.size} target_bytes={store.regions.foldl (fun n r => n + r.size.toNat) 0} target_constant_slots={slots}"
-  let cache ← IO.mkRef ({ closure := store.metadata.axioms } : AxiomClosureState)
   let empty := if statementOnly then Json.null else Json.mkObj [
     ("schema_version", toJson (1 : Nat)), ("inventory", Json.arr #[]),
     ("registered", Json.arr #[]), ("records", Json.arr #[])]
@@ -494,10 +494,12 @@ private def withReportWriter (reportOutput materialSpool : System.FilePath)
       pure (assessment.store, assessment.generated.filter (·.2 == target) |>.map Prod.fst,
         ← ArtifactRegistration.targetJson target assessment, assessment.enrollmentErrors)
     else pure (store, #[], empty, #[])
+  let overrides := current.reportOverrides #[target]
   let row ← inspectData data (current.constants.find?)
     (closedNegation (fun name => current.modules.find? name.toName)
       (current.constants.find?) input)
-    cache writer counter utilities generatedNames binding input
+    (fun name => (overrides.find? name).orElse fun _ => current.constants.find? name)
+    writer counter utilities generatedNames binding input
   let row := { row with
     informationRegistrationErrors := sortedUnique (row.informationRegistrationErrors ++ enrollmentErrors) }
   out.putStr (renderModule row)

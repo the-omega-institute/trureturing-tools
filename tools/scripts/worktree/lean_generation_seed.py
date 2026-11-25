@@ -207,7 +207,7 @@ def migrate(root, seed, directory, request):
                     for name, expected in candidates.items():
                         try:
                             prior, current = original[name], targets[name]
-                            if "empty_projection" in prior or "empty_projection" in current:
+                            if name.startswith("report/"):
                                 bundle = build / facet_paths(name)[0]
                                 if not bundle.exists():
                                     continue
