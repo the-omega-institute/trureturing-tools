@@ -147,7 +147,7 @@ class GitHubHTTP:
                 break
             except host.GitHubCommandError as error:
                 self.signed.pop(asset_id, None)
-                if attempt or not re.search(r'HTTP (401|403|404)', error.stderr or ''):
+                if attempt or not re.search(r'HTTP (401|403|404|618):', error.stderr or ''):
                     raise
         with response:
             if length is None:

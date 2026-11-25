@@ -248,6 +248,15 @@ class Generations(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError, 'remaining Release budget'):
                 client.api('git/ref/tags/x')
             sleep.assert_not_called()
+        expired = error('url', 618)
+        redirect = error('url', 302, {'Location': 'https://release-assets.githubusercontent.com/fresh'})
+        chunk = io.BytesIO(b'm')
+        chunk.status, chunk.headers = 206, {'Content-Range': 'bytes 0-0/8'}
+        with patch.object(client.opener, 'open', side_effect=[expired, redirect, chunk]) as calls:
+            self.assertEqual(b''.join(client.asset(asset, BUCKET, 0, 1)), b'm')
+            self.assertEqual([urlsplit(call.args[0].full_url).hostname for call in calls.call_args_list],
+                             ['release-assets.githubusercontent.com', 'github.com', 'release-assets.githubusercontent.com'])
+            self.assertTrue(all(call.args[0].get_header('Authorization') is None for call in calls.call_args_list))
         body = io.BytesIO(b'material'); body.status, body.headers = 200, {}
         with patch.object(client.opener, 'open', return_value=body), self.assertRaisesRegex(ValueError, 'HTTP 200'):
             list(client.asset(asset, BUCKET, 0, 1))
