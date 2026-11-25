@@ -66,7 +66,7 @@ class ShardCompilerTransport(unittest.TestCase):
         for names in (['Demo.A'], ['Demo.B'], list(self.modules)):
             dest = self.root / ('consumer-' + ''.join(names))
             active = {n: self.modules[n] for n in names}
-            self.assertEqual(restore_shard(self.archive, self.descriptor, names, active, dest), len(names))
+            self.assertEqual(restore_shard(self.archive, self.descriptor, names, active, dest), set(names))
             self.assertFalse((dest / 'lean-inspector').exists())
             self.assertEqual({p.stem for p in (dest / 'lib/lean/Demo').glob('*.olean')}, {n[-1] for n in names})
             for artifact in dest.rglob('*'):
@@ -79,7 +79,7 @@ class ShardCompilerTransport(unittest.TestCase):
         existing = dest / 'lib/lean/Demo/A.olean'
         existing.parent.mkdir(parents=True)
         existing.write_bytes(b'local')
-        self.assertEqual(restore_shard(self.archive, self.descriptor, self.modules, self.modules, dest), 1)
+        self.assertEqual(restore_shard(self.archive, self.descriptor, self.modules, self.modules, dest), {'Demo.B'})
         self.assertEqual(existing.read_bytes(), b'local')
         self.assertFalse(existing.with_suffix('.ilean').exists())
         self.assertTrue(existing.with_name('B.olean').is_file())

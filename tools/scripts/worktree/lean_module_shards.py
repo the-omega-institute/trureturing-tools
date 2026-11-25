@@ -186,7 +186,7 @@ def restore_shard(archive, descriptor, members, modules, destination):
 
         check_outputs(stage, {n: modules[n] for n in wanted}, grouped)
         install = set()
-        restored = 0
+        restored = set()
         for name in wanted:
             missing = set()
             for path in grouped[name]:
@@ -199,6 +199,6 @@ def restore_shard(archive, descriptor, members, modules, destination):
                     break
             else:
                 install.update(missing)
-                restored += 1
+                restored.add(name)
         install_scoped(destination, stage, install, None)
     return restored
