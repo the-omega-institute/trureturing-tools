@@ -55,7 +55,8 @@ def read_pin(revision):
 
 
 def artifact_fields(pin):
-    if "previous_pin" in pin and (not isinstance(pin["previous_pin"], str) or not re.fullmatch(SHA, pin["previous_pin"])):
+    if "previous_pin" in pin and (not isinstance(pin["previous_pin"], str)
+                                  or not re.fullmatch(SHA, pin["previous_pin"])):
         raise ValueError("Invalid previous_pin in consumer pin")
     return {key: value for key, value in pin.items() if key != "previous_pin"}
 

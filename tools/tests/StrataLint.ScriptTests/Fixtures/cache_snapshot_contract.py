@@ -114,9 +114,7 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
             exact = shards.binding(self.root, "complete")
             exact.pop("runtime")
             self.assertEqual(exact["execution"], actions.dependency_inputs(self.root))
-            self.assertEqual(original["legacy_prefix"], "lean-shard-index-v1-" + shards.digest(exact) + "-")
             self.assertEqual(original["snapshot_prefix"], original["prefix"] + "snapshot-" + shards.digest(exact) + "-")
-            self.assertIsNone(resume["legacy_prefix"])
             self.assertEqual(resume["snapshot_prefix"], resume["prefix"] + "snapshot-")
 
             for relative in ("lakefile.toml", "lakefile.lean", "Reg/lakefile.toml", "lake-manifest.json"):
@@ -128,7 +126,6 @@ class SnapshotContracts(PublicationCases, CacheFixture, unittest.TestCase):
                     after = addresses()
                     self.assertEqual(original["prefix"], after["prefix"])
                     self.assertNotEqual(original["snapshot_prefix"], after["snapshot_prefix"])
-                    self.assertNotEqual(original["legacy_prefix"], after["legacy_prefix"])
                     self.assertNotEqual(resume["prefix"], addresses("resume")["prefix"])
                     original = after
                     resume = addresses("resume")

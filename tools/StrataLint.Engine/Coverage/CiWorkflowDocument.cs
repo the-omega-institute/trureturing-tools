@@ -9,7 +9,7 @@ internal sealed record CiWorkflowJob(string Name, string? Uses);
 // Consumers inspect workflow data; this parser makes no claim that Actions executed a job.
 internal sealed class CiWorkflowDocument(
     YamlMappingNode root,
-    ImmutableDictionary<string, CiWorkflowJob> jobs)
+    ImmutableDictionary<string, CiWorkflowJob> parsedJobs)
 {
     internal const string DeltaJobName = "current";
 
@@ -63,7 +63,7 @@ internal sealed class CiWorkflowDocument(
         && branches.Children.OfType<YamlScalarNode>().Any(item => item.Value == branch);
 
     internal bool HasDeltaStep() =>
-        jobs.TryGetValue(DeltaJobName, out var job)
+        parsedJobs.TryGetValue(DeltaJobName, out var job)
         && job is { Name: DeltaJobName, Uses: null }
         && Child(root, "jobs") is YamlMappingNode jobs
         && jobs.Children.TryGetValue(new YamlScalarNode(DeltaJobName), out var rawJob)

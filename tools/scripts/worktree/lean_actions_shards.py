@@ -91,11 +91,11 @@ def index_prefix(identity):
 
 def index_addresses(identity):
     prefix = index_prefix(identity)
-    if "runtime" not in identity:
-        return {"prefix": prefix, "snapshot_prefix": prefix + "snapshot-", "legacy_prefix": None}
-    legacy = {key: value for key, value in identity.items() if key != "runtime"}
-    return {"prefix": prefix, "snapshot_prefix": prefix + "snapshot-" + digest(legacy) + "-",
-            "legacy_prefix": index_prefix(legacy)}
+    snapshot = prefix + "snapshot-"
+    if "runtime" in identity:
+        configuration = {key: value for key, value in identity.items() if key != "runtime"}
+        snapshot += digest(configuration) + "-"
+    return {"prefix": prefix, "snapshot_prefix": snapshot}
 
 
 def source_commit(root):

@@ -13,11 +13,6 @@ internal static partial class RepositoryPathPolicy
     internal const string SpecRootPath = "docs/develop/spec/";
     internal const string ReportsRootPath = "docs/reports/";
     internal const string AssumptionRegistryPath = "D5/X_Assumptions/REGISTRY.md";
-    // Cache control artifacts have explicit paths under the .github allowlist.
-    internal const string CacheProductionActionPath =
-        ".github/actions/lean-cache-produce/action.yml";
-    internal const string CachePublicationWorkflowPath =
-        ".github/workflows/lean-cache-publish.yml";
     // Persistent truth-release publisher. `.github` remains an explicit allowlist.
     internal const string TruthReleasePublicationWorkflowPath =
         ".github/workflows/truth-release-publish.yml";
@@ -173,8 +168,6 @@ internal static partial class RepositoryPathPolicy
             or "Library/queries.yaml" or AssumptionRegistryPath
             or "D5/X_Frontier/HeartsAuthorizations.md"
             or "Golden/gate-authority-roots.toml"
-            or CacheProductionActionPath
-            or CachePublicationWorkflowPath
             or TruthReleasePublicationWorkflowPath
             or PublicationVerificationWorkflowPath
             or AnalysisFixturesWorkflowPath
