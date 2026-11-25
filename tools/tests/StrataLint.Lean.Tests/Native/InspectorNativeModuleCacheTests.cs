@@ -12,6 +12,7 @@ public sealed class InspectorNativeModuleCacheTests(InspectorCompilerFixture com
     [InlineData("test_native.NativeArtifactTests.test_production_rejects_an_invalid_module_before_writing_it")]
     [InlineData("test_native.NativeArtifactTests.test_warm_native_artifacts_do_not_require_production_source_files")]
     [InlineData("test_native.NativeTests.test_imported_comment_warm_report_equals_fresh")]
+    [InlineData("test_native.NativeTests.test_generation_report_from_published_native_artifacts")]
     [InlineData("test_native.NativeTests.test_native_format_preimage")]
     [InlineData("test_native.NativeTests.test_native_report_format_invalidates_every_module")]
     [InlineData("test_native.NativeTests.test_report_format_finishes_before_module_callbacks")]

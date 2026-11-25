@@ -381,6 +381,36 @@ class NativeArtifactConsumerTests:
 
 
 class NativeColdPublicationTests:
+    def test_generation_report_from_published_native_artifacts(self):
+        sys.path.insert(0, str(HERE.parent / 'scripts/worktree'))
+        import lean_generation_facets as generation
+
+        workspace = 'tools/lean-inspector-reg'
+        self.prepare_report_modules('D5.A', workspace=workspace)
+        build = self.root / '.lake/build'
+        native_root = build / 'lean-inspector/producer'
+        with tempfile.TemporaryDirectory() as directory:
+            donor = Path(directory) / 'producer'
+            native_root.rename(donor)
+            for program in ('inputDiscovery', 'reportInspector'):
+                for path in generation.facet_paths('native/' + program):
+                    destination = build / path
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(donor / destination.relative_to(native_root), destination)
+            self.assertFalse((native_root / 'ir').exists())
+            self.env.update(LAKE_ARTIFACT_CACHE='false', LAKE_RESTORE_ARTIFACTS='false')
+            # Prepare just the compiler exports as on a restored generation.
+            self.run_lake('-d', workspace, 'build', '+D5.A:olean')
+            probe = self.run_lake('-d', workspace, 'build', '+D5.A:report', success=False)
+            self.assertIn('out-of-date', probe.stdout + probe.stderr)
+            with patch.dict(os.environ, self.env, clear=True):
+                generation.build_facets(self.root, ['report/D5.A'], {'report/D5.A': {'deps': ['D5.A']}})
+            bundle = build / generation.facet_paths('report/D5.A')[0]
+            with zipfile.ZipFile(bundle) as archive:
+                row = json.loads(archive.read('raw-lean-report.json'))['modules'][0]
+                self.assertEqual(row['module'], 'D5.A')
+            self.run_lake('-d', workspace, '--no-build', 'build', '+D5.A:report')
+
     def test_native_compiler_seed_is_private(self):
         self.assertFalse((self.root / '.lake').exists())
         if self.compiler_seed is None:
