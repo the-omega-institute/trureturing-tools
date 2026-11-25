@@ -64,13 +64,22 @@ public sealed class AdmissionWorkflowTopologyTests
     [InlineData(".github/workflows/ci-Tests.yml", false)]
     [InlineData(".github/workflows/ci-tests-fixture.yaml", false)]
     [InlineData(".github/scripts/harness-gate.sh", false)]
-    [InlineData(".github/actions/lean-cache-shards/action.yml", true)]
-    [InlineData(".github/actions/unregistered/action.yml", false)]
     public void ControlPathRegistrationKeepsOnlyTheRequiredGateTransition(string value, bool accepted)
     {
         var policy = new RuleFixture().Build().Policy;
         Assert.True(RepoPath.TryCreate(value, out var path));
 
+        Assert.Equal(accepted, RepositoryPathPolicy.Validate(path!, policy) is null);
+    }
+
+    [Theory]
+    [InlineData(".github/actions/lean-cache-shards/action.yml", true)]
+    [InlineData(".github/actions/unregistered/action.yml", false)]
+    public void LocalActionsUseTheConsumerFileMap(string value, bool accepted)
+    {
+        var policy = PolicyLoadAssert.Accepted(
+            RepositoryPolicyLoader.LoadRepository(TestRepositoryLayout.FindRoot())).Policy;
+        Assert.True(RepoPath.TryCreate(value, out var path));
         Assert.Equal(accepted, RepositoryPathPolicy.Validate(path!, policy) is null);
     }
 
