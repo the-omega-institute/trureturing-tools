@@ -198,7 +198,8 @@ public static class TruthGraphJsonReader
     private static TruthGraphNode ReadNode(JsonElement element)
     {
         const string marker = "omega_only_axiom_free_declarations";
-        RequireProperties(element, ["depth", "gid", "module_name", "repo_path", "state"], "truth node", marker);
+        const string strict = "strict_omega_declarations";
+        RequireProperties(element, ["depth", "gid", "module_name", "repo_path", "state"], "truth node", [marker, strict]);
         return new TruthGraphNode(
             String(element, "repo_path"),
             NullableString(element, "gid"),
@@ -208,6 +209,9 @@ public static class TruthGraphJsonReader
         {
             OmegaOnlyAxiomFreeDeclarations = element.TryGetProperty(marker, out _)
                 ? Array(element, marker).EnumerateArray().Select(ReadDeclaration).ToImmutableArray()
+                : null,
+            StrictOmegaDeclarations = element.TryGetProperty(strict, out _)
+                ? Array(element, strict).EnumerateArray().Select(TruthExportJsonReader.ReadDeclaration).ToImmutableArray()
                 : null,
         };
     }
@@ -355,6 +359,20 @@ public static class TruthGraphJsonReader
                     + "\0" + declaration.StatementId), "declaration markers");
             }
 
+            if (node.StrictOmegaDeclarations is { } paired)
+            {
+                if (paired.IsDefaultOrEmpty || node.State != "closed")
+                    throw new FormatException("Truth graph strict Omega measurements require a nonempty list on a closed node.");
+                foreach (var declaration in paired)
+                {
+                    TruthExportValidation.RequireValidDeclaration(declaration);
+                    if (declaration.StrictOmega is null)
+                        throw new FormatException("Truth graph strict Omega declaration is missing its measurement.");
+                }
+                RequireStrictOrder(paired.Select(static declaration => declaration.DeclarationNameKey
+                    + "\0" + declaration.StatementId), "strict Omega declarations");
+            }
+
             var dependencies = model.Truth.Edges.Where(edge => edge.Dependent == node.RepoPath).ToArray();
             var expected = dependencies.Length == 0
                 ? 0
@@ -422,7 +440,7 @@ public static class TruthGraphJsonReader
             : throw new FormatException($"Truth graph {name} must be a non-negative integer.");
 
     private static void RequireProperties(JsonElement element, IReadOnlyCollection<string> expected, string context,
-        string? optional = null)
+        IReadOnlyCollection<string>? optional = null)
     {
         if (element.ValueKind != JsonValueKind.Object)
         {
@@ -430,8 +448,8 @@ public static class TruthGraphJsonReader
         }
 
         var actual = element.EnumerateObject().Select(static property => property.Name).ToArray();
-        if (optional is not null && actual.Count(name => name == optional) == 1)
-            actual = actual.Where(name => name != optional).ToArray();
+        if (optional is not null)
+            actual = actual.Where(name => !optional.Contains(name) || actual.Count(candidate => candidate == name) != 1).ToArray();
         if (actual.Length != expected.Count
             || !actual.Order(StringComparer.Ordinal).SequenceEqual(expected.Order(StringComparer.Ordinal)))
         {

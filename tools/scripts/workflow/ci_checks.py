@@ -83,10 +83,11 @@ def prepare_local_lean():
     return execute("prepare:lean-toolchain", ["elan", "run", pin, "lake", "--version"], compute=False)
 
 
-def unit_run(name, unit):
+def unit_run(name, unit, *, changed=None):
     command = (["make", "-C", "tools", "test", "TEST_PROJECT=" + unit["project"]]
                if unit["project"] else ["bash", "-e", "-o", "pipefail", "-c", unit["command"]])
-    return execute(name, command)
+    env = {"CI_CHANGED_PATHS_FILE": str(changed)} if changed is not None else None
+    return execute(name, command, env=env)
 
 
 def prepare_lean_scope(paths, scope_file, base):
@@ -246,7 +247,7 @@ def local(args, data, revision):
                 env = os.environ.get("CI_DOTNET_PREPARED")
                 os.environ["CI_DOTNET_PREPARED"] = "1" if unit["dotnet"] else "0"
                 try:
-                    failures.append(with_budget(work / (name + "-budget"), lambda: unit_run(name, unit)))
+                    failures.append(with_budget(work / (name + "-budget"), lambda: unit_run(name, unit, changed=changed)))
                 finally:
                     if env is None:
                         os.environ.pop("CI_DOTNET_PREPARED", None)

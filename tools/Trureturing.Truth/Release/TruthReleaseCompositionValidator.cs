@@ -74,6 +74,15 @@ internal static class TruthReleaseCompositionValidator
         if (!exportMarkers.SequenceEqual(graphMarkers))
             throw new FormatException("Truth release declaration markers disagree between truth_export and truth_graph.");
 
+        // Compare complete paired records, including the primary frozen arrays and both type addresses.
+        var exportPairs = truthExport.Nodes.SelectMany(static node => node.Declarations
+            .Where(static declaration => declaration.StrictOmega is not null)
+            .Select(declaration => (node.RepoPath, Declaration: System.Text.Json.JsonSerializer.Serialize(declaration))));
+        var graphPairs = truthGraph.Truth.Nodes.SelectMany(static node => (node.StrictOmegaDeclarations ?? [])
+            .Select(declaration => (node.RepoPath, Declaration: System.Text.Json.JsonSerializer.Serialize(declaration))));
+        if (!exportPairs.SequenceEqual(graphPairs))
+            throw new FormatException("Truth release strict Omega measurements disagree between truth_export and truth_graph.");
+
         // DagMdSha256 remains unbound because the bundle has no dag_md artifact. DAG.md is an external
         // derived document, so this field is self-asserted external provenance, not a bundle-coherence claim.
     }

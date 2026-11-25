@@ -2,11 +2,15 @@
 
 import argparse
 from collections import defaultdict
+from dataclasses import replace
 from graphlib import TopologicalSorter
 import json
+import importlib
 import datetime
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import shutil
 import tomllib
@@ -23,10 +27,145 @@ VERSION_PREFIX = 'lean-modules-'
 DEFAULT_MODULE_BYTES = 712650
 
 
+OMEGA_BASIS = {'OmegaInit', 'OmegaMathlib'}
+OMEGA_LIBRARIES = OMEGA_BASIS | {'OmegaMath'}
+OMEGA_ROOTS = OMEGA_LIBRARIES | {'OmegaChecks'}
+OMEGA_OVERLAYS = ('omega-strict', 'omega-common')
+OMEGA_CHECKS = Path('src/OmegaChecks')
+OMEGA_CERTIFICATE = 'OmegaChecks.Interface.Equations'
+
+
+def namespace(name):
+    return name.partition('.')[0]
+
+
+def omega_enabled(root):
+    return (root / OMEGA_CHECKS / 'strict_lake.py').is_file()
+
+
+def omega_roots(root, modules):
+    return {n for n in modules if namespace(n) in OMEGA_ROOTS} if omega_enabled(root) else set()
+
+
+def omega_build_dir(module, backend):
+    subdirectory = {'trureturing': '.', 'reg': 'reg', 'leanInspectorInterface': 'leanInspectorInterface'}[module.package]
+    return Path(backend) / subdirectory
+
+
+def omega_build_plan(root, modules, graph):
+    """Select strict and common module closures and bind their effective inputs."""
+    if not omega_roots(root, modules):
+        return modules, graph, {}
+    basis = {name for name in graph if namespace(name) in OMEGA_BASIS}
+    strict_modules = dict(modules)
+    for name in basis:
+        source = Path('strict') / modules[name].source.relative_to('src')
+        if not (root / source).is_file():
+            raise ValueError(f'no strict source for {name}')
+        strict_modules[name] = replace(modules[name], source=source)
+    strict_graph = dict(graph)
+    strict_graph.update(inventory.project_imports(root, strict_modules, sources=sorted(basis)))
+    touched = {}
+    for name in TopologicalSorter(strict_graph).static_order():
+        touched[name] = namespace(name) in OMEGA_LIBRARIES or any(touched[dep] for dep in strict_graph[name])
+    # The strict check builds all Omega library and check modules. The dual
+    # compilation also builds every downstream consumer and its local imports.
+    consumers = {n for n in strict_graph if touched[n] and namespace(n) != 'OmegaChecks'}
+    strict = inventory.import_closure(strict_graph, consumers | omega_roots(root, modules))
+    clients = {n for n in strict_graph if n.startswith('OmegaChecks.Portable.') and touched[n]}
+    common_roots = basis | clients | ({OMEGA_CERTIFICATE} & graph.keys())
+    common = inventory.import_closure(strict_graph, common_roots) | inventory.import_closure(graph, common_roots)
+    strict.update(common)
+
+    # The overlay owns the entire root configuration and, for a Reg request,
+    # the actual Reg and interface package configurations. Bind their settings
+    # and pins without recording the generated files' checkout-specific paths.
+    config_paths = [OMEGA_CHECKS / 'strict_lake.py']
+    for directory in (Path('.'), Path('Reg'), inventory.INTERFACE):
+        config_paths.extend(directory / filename for filename in ('lakefile.toml', 'lake-manifest.json'))
+    configuration = [(str(p), file_digest(root / p)) for p in config_paths if (root / p).is_file()]
+    # Common facades are generated together from compiled strict exports and
+    # official interfaces. A change to either basis or their generator affects
+    # the common overlay even when the generated source is not tracked by Git.
+    common_inputs = digest([configuration,
+                            [(n, file_digest(root / modules[n].source), file_digest(root / strict_modules[n].source))
+                             for n in sorted(basis)],
+                            [(str(p), file_digest(root / p)) for p in
+                             (OMEGA_CHECKS / 'portable.py', OMEGA_CHECKS / 'Portable/Exports.lean')]])
+    augmented = dict(modules)
+    inputs = {}
+    for name in strict:
+        module = modules[name]
+        builds = [omega_build_dir(module, OMEGA_OVERLAYS[0])]
+        values = [str(builds[0]), configuration, str(strict_modules[name].source),
+                  file_digest(root / strict_modules[name].source)]
+        if name in common:
+            builds.append(omega_build_dir(module, OMEGA_OVERLAYS[1]))
+            values.extend([str(builds[1]), common_inputs])
+        augmented[name] = replace(module, extra_builds=tuple(builds))
+        inputs[name] = values
+    return augmented, {n: graph[n] | (strict_graph[n] if n in strict else set()) for n in graph}, inputs
+
+
+def build_omega_targets(root, lake, modules, names):
+    targets = [f'@{modules[n].package}/+{n}:olean' for n in sorted(names)]
+    for i in range(0, len(targets), 256):
+        subprocess.run([*lake, 'build', *targets[i:i+256]], cwd=root, check=True)
+
+
+def prepare_common_facades(root, modules, strict_lake, portable):
+    basis = sorted(n for n in modules if namespace(n) in OMEGA_BASIS)
+    strict_lake_command, libraries = strict_lake.lake_layout(True, False)
+    build_omega_targets(root, strict_lake_command, modules, basis)
+    build_omega_targets(root, ['lake'], modules, basis)
+    lean = portable.output('lake', 'env', 'printenv', 'LEAN').strip()
+    official_path = portable.output('lake', 'env', 'printenv', 'LEAN_PATH').strip()
+    normal, common = portable.derived_facades(lean, libraries[''], basis, official_path)
+    for name in basis:
+        source = modules[name].source
+        if (root / source).read_bytes() != normal[name]:
+            raise ValueError(f'{source} does not re-export the compiled strict interface')
+        target = strict_lake.COMMON_SRC / source.relative_to('src')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or target.read_bytes() != common[name]:
+            with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as staged:
+                staged.write(common[name])
+            os.replace(staged.name, target)
+
+
+def compile_omega_outputs(root, modules, names, common_prepared):
+    strict = {n for n in names if modules[n].extra_builds}
+    if not strict:
+        return common_prepared
+    common = {n for n in strict if len(modules[n].extra_builds) == 2}
+    # The overlay configuration is owned by the consumer checkout. Use the
+    # same implementation that the Omega audit uses for the real Lake builds.
+    sys.path.insert(0, str(root / OMEGA_CHECKS))
+    try:
+        strict_lake = importlib.import_module('strict_lake')
+        portable = importlib.import_module('portable')
+        if strict_lake.ROOT != root.resolve() or portable.ROOT != root.resolve():
+            raise ValueError('Omega overlay loaded from another checkout')
+        lake, _ = strict_lake.lake_layout(True, any(modules[n].package != 'trureturing' for n in strict))
+        build_omega_targets(root, lake, modules, strict)
+        if common:
+            if not common_prepared:
+                prepare_common_facades(root, modules, strict_lake, portable)
+                common_prepared = True
+            lake, _ = strict_lake.lake_layout(False, any(modules[n].package != 'trureturing' for n in common),
+                                              strict_lake.COMMON_SRC)
+            build_omega_targets(root, lake, modules, common)
+    finally:
+        sys.path.pop(0)
+    return common_prepared
+
+
 def checkout_targets(root):
     modules = inventory.workspace_modules(root)
-    graph = compiler.scoped_imports(root, modules, inventory.release_roots(modules))
-    scope = inventory.release_scope(modules, graph)
+    roots = inventory.release_roots(modules) | omega_roots(root, modules)
+    graph = compiler.scoped_imports(root, modules, roots)
+    modules, graph, omega_inputs = omega_build_plan(root, modules, graph)
+    scope = set(graph)
     configs = {}
     pins = {}
     directories = {'trureturing': Path('.'), 'reg': Path('Reg'), 'leanInspectorInterface': inventory.INTERFACE,
@@ -52,8 +191,11 @@ def checkout_targets(root):
         module = modules[name]
         dependencies = sorted(graph[name])
         source = file_digest(root / module.source)
-        key = digest([environment, module.package, pins[module.package], str(module.source), str(module.build),
-                      module_config(configs[module.package], name), source, [(d, targets[d]['key']) for d in dependencies]])
+        inputs = [environment, module.package, pins[module.package], str(module.source), str(module.build),
+                  module_config(configs[module.package], name), source, [(d, targets[d]['key']) for d in dependencies]]
+        if name in omega_inputs:
+            inputs.extend(omega_inputs[name])
+        key = digest(inputs)
         targets[name] = {'key': key, 'deps': dependencies}
     return modules, targets
 
@@ -161,7 +303,7 @@ def restore_matching(root, modules, targets, index, names, remote, destination):
         for shard, members in selected.items():
             row = index['shards'][shard]
             remote.download(row, archive)
-            restored.update(restore_shard(archive, row, members, modules, destination))
+            restored.update(restore_shard(archive, row, members, modules, destination, root=root))
             archive.unlink()
     return restored
 
@@ -194,13 +336,16 @@ def work(root, plan, lane, remote, output):
     original = plan
     splits = remote.splits(original)
     plan = expanded(original, splits)
-    modules = inventory.workspace_modules(root)
+    modules, current = checkout_targets(root)
     targets = plan['targets']
+    if current != {name: {k: row[k] for k in ('key', 'deps')} for name, row in targets.items()}:
+        raise ValueError('worker compiler inputs differ from its plan')
     graph = {n: set(row['deps']) for n, row in targets.items()}
     base = remote.latest(plan['base_version']) if plan['base_version'] else None
     complete = recover_partials(plan, matching(plan, plan['inherited']), remote)
     installed = set()
     compiled = uploaded = 0
+    common_prepared = False
     assigned = [child for name in original['lanes'][lane] for child in splits.get(name, {name: None})]
     for name in assigned:
         if name in complete:
@@ -213,7 +358,11 @@ def work(root, plan, lane, remote, output):
             installed.update(restore_matching(root, modules, targets, index, scope - installed, remote, destination))
         missing = scope - installed
         if missing:
-            compiler.compile_roots(root, modules, sorted(compiler.terminal(missing, graph)))
+            # The official and strict import graphs can have different edges.
+            # Explicitly name the missing modules for each active backend.
+            roots = missing if any(modules[n].extra_builds for n in missing) else compiler.terminal(missing, graph)
+            compiler.compile_roots(root, modules, sorted(roots))
+            common_prepared = compile_omega_outputs(root, modules, missing, common_prepared)
             installed.update(missing)
             compiled += len(missing)
         output.mkdir(parents=True, exist_ok=True)

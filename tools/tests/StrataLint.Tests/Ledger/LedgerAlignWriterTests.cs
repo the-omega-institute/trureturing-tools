@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using StrataLint.Cli;
 using StrataLint.Engine;
@@ -174,6 +175,144 @@ public sealed class LedgerAlignWriterTests
     }
 
     [Fact]
+    public void CompiledResponseWritesPairedAndOfficialOnlyRecordsWithExactMeasuredArrays()
+    {
+        var full = new[] { "Classical.choice", "Quot.sound", "propext" }.ToImmutableArray();
+        using var fixture = new AlignFixture(Module("A", axioms: full), Module("B", axioms: ["propext"]), Module("C"));
+        var result = fixture.AlignWithMeasurement(["--add", PathFor("A"), "--add", PathFor("B"), "--add", PathFor("C")],
+            response =>
+            {
+                response[1]!["declarations"]![0]!["strict_omega"]!["axioms"] = new JsonArray("propext");
+                response[2]!["strictEligible"] = false;
+                response[2]!["declarations"]![0]!.AsObject().Remove("strict_omega");
+            });
+        Assert.True(result.Success, result.Error);
+        var a = Assert.Single(fixture.Load("A").Declarations);
+        var b = Assert.Single(fixture.Load("B").Declarations);
+        var c = Assert.Single(fixture.Load("C").Declarations);
+        Assert.Equal(full.ToArray(), a.Axioms!.Value.ToArray());
+        Assert.Equal(["Init", "OmegaMath"], a.Libraries!.Value.ToArray());
+        Assert.Equal(["OmegaInit", "OmegaMath"], a.StrictOmega!.Libraries.ToArray());
+        Assert.Empty(a.StrictOmega.Axioms);
+        Assert.NotEqual(a.StrictOmega.OfficialStatementTypeAddress, a.StrictOmega.StatementTypeAddress);
+        Assert.Equal(["propext"], b.StrictOmega!.Axioms.ToArray());
+        Assert.Null(c.StrictOmega);
+        Assert.Empty(c.Axioms!.Value);
+
+        var before = fixture.Image();
+        var ordinary = fixture.Align("--selector", PathFor("A"));
+        Assert.True(ordinary.Success, ordinary.Error);
+        var retry = fixture.AlignWithMeasurement(["--refresh-annotations", "--selector", PathFor("A")]);
+        Assert.True(retry.Success, retry.Error);
+        Assert.Contains("changed=0", retry.Output, StringComparison.Ordinal);
+        Assert.Equal(before, fixture.Image());
+    }
+
+    [Theory]
+    [InlineData("official-derived-with-strict")]
+    [InlineData("official-derived-ineligible")]
+    [InlineData("official-derived-false")]
+    [InlineData("official-derived-string")]
+    [InlineData("eligibility")]
+    [InlineData("missing")]
+    [InlineData("ineligible")]
+    [InlineData("identity")]
+    [InlineData("stale")]
+    [InlineData("crossed")]
+    [InlineData("official-axioms")]
+    public void InvalidCompiledResponseDoesNotWriteAnySelectedRecord(string defect)
+    {
+        using var fixture = new AlignFixture(Module("A"), Module("B"));
+        var result = fixture.AlignWithMeasurement(["--add", PathFor("A"), "--add", PathFor("B")], response =>
+        {
+            var module = response[1]!.AsObject();
+            var row = module["declarations"]![0]!.AsObject();
+            var strict = row["strict_omega"]!.AsObject();
+            switch (defect)
+            {
+                case "official-derived-with-strict": row["officialDerivedOnly"] = true; break;
+                case "official-derived-ineligible":
+                    module["strictEligible"] = false;
+                    row.Remove("strict_omega");
+                    row["officialDerivedOnly"] = true;
+                    break;
+                case "official-derived-false":
+                    row.Remove("strict_omega");
+                    row["officialDerivedOnly"] = false;
+                    break;
+                case "official-derived-string":
+                    row.Remove("strict_omega");
+                    row["officialDerivedOnly"] = "true";
+                    break;
+                case "eligibility": module.Remove("strictEligible"); break;
+                case "missing": row.Remove("strict_omega"); break;
+                case "ineligible": module["strictEligible"] = false; break;
+                case "identity": strict["declaration_name_key"] = "ns(n0,1:a)"; break;
+                case "stale": strict["official_statement_type_address"] = Sha256("previous official statement"); break;
+                case "crossed": row["statementTypeAddress"] = strict["statement_type_address"]!.GetValue<string>(); break;
+                case "official-axioms": row["axioms"] = new JsonArray("propext"); break;
+            }
+        });
+        Assert.False(result.Success);
+        Assert.Contains("LEDGER_ALIGN_FAILED", result.Error, StringComparison.Ordinal);
+        Assert.Empty(fixture.Image());
+    }
+
+    [Fact]
+    public void CertifiedOfficialGeneratedRowRetainsOfficialEvidence()
+    {
+        using var fixture = new AlignFixture(Module("A"), Module("B", axioms: ["propext"]));
+        var result = fixture.AlignWithMeasurement(["--add", PathFor("A"), "--add", PathFor("B")], response =>
+        {
+            var row = response[1]!["declarations"]![0]!.AsObject();
+            row.Remove("strict_omega");
+            row["officialDerivedOnly"] = true;
+        });
+        Assert.True(result.Success, result.Error);
+        Assert.NotNull(Assert.Single(fixture.Load("A").Declarations).StrictOmega);
+        var derived = Assert.Single(fixture.Load("B").Declarations);
+        Assert.Null(derived.StrictOmega);
+        Assert.Equal(["propext"], derived.Axioms!.Value.ToArray());
+        Assert.Equal(["Init", "OmegaMath"], derived.Libraries!.Value.ToArray());
+    }
+
+    [Fact]
+    public void RefreshRejectsLosingAnExistingStrictMeasurement()
+    {
+        using var fixture = new AlignFixture(Module("A"));
+        var initial = fixture.AlignWithMeasurement(["--add", PathFor("A")]);
+        Assert.True(initial.Success, initial.Error);
+        var before = fixture.Image();
+        var refresh = fixture.AlignWithMeasurement(["--refresh-annotations", "--selector", PathFor("A")], response =>
+        {
+            response[0]!["strictEligible"] = false;
+            response[0]!["declarations"]![0]!.AsObject().Remove("strict_omega");
+        });
+        Assert.False(refresh.Success);
+        Assert.Contains("discard strict_omega measurement", refresh.Error, StringComparison.Ordinal);
+        Assert.Equal(before, fixture.Image());
+    }
+
+    [Fact]
+    public void OrdinaryRepinRemeasuresAnExistingStrictPair()
+    {
+        var baseline = Module("A");
+        using var first = new AlignFixture(baseline);
+        var initial = first.AlignWithMeasurement(["--add", PathFor("A")]);
+        Assert.True(initial.Success, initial.Error);
+        using var next = new AlignFixture(baseline with { StatementMaterial = "True = True" });
+        Directory.CreateDirectory(Path.GetDirectoryName(next.StateFile("A"))!);
+        File.Copy(first.StateFile("A"), next.StateFile("A"));
+        var repin = next.AlignWithMeasurement(["--selector", PathFor("A")]);
+        Assert.True(repin.Success, repin.Error);
+        var prior = first.Load("A");
+        var current = next.Load("A");
+        Assert.NotEqual(prior.StatementId, current.StatementId);
+        Assert.NotEqual(Assert.Single(prior.Declarations).StrictOmega!.OfficialStatementTypeAddress,
+            Assert.Single(current.Declarations).StrictOmega!.OfficialStatementTypeAddress);
+    }
+
+    [Fact]
     public void RefreshRejectsMissingMembershipAndChangedPinBeforeWriting()
     {
         var baseline = Module("A");
@@ -322,6 +461,42 @@ public sealed class LedgerAlignWriterTests
         internal CommandResult Align(params string[] options) =>
             Invoke(options.Any(static option => option is "--selector" or "--add")
                 ? [.. options, "--candidate-lean-report", ReportPath(scoped: true, options)] : options);
+        internal CommandResult AlignWithMeasurement(string[] options, Action<JsonArray>? modify = null)
+        {
+            var selected = options.Select((option, index) => (option, index))
+                .Where(static item => item.option is "--selector" or "--add")
+                .Select(item => RepoPath.CreateKnown(options[item.index + 1]));
+            var response = JsonSerializer.SerializeToNode(selected.Select(path => new
+            {
+                module = LeanImportClosure.ModuleName(path),
+                strictEligible = true,
+                declarations = report.Files[path].Declarations.Select(declaration => new
+                {
+                    nameKey = declaration.NameKey,
+                    kind = declaration.Kind,
+                    includeInStatement = declaration.IncludeInStatement,
+                    statementTypeAddress = declaration.StatementTypeAddress,
+                    libraries = new[] { "OmegaMath", "Init" },
+                    axioms = declaration.Axioms,
+                    strict_omega = new StrictOmegaMeasurement(declaration.NameKey, declaration.Kind,
+                        Sha256("strict:" + declaration.StatementTypeAddress), declaration.StatementTypeAddress,
+                        ["OmegaInit", "OmegaMath"], []),
+                }),
+            }))!.AsArray();
+            modify?.Invoke(response);
+            File.WriteAllText(Path.Combine(temporary.Path, "measurement-response.json"), response.ToJsonString());
+            var script = Path.Combine(temporary.Path, "tools/scripts/agent/frozen-dependencies.sh");
+            Directory.CreateDirectory(Path.GetDirectoryName(script)!);
+            File.WriteAllText(script, "cp measurement-response.json \"$2\"\n");
+            return DagLedgerAlignWriter.Align(temporary.Path, Repository,
+                [.. options, "--candidate-lean-report", ReportPath(scoped: true, options)]);
+        }
+        internal FrozenStateRecord Load(string name)
+        {
+            var bytes = File.ReadAllBytes(StateFile(name)).ToImmutableArray();
+            return FrozenStateRecordLoader.Load(new(FrozenStatePath.FromModulePath(RepoPathFor(name)),
+                bytes, Encoding.UTF8.GetString(bytes.AsSpan())));
+        }
         internal string ReportPath(bool scoped, params string[] options)
         {
             var targets = options.Select((option, index) => (option, index))

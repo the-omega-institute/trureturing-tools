@@ -30,9 +30,11 @@ class CheckTests(unittest.TestCase):
     def test_pr_and_push_use_the_same_scoped_command_with_ambient_full_build(self):
         for purpose in ("pull-request", "push"):
             with self.subTest(purpose=purpose):
-                result, calls, _ = self.local_spies(purpose=purpose)
+                result, calls, plan = self.local_spies(purpose=purpose)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(["pr-lean", "D5/changed.lean"], calls)
+                if plan["hits"].get("omega"):
+                    self.assertIn(["omega", "D5/changed.lean"], calls)
                 self.assertFalse(any(call[:2] == ["make", "lean-report"] for call in calls))
 
     def test_hosted_setup_uses_actual_targets_and_programs(self):
@@ -318,6 +320,14 @@ class CheckTests(unittest.TestCase):
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text("{}")
                     (path.parent / (path.parent.name + ".csproj")).write_text("<Project />")
+            if "omega" in data["units"]:
+                omega = root / "src/OmegaChecks/check.py"
+                omega.parent.mkdir(parents=True)
+                omega.write_text(
+                    "import json, os\nfrom pathlib import Path\n"
+                    "paths = Path(os.environ['CI_CHANGED_PATHS_FILE']).read_text().split(chr(0))[:-1]\n"
+                    "with open(os.environ['CALLS'], 'a') as output:\n"
+                    "    output.write(json.dumps(['omega', *paths]) + '\\n')\n")
             (root / "lean-toolchain").write_text("fixture-pin\n")
             bindir = root / "bin"
             bindir.mkdir()

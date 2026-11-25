@@ -4,12 +4,14 @@ from collections import defaultdict
 import gzip
 import io
 import json
+import os
 from pathlib import Path
 import re
+import subprocess
 import tarfile
 import tempfile
 
-from lean_artifact_inventory import Module, PROJECT_BUILD, lean_artifact_paths
+from lean_artifact_inventory import Module, PROJECT_BUILD, compiler_path, compiler_variants, lean_artifact_paths
 from lean_cache_release import has_unsafe_parent, install_scoped
 from lean_cache_release_io import archive_sha, copy_chunks
 from lean_compile_layers import check_outputs
@@ -18,6 +20,7 @@ from lean_release_index import safe_path, valid_digest
 DEFAULT_CAPACITY = 256 * 1024**2
 MANIFEST = 'shard-members.json'
 NAME = re.compile(r'[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*')
+ARTIFACT_HASH_READER = Path('src/OmegaChecks/Portable/ArtifactHashes.lean')
 
 
 def prefixes(name):
@@ -83,6 +86,63 @@ def lookup_shard(name, module_to_shard, shards):
     return owner
 
 
+def verify_backend_hashes(root, build, modules, grouped):
+    """Check every compiler variant of paired modules using the portable reader's Lake hasher."""
+    hashes = {}
+    for name, module in modules.items():
+        if not module.extra_builds:
+            continue
+        for variant in compiler_variants(module):
+            trace = compiler_path(name, variant, 'lib/lean', 'trace')
+            outputs = json.loads((build / trace).read_bytes())['outputs']
+            descriptors = dict(zip(('olean', 'olean.server', 'olean.private'), outputs['o']))
+            descriptors.update(ilean=outputs['i'], c=outputs['c'])
+            for key, suffix in (('rs', 'ir.sig'), ('r', 'ir'), ('b', 'bc')):
+                if key in outputs:
+                    descriptors[suffix] = outputs[key]
+
+            traced = {trace}
+            for suffix, description in descriptors.items():
+                location = 'ir' if suffix in ('c', 'bc') else 'lib/lean'
+                path = compiler_path(name, variant, location, suffix)
+                sidecar = path.with_name(path.name + '.hash')
+                if (not isinstance(description, str)
+                        or not re.fullmatch(r'[0-9a-f]{16}\.' + re.escape(suffix), description)
+                        or not {path, sidecar} <= grouped[name]):
+                    raise ValueError(f'invalid Lake output description for {path}')
+                digest = description[:16]
+                if (build / sidecar).read_bytes() != digest.encode('ascii'):
+                    raise ValueError(f'artifact sidecar differs from its Lake trace: {sidecar}')
+                traced.update((path, sidecar))
+                hashes[path] = digest
+            if (grouped[name] & lean_artifact_paths(name, variant)) != traced:
+                raise ValueError(f'untraced compiler artifacts: {name} in {variant.build}')
+
+    if hashes:
+        reader = (root / ARTIFACT_HASH_READER).absolute()
+        observed = subprocess.run(['lean', '--run', str(reader)], cwd=root, check=True, text=True,
+                                  input='\n'.join(str((build / path).absolute()) for path in hashes),
+                                  stdout=subprocess.PIPE).stdout.splitlines()
+        for (path, expected), actual in zip(hashes.items(), observed, strict=True):
+            if actual != expected:
+                raise ValueError(f'artifact differs from its Lake trace: {path}')
+
+
+def file_identity(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def traces_match(live, staged):
+    # Lake records checkout-specific paths in the diagnostic inputs and log.
+    try:
+        current = json.loads(live.read_bytes())
+    except ValueError:
+        return False
+    published = json.loads(staged.read_bytes())
+    return (isinstance(current, dict) and isinstance(published.get('depHash'), str)
+            and all(current.get(key) == published.get(key) for key in ('schemaVersion', 'depHash', 'outputs')))
+
+
 def pack_shard(root, modules, members, output, fingerprint):
     if not valid_digest(fingerprint):
         raise ValueError('invalid module shard fingerprint')
@@ -93,6 +153,7 @@ def pack_shard(root, modules, members, output, fingerprint):
     if not selected:
         raise ValueError('empty module shard')
     grouped = {}
+    verified_files = {}
     for name, module in selected.items():
         paths = set()
         for path in lean_artifact_paths(name, module):
@@ -101,10 +162,16 @@ def pack_shard(root, modules, members, output, fingerprint):
                 raise ValueError('unsafe compiler artifact: ' + str(path))
             if file.is_file():
                 paths.add(path)
+                if module.extra_builds:
+                    verified_files[path.as_posix()] = file_identity(file.stat())
         grouped[name] = paths
     check_outputs(build, selected, grouped)
+    verify_backend_hashes(root, build, selected, grouped)
     index = {n: {'build': selected[n].build.as_posix(), 'paths': sorted(map(str, grouped[n]))}
              for n in sorted(selected)}
+    for name, row in index.items():
+        if selected[name].extra_builds:
+            row['extra_builds'] = [p.as_posix() for p in selected[name].extra_builds]
     manifest = json.dumps(index, separators=(',', ':')).encode()
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output.parent) as directory:
@@ -120,12 +187,18 @@ def pack_shard(root, modules, members, output, fingerprint):
             for name, row in index.items():
                 start = raw.tell()
                 for path in row['paths']:
-                    info = (build / path).stat()
-                    entry = tarfile.TarInfo(path)
-                    entry.mode = info.st_mode & 0o777
-                    entry.size = info.st_size
                     with (build / path).open('rb') as source:
+                        # Confirm that verified content has stayed stable through hashing and packing.
+                        info = os.fstat(source.fileno())
+                        verified = verified_files.get(path)
+                        if verified is not None and file_identity(info) != verified:
+                            raise ValueError(f'compiler artifact changed during packing: {path}')
+                        entry = tarfile.TarInfo(path)
+                        entry.mode = info.st_mode & 0o777
+                        entry.size = info.st_size
                         archive.addfile(entry, source)
+                        if verified is not None and file_identity(os.fstat(source.fileno())) != verified:
+                            raise ValueError(f'compiler artifact changed during packing: {path}')
                 compressed.flush()
                 module_sizes[name] = raw.tell() - start
         descriptor = {'sha256': archive_sha(candidate, None), 'bytes': candidate.stat().st_size,
@@ -134,7 +207,7 @@ def pack_shard(root, modules, members, output, fingerprint):
     return descriptor
 
 
-def restore_shard(archive, descriptor, members, modules, destination):
+def restore_shard(archive, descriptor, members, modules, destination, *, root=Path('.')):
     """Check the entire archive, install requested modules, and preserve conflicting live artifacts."""
     wanted = set(members)
     indexed = set(descriptor['members'])
@@ -162,8 +235,11 @@ def restore_shard(archive, descriptor, members, modules, destination):
             for name, row in manifest.items():
                 if not NAME.fullmatch(name):
                     raise ValueError('invalid archived module name')
-                module = Module('', Path(), Path(row['build']))
-                if name in wanted and module.build != modules[name].build:
+                extra_builds = tuple(Path(safe_path(p)) for p in row.get('extra_builds', []))
+                module = Module('', Path(), Path(row['build']), extra_builds)
+                if len(set((module.build, *extra_builds))) != 1 + len(extra_builds):
+                    raise ValueError('duplicate compiler build path: ' + name)
+                if name in wanted and (module.build, extra_builds) != (modules[name].build, modules[name].extra_builds):
                     raise ValueError('module build path differs from the checkout: ' + name)
                 paths = {safe_path(p) for p in row['paths']}
                 if (not paths or len(paths) != len(row['paths']) or not paths <= lean_artifact_paths(name, module)
@@ -186,10 +262,12 @@ def restore_shard(archive, descriptor, members, modules, destination):
             if owners:
                 raise ValueError('shard omits indexed compiler artifacts')
 
-        check_outputs(stage, {n: modules[n] for n in wanted}, grouped)
+        selected = {n: modules[n] for n in wanted}
+        check_outputs(stage, selected, grouped)
+        verify_backend_hashes(root, stage, selected, grouped)
         install = set()
         restored = set()
-        for name in wanted:
+        for name, module in selected.items():
             missing = set()
             for path in grouped[name]:
                 live = destination / path
@@ -197,7 +275,12 @@ def restore_shard(archive, descriptor, members, modules, destination):
                     raise ValueError('unsafe local compiler artifact: ' + str(path))
                 if not live.exists():
                     missing.add(path)
-                elif not live.is_file() or archive_sha(live, None) != archive_sha(stage / path, None):
+                elif not live.is_file():
+                    break
+                elif module.extra_builds and path.suffix == '.trace':
+                    if not traces_match(live, stage / path):
+                        break
+                elif archive_sha(live, None) != archive_sha(stage / path, None):
                     break
             else:
                 install.update(missing)

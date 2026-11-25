@@ -18,6 +18,9 @@ public sealed record TruthExportDeclaration(
 
     [JsonPropertyName("omega_only_axiom_free"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? OmegaOnlyAxiomFree { get; init; }
+
+    [JsonPropertyName("strict_omega"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public StrictOmegaMeasurement? StrictOmega { get; init; }
 }
 
 /// One current Closed node projected to plain wire fields. <see cref="NodeAxiomClosure"/>

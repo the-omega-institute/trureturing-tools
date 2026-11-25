@@ -113,13 +113,13 @@ public static class TruthExportJsonReader
             String(element, "freeze_status"));
     }
 
-    private static TruthExportDeclaration ReadDeclaration(JsonElement element)
+    internal static TruthExportDeclaration ReadDeclaration(JsonElement element)
     {
         RequireProperties(
             element,
             ["declaration_name_key", "kind", "statement_id"],
             "truth export declaration",
-            ["libraries", "axioms", "omega_only_axiom_free"]);
+            ["libraries", "axioms", "omega_only_axiom_free", "strict_omega"]);
         var hasMarker = element.TryGetProperty("omega_only_axiom_free", out var marker);
         if (hasMarker && marker.ValueKind != JsonValueKind.True)
             throw new FormatException("Truth export omega_only_axiom_free must be true when present.");
@@ -131,6 +131,7 @@ public static class TruthExportJsonReader
             Libraries = OptionalStringArray(element, "libraries"),
             Axioms = OptionalStringArray(element, "axioms"),
             OmegaOnlyAxiomFree = hasMarker ? true : null,
+            StrictOmega = element.TryGetProperty("strict_omega", out var strict) ? StrictOmegaMeasurement.Read(strict) : null,
         };
     }
 

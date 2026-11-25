@@ -23,6 +23,7 @@ internal static class DagLedgerAlignWriter
             var states = truth is null ? null : LeanTruthStates.Resolve(snapshot, truth.Lean);
             var planned = new Dictionary<RepoPath, FrozenStateRecord>();
             var measurementReports = new Dictionary<RepoPath, LeanFileReport>();
+            var previousPairs = new Dictionary<RepoPath, HashSet<(string, string)>>();
             var backups = new Dictionary<RepoPath, ImmutableArray<byte>?>();
             foreach (var path in selected)
             {
@@ -37,6 +38,12 @@ internal static class DagLedgerAlignWriter
                 if (!truth!.Report.Files.TryGetValue(path, out var report))
                     throw new InvalidOperationException($"module {path.Value} has no current Lean report");
                 var record = FrozenStateRecord.FromReport(path, report);
+                if (existing is not null)
+                {
+                    var pairs = existing.Declarations.Where(static declaration => declaration.StrictOmega is not null)
+                        .Select(static declaration => declaration.Identity).ToHashSet();
+                    if (pairs.Count != 0) previousPairs.Add(path, pairs);
+                }
                 if (options.RefreshAnnotations)
                 {
                     if (existing!.StatementId != record.StatementId || !existing.HasInventory(record.Declarations))
@@ -53,7 +60,9 @@ internal static class DagLedgerAlignWriter
                     };
                 }
                 planned.Add(path, record);
-                if (current is null || options.RefreshAnnotations) measurementReports.Add(path, report);
+                if (current is null || options.RefreshAnnotations
+                    || previousPairs.ContainsKey(path) && existing!.StatementId != record.StatementId)
+                    measurementReports.Add(path, report);
             }
             if (!options.Retirements.IsEmpty)
             {
@@ -79,6 +88,14 @@ internal static class DagLedgerAlignWriter
                         throw new InvalidOperationException($"module {file.Path.Value} still imports retired registration {retired.Value}");
             }
             (measure ?? FrozenDependencyMeasurement.Attach)(root, measurementReports, planned);
+            foreach (var (path, record) in planned)
+            {
+                FrozenStateRecord.ValidateDeclarations(record.Declarations);
+                record.ValidatePairedStatements(truth!.Report.Files[path]);
+                if (previousPairs.TryGetValue(path, out var pairs) && record.Declarations.Any(declaration =>
+                        pairs.Contains(declaration.Identity) && declaration.StrictOmega is null))
+                    throw new FormatException($"selector {path.Value} update would discard strict_omega measurement");
+            }
             using var writeGuard = FrozenStateWriter.AcquireWriteGuard(root);
             foreach (var (path, previous) in backups)
             {

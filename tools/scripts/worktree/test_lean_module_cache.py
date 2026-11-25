@@ -1,15 +1,21 @@
 """End-to-end compiler shard selection, incremental publication and restart with real Lake artifacts."""
 
+from dataclasses import replace
+import hashlib
+import io
 from pathlib import Path
+from types import SimpleNamespace
 import json
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import lean_module_cache as cache
 from lean_artifact_inventory import Module, PROJECT_BUILD
+from lean_module_shards import pack_shard, restore_shard
 
 
 class MemoryRemote:
@@ -125,6 +131,175 @@ class ModuleReleases(unittest.TestCase):
         self.assertEqual(old_archive, self.remote.assets[first['version'], first['shards']['D5']['asset']])
         self.assertNotEqual(first['shards']['D5']['sha256'], second['shards']['D5']['sha256'])
         self.assertEqual(self.workers(self.plan(second)), [])
+
+    def test_omega_backends_share_module_identity_and_restore_together(self):
+        for name in ('OmegaInit', 'OmegaMathlib', 'OmegaChecks'):
+            with self.cfg.open('a') as config:
+                config.write(f'[[lean_lib]]\nname = "{name}"\nsrcDir = "src"\n')
+        for name, code in [('OmegaInit', 'module\n@[expose] public def omegaBase := 1\n'),
+                           ('OmegaMathlib', 'import OmegaInit\ndef omegaValue := omegaBase + 1\n'),
+                           ('OmegaChecks.Portable.Client', 'import OmegaMathlib\ndef checked := omegaValue\n')]:
+            path = Path('src', *name.split('.')).with_suffix('.lean')
+            self.modules[name] = Module('trureturing', path, Path('.'))
+            (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / path).write_text(code)
+        strict = self.root / 'strict'
+        strict.mkdir()
+        (strict / 'OmegaInit.lean').write_text('module\n@[expose] public def omegaBase := 7\n')
+        (strict / 'OmegaMathlib.lean').write_text('import OmegaInit\ndef omegaValue := omegaBase + 1\n')
+        (self.root / 'D5/A.lean').write_text('import OmegaMathlib\ndef valueA := omegaValue\n')
+        checks = self.root / 'src/OmegaChecks'
+        for helper in ('strict_lake.py', 'portable.py', 'Portable/Exports.lean'):
+            (checks / helper).write_text('')
+        (checks / 'Portable/ArtifactHashes.lean').write_text('''import Lake.Build.Trace
+
+def main : IO Unit := do
+  for path in (← (← IO.getStdin).readToEnd).splitOn "\\n" do
+    IO.println (← Lake.computeBinFileHash path).hex
+''')
+        common = self.root / '.lake/omega-common-src'
+
+        def layout(strict_backend, with_reg, common_dir=None):
+            self.assertFalse(with_reg)
+            label = 'omega-common' if common_dir else 'omega-strict'
+            source = common_dir or 'strict'
+            text = self.cfg.read_text()
+            for name in ('OmegaInit', 'OmegaMathlib'):
+                text = text.replace(f'name = "{name}"\nsrcDir = "src"', f'name = "{name}"\nsrcDir = "{source}"')
+            build = PROJECT_BUILD / label
+            config = self.root / '.lake' / (label + '.toml')
+            config.write_text(f'buildDir = "{build}"\n' + text)
+            return ['lake', '-f', str(config)], {'': self.root / build / 'lib/lean'}
+
+        def derived_facades(*args):
+            names = args[2]
+            normal = {n: (self.root / self.modules[n].source).read_bytes() for n in names}
+            generated = dict(normal, OmegaInit=b'module\n@[expose] public def omegaBase := 11\n')
+            return normal, generated
+
+        strict_api = SimpleNamespace(ROOT=self.root.resolve(), COMMON_SRC=common, lake_layout=layout)
+        portable_api = SimpleNamespace(ROOT=self.root.resolve(), derived_facades=derived_facades,
+                                       output=lambda *args: self.lake(*args[1:]).stdout)
+        with patch.object(cache.importlib, 'import_module', side_effect=lambda name: {
+            'strict_lake': strict_api, 'portable': portable_api}[name]):
+            plan = self.plan()
+            modules, _ = cache.checkout_targets(self.root)
+            self.assertEqual(modules['OmegaMathlib'].extra_builds, (Path('omega-strict'), Path('omega-common')))
+            self.assertEqual(modules['D5.A'].extra_builds, (Path('omega-strict'),))
+            self.assertEqual(modules['D5.B'].extra_builds, ())
+            self.assertTrue({'OmegaInit', 'OmegaMathlib', 'OmegaChecks.Portable.Client'} <= plan['targets'].keys())
+            self.workers(plan)
+            index = cache.finish(plan, self.remote)
+        self.assertFalse(self.plan(index)['lanes'])
+        build = self.root / PROJECT_BUILD
+        paths = ['lib/lean/OmegaInit.olean', 'omega-strict/lib/lean/OmegaInit.olean',
+                 'omega-common/lib/lean/OmegaInit.olean']
+        outputs = {path: (build / path).read_bytes() for path in paths}
+        self.assertEqual(len(set(outputs.values())), 3)
+        shutil.rmtree(build)
+        result = cache.restore(self.root, index, ['D5.C', 'OmegaChecks.Portable.Client'], self.remote, build)
+        self.assertEqual(result['restored'], 5)
+        self.assertEqual({path: (build / path).read_bytes() for path in paths}, outputs)
+        self.assertFalse((build / 'lib/lean/D5/B.olean').exists())
+        for backend in (None, 'omega-strict', 'omega-common'):
+            options = ['-f', str(self.root / '.lake' / (backend + '.toml'))] if backend else []
+            self.lake(*options, '--no-build', 'build', '+OmegaChecks.Portable.Client:olean')
+
+        name = 'OmegaInit'
+        row = index['shards'][index['targets'][name]['shard']]
+        archive = self.root / 'omega.tar.gz'
+        self.remote.download(row, archive)
+
+        # An independent official build has the same outputs but local paths in its trace.
+        warm = self.root / 'warm'
+        (warm / 'src').mkdir(parents=True)
+        for source in ('lean-toolchain', 'lakefile.toml', 'src/OmegaInit.lean'):
+            shutil.copyfile(self.root / source, warm / source)
+        subprocess.run(['lake', 'build', '+OmegaInit:olean'], cwd=warm, check=True, capture_output=True)
+        warm_build = warm / PROJECT_BUILD
+        official_trace = Path(paths[0]).with_suffix('.trace')
+        local_trace = (warm_build / official_trace).read_bytes()
+        self.assertNotEqual(local_trace, (build / official_trace).read_bytes())
+        for missing_backends in (('omega-strict', 'omega-common'), ('omega-strict',), ('omega-common',)):
+            with self.subTest(missing_backends=missing_backends):
+                for backend in missing_backends:
+                    if (warm_build / backend).exists():
+                        shutil.rmtree(warm_build / backend)
+                result = cache.restore(self.root, index, [name], self.remote, warm_build)
+                self.assertEqual(result['restored'], 1)
+                self.assertEqual((warm_build / official_trace).read_bytes(), local_trace)
+                self.assertEqual({path: (warm_build / path).read_bytes() for path in paths}, outputs)
+
+        # Wrong bytes with the original trace and sidecar cannot be published or restored.
+        for crossed_path in paths:
+            with self.subTest(crossed_path=crossed_path):
+                path = build / crossed_path
+                wrong_bytes = outputs[paths[1] if crossed_path == paths[0] else paths[0]]
+                path.write_bytes(wrong_bytes)
+                try:
+                    rejected = self.root / 'unpublishable.tar.gz'
+                    with self.assertRaisesRegex(ValueError, 'artifact differs from its Lake trace'):
+                        pack_shard(self.root, modules, [name], rejected, 'a' * 64)
+                    self.assertFalse(rejected.exists())
+                finally:
+                    path.write_bytes(outputs[crossed_path])
+
+                # Give the altered archive a valid transport checksum so restoration reaches Lake verification.
+                crossed_archive = self.root / 'crossed.tar.gz'
+                with tarfile.open(archive) as original, tarfile.open(crossed_archive, 'w:gz') as tampered:
+                    for entry in original:
+                        data = original.extractfile(entry).read()
+                        if entry.name == crossed_path:
+                            data = wrong_bytes
+                        entry.size = len(data)
+                        tampered.addfile(entry, io.BytesIO(data))
+                payload = crossed_archive.read_bytes()
+                crossed_row = dict(row, sha256=hashlib.sha256(payload).hexdigest(), bytes=len(payload))
+                fresh = self.root / 'unrestorable'
+                with self.assertRaisesRegex(ValueError, 'artifact differs from its Lake trace'):
+                    restore_shard(crossed_archive, crossed_row, [name], modules, fresh, root=self.root)
+                self.assertFalse(fresh.exists())
+
+        # A module with a different backend inventory cannot consume this member.
+        crossed = {name: replace(modules[name], extra_builds=tuple(reversed(modules[name].extra_builds)))}
+        with self.assertRaisesRegex(ValueError, 'build path differs'):
+            restore_shard(archive, row, [name], crossed, self.root / 'crossed', root=self.root)
+        conflict = self.root / 'conflict'
+        conflicting = conflict / paths[1]
+        conflicting.parent.mkdir(parents=True)
+        conflicting.write_bytes(b'local strict artifact')
+        self.assertEqual(restore_shard(archive, row, [name], modules, conflict, root=self.root), set())
+        self.assertEqual(conflicting.read_bytes(), b'local strict artifact')
+        self.assertFalse((conflict / paths[0]).exists())
+        self.assertFalse((conflict / paths[2]).exists())
+        official_only = {name: replace(modules[name], extra_builds=())}
+        with self.assertRaisesRegex(ValueError, 'build path differs'):
+            restore_shard(archive, row, [name], official_only, self.root / 'legacy')
+        legacy = self.root / 'legacy.tar.gz'
+        legacy_row = pack_shard(self.root, official_only, [name], legacy, 'a' * 64)
+        with self.assertRaisesRegex(ValueError, 'build path differs'):
+            restore_shard(legacy, legacy_row, [name], modules, self.root / 'missing-backends')
+        (build / paths[1]).unlink()
+        with self.assertRaisesRegex(ValueError, 'incomplete compiler artifacts'):
+            pack_shard(self.root, modules, [name], self.root / 'incomplete.tar.gz', 'a' * 64)
+
+        def changed():
+            _, current = cache.checkout_targets(self.root)
+            return {n for n in current if current[n]['key'] != index['targets'][n]['key']}
+
+        # A direct OmegaMathlib consumer changes even without importing OmegaMath.
+        (strict / 'OmegaMathlib.lean').write_text('import OmegaInit\ndef omegaValue := omegaBase + 2\n')
+        self.assertTrue({'OmegaMathlib', 'D5.A', 'D5.C', 'OmegaChecks.Portable.Client'} <= changed())
+        self.assertNotIn('D5.B', changed())
+        stale = cache.restore(self.root, index, ['D5.C'], self.remote, self.root / 'stale')
+        self.assertEqual(stale['restored'], 0)
+        (strict / 'OmegaMathlib.lean').write_text('import OmegaInit\ndef omegaValue := omegaBase + 1\n')
+        self.assertFalse(changed())
+        (checks / 'Portable/Exports.lean').write_text('-- changed common generator\n')
+        self.assertTrue({'OmegaInit', 'OmegaMathlib', 'OmegaChecks.Portable.Client', 'D5.A', 'D5.C'} <= changed())
+        self.assertNotIn('D5.B', changed())
+        (checks / 'strict_lake.py').write_text('# changed strict configuration\n')
+        self.assertTrue({'OmegaInit', 'OmegaMathlib', 'D5.A', 'D5.C'} <= changed())
 
     def test_new_names_use_the_mathlib_release_and_inherit_original_addresses(self):
         manifest = self.root / 'lake-manifest.json'
