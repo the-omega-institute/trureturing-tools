@@ -14,5 +14,6 @@ class ReleaseLegacyCases:
         result = self.transport("fetch", FAKE_LIST_JSON=json.dumps(releases), FAKE_GH_LOG=str(log))
         self.assertEqual(1, result.returncode, result.stdout + result.stderr)
         self.assertFalse((self.root / ".lake/build").exists())
-        self.assertEqual([["api", "repos/fixture/cache/git/ref/heads/lean-cache-published"], ["api", "graphql"]],
+        self.assertEqual([["api", "repos/fixture/cache/git/ref/heads/lean-modules-published"],
+                          ["api", "repos/fixture/cache/git/ref/heads/lean-cache-published"], ["api", "graphql"]],
                          [json.loads(line)[:2] for line in log.read_text().splitlines()])

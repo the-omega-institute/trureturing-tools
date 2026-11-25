@@ -250,7 +250,7 @@ def checkout_plan(root, index):
     return {"targets": targets}
 
 
-def fetch_published(root, targets, deadline, *, refresh_stale, tag=None):
+def fetch_published(root, targets, deadline, *, refresh_stale, tag=None, compiler_only=False):
     """Return None before the first cutover so ordinary fetch can use its legacy seed."""
     remote = GitHub(root, deadline)
     with tempfile.TemporaryDirectory() as metadata:
@@ -280,7 +280,16 @@ def fetch_published(root, targets, deadline, *, refresh_stale, tag=None):
     with tempfile.TemporaryDirectory(dir=destination.parent) as directory:
         stage = Path(directory)
         output = destination if targets else stage / "build"
-        result = restore(remote, index, checkout_plan(root, index), targets or None, output)
+        if compiler_only:
+            import lean_artifact_inventory as inventory
+            from lean_compile_layers import scoped_imports
+            from lean_generation_plan import module_targets
+            modules = inventory.workspace_modules(root)
+            graph = scoped_imports(root, modules, inventory.release_roots(modules))
+            plan = {"targets": module_targets(root, modules, graph)}
+        else:
+            plan = checkout_plan(root, index)
+        result = restore(remote, index, plan, targets or None, output)
         if not result["restored"]:
             host.receipt("fetch", "miss", reason="no matching published generation targets", **result)
             return 1
