@@ -35,13 +35,13 @@ def prefix(domain):
 def create_ref(remote, name, tag_sha):
     for attempt in range(3):
         try:
-            return remote.api("git/refs", "-X", "POST", "-f", "ref=refs/tags/" + name, "-f", "sha=" + tag_sha)
+            return remote.api("git/refs", "POST", ref="refs/tags/" + name, sha=tag_sha)
         except host.GitHubCommandError as creation:
             diagnostic = (creation.stderr or "").strip()
             status = re.search(r"\bHTTP (\d{3})\b", diagnostic)
             code = int(status[1]) if status else 0
             throttled = code == 429 or (code == 403 and "rate limit" in diagnostic.lower())
-            ambiguous = (diagnostic == "unexpected end of JSON input" or 500 <= code < 600 or throttled)
+            ambiguous = (diagnostic in {"unexpected end of JSON input", "GitHub connection interrupted"} or 500 <= code < 600 or throttled)
             if not ambiguous and code not in (409, 422):
                 raise
             try:
@@ -64,8 +64,7 @@ def save(remote, domain, receipt, directory):
     name = prefix(domain).removeprefix("tags/") + digest
     keys = sorted(target["key"] for target in receipt["targets"].values())
     message = json.dumps(keys, separators=(",", ":"))
-    tag = remote.api("git/tags", "-X", "POST", "-f", "tag=" + name, "-f", "message=" + message,
-                     "-f", "type=commit", "-f", "object=" + receipt["source"])
+    tag = remote.api("git/tags", "POST", tag=name, message=message, type="commit", object=receipt["source"])
     ref = create_ref(remote, name, tag["sha"])
     if ref["object"]["sha"] != tag["sha"]:
         stored = remote.api("git/tags/" + ref["object"]["sha"])
@@ -95,11 +94,15 @@ def descriptors(remote, domain):
         }
       }
     }"""
-    args = ["api", "graphql", "-f", "query=" + query, "-f", "owner=" + owner,
-            "-f", "repo=" + repo, "-f", "prefix=" + tag_prefix]
-    cursor = []
+    variables = {'owner': owner, 'repo': repo, 'prefix': tag_prefix}
     while True:
-        page = json.loads(host.gh(remote.deadline, *args, *cursor))["data"]["repository"]["refs"]
+        body = json.dumps({'query': query, 'variables': variables}).encode()
+        with remote.objects.http.request('https://api.github.com/graphql', method='POST', payload=body,
+                                         headers={'Content-Type': 'application/json'}) as response:
+            result = json.load(response)
+        if result.get('errors'):
+            raise ValueError('GitHub checkpoint listing failed: ' + str(result['errors']))
+        page = result['data']['repository']['refs']
         for row in page["nodes"]:
             digest = row["name"].removeprefix(tag_prefix)
             if not re.fullmatch("[0-9a-f]{64}", digest):
@@ -118,7 +121,7 @@ def descriptors(remote, domain):
             yield digest, source, advertised
         if not page["pageInfo"]["hasNextPage"]:
             break
-        cursor = ["-f", "cursor=" + page["pageInfo"]["endCursor"]]
+        variables['cursor'] = page['pageInfo']['endCursor']
 
 
 def discover(remote, domain, keys=None):
