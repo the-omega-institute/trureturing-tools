@@ -496,7 +496,7 @@ private def withReportWriter (reportOutput materialSpool : System.FilePath)
     else pure (store, #[], empty, #[])
   let overrides := current.reportOverrides #[target]
   let row ← inspectData data (current.constants.find?)
-    (closedNegation (fun name => current.modules.find? name.toName)
+    (closedNegation (fun name => (current.modules.find? name.toName).map (·.toModuleData))
       (current.constants.find?) input)
     (fun name => (overrides.find? name).orElse fun _ => current.constants.find? name)
     writer counter utilities generatedNames binding input
