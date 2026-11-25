@@ -102,6 +102,46 @@ class NativeLocalReportConsumerTests:
         self.assertIn('git version ', result.stdout)
 
 class NativeReportConsumerTests:
+    def test_shard_materializes_only_member_reports_and_reuses_them(self):
+        self.reg_package()
+        self.restore_compiler()
+        worktree = HERE.parent / 'scripts/worktree'
+        with patch.object(sys, 'path', [str(worktree), *sys.path]):
+            from lean_artifact_inventory import Module, PROJECT_BUILD
+            from lean_module_shards import pack_shard, report_paths, restore_shard
+        executed = ('from lean_generation_facets import materialize; '
+                    'from pathlib import Path; '
+                    'materialize(Path.cwd(), ["Fixture", "D5.Alone"], ["External"])')
+        environment = dict(self.env, PYTHONPATH=str(worktree), STRATALINT_ACCEPT_COLD_BUILD='1')
+        programs = self.root / '.lake/build/lean-inspector/producer/bin'
+        self.assertFalse((programs / 'reportInspector').exists())
+        def materialize():
+            self.write('activity.jsonl', '')
+            result = self.guarded_command([sys.executable, '-B', '-c', executed], cwd=self.root, env=environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(set(self.stamps()), {'Fixture', 'D5.Alone'})
+            return [json.loads(line) for line in (self.root / 'activity.jsonl').read_text().splitlines()]
+
+        self.assertEqual(materialize(), [{'kind': 'extract', 'count': 2}])
+        self.assertTrue((programs / 'reportInspector').is_file())
+        self.assertTrue((programs / 'inputDiscovery').is_file())
+        self.assertTrue((self.root / '.lake/build/lib/lean/External.olean').is_file())
+        self.copy('src/OmegaChecks/Portable/ArtifactHashes.lean')
+        build = self.root / PROJECT_BUILD
+        modules = {name: Module('trureturing', Path(*name.split('.')).with_suffix('.lean'), Path('.'),
+                                report=True) for name in ('Fixture', 'D5.Alone')}
+        artifacts = [build / path for name in modules for path in report_paths(name)]
+        archive = self.root / 'module-shard.tar.gz'
+        with patch.dict(os.environ, environment):
+            descriptor = pack_shard(self.root, modules, sorted(modules), archive, 'a' * 64)
+            for path in artifacts:
+                path.unlink()
+            self.assertEqual(restore_shard(archive, descriptor, modules, modules, build, root=self.root), set(modules))
+        stamps = [path.stat().st_mtime_ns for path in artifacts]
+        environment.update(LAKE_ARTIFACT_CACHE='false', LAKE_RESTORE_ARTIFACTS='false')
+        self.assertEqual(materialize(), [])
+        self.assertEqual([path.stat().st_mtime_ns for path in artifacts], stamps)
+
     def test_reg_dependency_closure_reassessment(self):
         # Typed Reg leaf and interface inputs select their compiler dependency closure.
         # Tiny typed transport inputs exercise production discovery, facets and publication;
@@ -120,6 +160,11 @@ class NativeReportConsumerTests:
         self.write('Reg/Parent.lean', 'import Reg.Leaf\n'
             'def Reg.Parent.entry : LeanInformationAudit.Contract.Registration := { value := Reg.Leaf.entry.value + 1 }\n')
         self.write('Reg/Unrelated.lean', 'def Reg.Unrelated.value : Nat := 1\n')
+        support = 'LeanInformationAudit/Support.lean'
+        self.write(support, 'module\npublic theorem registryPin : True := True.intro\n')
+        driver = self.root / 'LeanInformationAudit/TemplateEnrollment.lean'
+        driver.write_text('module\npublic import LeanInformationAudit.Support\n'
+                          'public def fixtureDriver : Nat := 1\n')
         work = self.root / 'module-work.jsonl'
         self.env['STRATALINT_INSPECTOR_MODULE_WORK'] = str(work)
         output = self.root / 'public.json'
@@ -238,9 +283,26 @@ package_facet compilerRegistrationContender (pkg : Package) : Unit := do
                          '[FAIL] shared compiler prerequisites must be registered once per Lake invocation')
         self.assertEqual(sync.read_text(), 'contended', '[FAIL] compiler registration overlap must be controlled')
         self.assertEqual(initial['assessed'], ['Reg.Leaf', 'Reg.Parent'])
-        driver = self.root / 'LeanInformationAudit/TemplateEnrollment.lean'
-        driver.write_text('def fixtureDriver : Nat := 2\n')
-        warm = entry('implementation')
+        def report_hashes():
+            return {name: json.loads((native.state(self.root) / 'modules' /
+                    (name + '.zip.trace')).read_text())['depHash'] for name in self.stamps()}
+
+        typed = ['Reg.Leaf', 'Reg.Parent']
+        before = report_hashes()
+        for phase, path, contents in [
+            ('registry', driver, driver.read_text().replace(':= 1', ':= 2')),
+            ('registry-import', self.root / support,
+             'module\npublic theorem registryPin : True := Classical.choice ⟨True.intro⟩\n'),
+        ]:
+            path.write_text(contents)
+            changed = entry(phase)
+            self.assertEqual(changed['extracted'], typed)
+            self.assertEqual(changed['assessed'], typed)
+            self.assertEqual(changed['reg_recompiled'], [])
+            after = report_hashes()
+            self.assertEqual(sorted(name for name in after if before[name] != after[name]), typed)
+            before = after
+        warm = entry('warm-registry')
         self.assertEqual(warm['extracted'], [])
         self.assertEqual(warm['assessed'], [])
         self.assertEqual(warm['reg_recompiled'], [])
