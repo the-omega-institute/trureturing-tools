@@ -21,6 +21,9 @@ public sealed record TruthGraphNode(
 {
     [JsonPropertyName("omega_only_axiom_free_declarations"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ImmutableArray<TruthGraphDeclaration>? OmegaOnlyAxiomFreeDeclarations { get; init; }
+
+    [JsonPropertyName("strict_omega_declarations"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ImmutableArray<TruthExportDeclaration>? StrictOmegaDeclarations { get; init; }
 }
 
 /// A positive declaration marker anchored to the containing truth node and a truth-export statement.

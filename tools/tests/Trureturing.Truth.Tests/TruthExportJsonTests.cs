@@ -189,6 +189,44 @@ public sealed class TruthExportJsonTests
     public void StrictReaderRejectsInvalidAnnotationsAndInconsistentMarkers(string fields) =>
         Assert.Throws<FormatException>(() => TruthExportJsonReader.Read(DeclarationBytes(fields).AsSpan()));
 
+    [Fact]
+    public void PairedMeasurementRoundTripsExactArraysAndDistinctStatementAddresses()
+    {
+        var bytes = PairedDeclarationBytes();
+        var model = TruthExportJsonReader.Read(bytes.AsSpan());
+        var declaration = Assert.Single(Assert.Single(model.Nodes).Declarations);
+        Assert.Equal(new[] { "Classical.choice", "Quot.sound", "propext" }, declaration.Axioms!.Value);
+        Assert.Null(declaration.OmegaOnlyAxiomFree);
+        var strict = Assert.IsType<StrictOmegaMeasurement>(declaration.StrictOmega);
+        Assert.Equal(Id('2'), strict.StatementTypeAddress);
+        Assert.Equal(Id('3'), strict.OfficialStatementTypeAddress);
+        Assert.Equal(new[] { "OmegaInit", "OmegaMath" }, strict.Libraries);
+        Assert.Empty(strict.Axioms);
+        Assert.True(bytes.AsSpan().SequenceEqual(TruthExportJsonWriter.Write(model).AsSpan()));
+    }
+
+    [Theory]
+    [InlineData("\"nk-a\"", "\"crossed\"")]
+    [InlineData("\"kind\": \"theorem\"", "\"kind\": \"def\"")]
+    [InlineData("\"axioms\": []", "\"axioms\":null")]
+    [InlineData("\"axioms\": []", "\"axioms\":[\"z\",\"a\"]")]
+    [InlineData("\"axioms\": []", "\"axioms\":[],\"replayed\":true")]
+    [InlineData("\"official_statement_type_address\":", "\"unknown\":")]
+    public void RejectMalformedStrictMeasurement(string from, string to)
+    {
+        var text = Encoding.UTF8.GetString(PairedDeclarationBytes().AsSpan());
+        var start = text.IndexOf("\"strict_omega\":", StringComparison.Ordinal);
+        var malformed = text[..start] + text[start..].Replace(from, to, StringComparison.Ordinal);
+        Assert.NotEqual(text, malformed);
+        Assert.Throws<FormatException>(() => TruthExportJsonReader.Read(StructuredCanonicalWriter.WriteJson(malformed).AsSpan()));
+    }
+
+    private static ImmutableArray<byte> PairedDeclarationBytes() => DeclarationBytes($$"""
+        "libraries":["Init","OmegaMath"], "axioms":["Classical.choice","Quot.sound","propext"],
+        "strict_omega":{"declaration_name_key":"nk-a","kind":"theorem","statement_type_address":"{{Id('2')}}",
+        "official_statement_type_address":"{{Id('3')}}","libraries":["OmegaInit","OmegaMath"],"axioms":[]},
+        """);
+
     private static ImmutableArray<byte> DeclarationBytes(string fields) => StructuredCanonicalWriter.WriteJson($$"""
         {"dialect": "stratalint.truth-export.v2", "nodes": [
           {"declarations": [{ {{fields}} "declaration_name_key": "nk-a", "kind": "theorem", "statement_id": "{{Id('1')}}" }],

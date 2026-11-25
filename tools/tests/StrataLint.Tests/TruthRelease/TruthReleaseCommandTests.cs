@@ -161,6 +161,71 @@ public sealed partial class TruthReleaseCommandTests
     }
 
     [Fact]
+    public void PublicationPreservesPairedTetrahedronMixedAndLegacyMeasurements()
+    {
+        using var fixture = CreateFixture(pairedFrozenState: true);
+        using var output = new TemporaryDirectory();
+        using var dagDirectory = new TemporaryDirectory();
+        var dagPath = Path.Combine(dagDirectory.Path, "DAG.md");
+        var (exitCode, console) = Run(fixture, output.Path, [.. GreenTrustArguments(), "--dag-output", dagPath]);
+        Assert.True(exitCode == 0, console.Error);
+        var publication = TruthReleasePublicationReader.Read(File.ReadAllBytes(
+            Path.Combine(output.Path, TruthReleaseBundleWriter.PublicationFileName)));
+        var verified = TruthReleasePublicationVerification.Verify(output.Path, publication);
+        var node = Assert.Single(verified.ReadTruthExport().Nodes, node => node.RepoPath == TetrahedronPath);
+        var tetrahedron = Assert.Single(node.Declarations, row => row.DeclarationNameKey == TetrahedronDeclaration().NameKey);
+        Assert.Equal(new[] { "Init", "OmegaMath" }, tetrahedron.Libraries!.Value);
+        Assert.Equal(new[] { "propext" }, tetrahedron.Axioms!.Value);
+        Assert.Null(tetrahedron.OmegaOnlyAxiomFree);
+        var strict = Assert.IsType<StrictOmegaMeasurement>(tetrahedron.StrictOmega);
+        Assert.Equal(TetrahedronDeclaration().StatementTypeAddress, strict.OfficialStatementTypeAddress);
+        Assert.NotEqual(strict.OfficialStatementTypeAddress, strict.StatementTypeAddress);
+        Assert.Equal(new[] { "OmegaInit", "OmegaMath" }, strict.Libraries);
+        Assert.Empty(strict.Axioms);
+        var mixed = Assert.Single(node.Declarations, row => row.DeclarationNameKey == Declaration("mixed").NameKey);
+        Assert.Equal(new[] { "Classical.choice", "Quot.sound", "propext" }, mixed.Axioms!.Value);
+        Assert.Equal(new[] { "Mathlib", "OmegaMathlib" }, mixed.StrictOmega!.Libraries);
+        Assert.Equal(new[] { "propext" }, mixed.StrictOmega.Axioms);
+        var legacy = Assert.Single(node.Declarations, row => row.DeclarationNameKey == Declaration("legacy").NameKey);
+        Assert.Null(legacy.StrictOmega);
+        Assert.True(legacy.OmegaOnlyAxiomFree);
+        var graphNode = Assert.Single(verified.ReadTruthGraph().Truth.Nodes, node => node.RepoPath == TetrahedronPath);
+        Assert.Equal(2, graphNode.StrictOmegaDeclarations!.Value.Length);
+        Assert.Equal(legacy.DeclarationNameKey, Assert.Single(graphNode.OmegaOnlyAxiomFreeDeclarations!.Value).DeclarationNameKey);
+        var markdown = File.ReadAllText(dagPath);
+        Assert.Contains("no_rational_bloch_tetrahedral_triangle", markdown);
+        Assert.Contains("official axioms `[\"propext\"]`", markdown);
+        Assert.Contains("strict Omega backend axioms `[]`", markdown);
+        Assert.Contains("strict Omega backend libraries `[\"Mathlib\",\"OmegaMathlib\"]`", markdown);
+    }
+
+    [Fact]
+    public void PublicationDoesNotProjectPairedMeasurementsFromAStaleModuleStatementPin()
+    {
+        using var fixture = CreateFixture(pairedFrozenState: true, stalePair: true);
+        using var output = new TemporaryDirectory();
+        var (exitCode, console) = Run(fixture, output.Path, GreenTrustArguments());
+        Assert.True(exitCode == 0, console.Error);
+        var publication = TruthReleasePublicationReader.Read(File.ReadAllBytes(
+            Path.Combine(output.Path, TruthReleaseBundleWriter.PublicationFileName)));
+        var verified = TruthReleasePublicationVerification.Verify(output.Path, publication);
+        var node = Assert.Single(verified.ReadTruthExport().Nodes, node => node.RepoPath == TetrahedronPath);
+        Assert.All(node.Declarations, declaration => Assert.Null(declaration.StrictOmega));
+        Assert.Null(Assert.Single(verified.ReadTruthGraph().Truth.Nodes, node => node.RepoPath == TetrahedronPath).StrictOmegaDeclarations);
+    }
+
+    [Fact]
+    public void PublicationRejectsACrossedOfficialStatementAddress()
+    {
+        using var fixture = CreateFixture(pairedFrozenState: true, crossedPair: true);
+        using var output = new TemporaryDirectory();
+        var (exitCode, console) = Run(fixture, output.Path, GreenTrustArguments());
+        Assert.Equal(2, exitCode);
+        Assert.Contains("strict_omega official statement address", console.Error);
+        Assert.Empty(Directory.EnumerateFiles(output.Path));
+    }
+
+    [Fact]
     public void IssuanceRejectsMalformedArgumentsWithoutReadingTheRepository()
     {
         var gateway = new FakeRepositoryGateway(RawChangeSet.Create([]), RawRepositorySnapshot.Create([]), null);
@@ -301,7 +366,7 @@ public sealed partial class TruthReleaseCommandTests
 
     private static Fixture CreateFixture(bool receiptIntegrityMismatch = false, bool productionVerifier = false,
         bool additionalLocalSource = false, bool largeDigestionBodies = false, bool mismatchedFrozenState = false,
-        bool annotatedFrozenState = false)
+        bool annotatedFrozenState = false, bool pairedFrozenState = false, bool crossedPair = false, bool stalePair = false)
     {
         var repositoryRoot = TestRepositoryLayout.FindRoot();
         var blueprintSourcePath = $"Blueprint/{BlueprintGid}.scribe.cs";
@@ -356,6 +421,12 @@ public sealed partial class TruthReleaseCommandTests
                     Declaration("qualified"), Declaration("axiomatic"), Declaration("external"), Declaration("bare"),
                     Declaration("libraries_only"), Declaration("axioms_only"), Declaration("wrong_kind")],
             };
+        }
+        if (pairedFrozenState)
+        {
+            files[TetrahedronPath] = "theorem no_rational_bloch_tetrahedral_triangle : True := by trivial\n"
+                + "theorem mixed : True := by trivial\ntheorem legacy : True := by trivial\n";
+            reports[TetrahedronPath] = new([], [TetrahedronDeclaration(), Declaration("mixed"), Declaration("legacy")]);
         }
         if (receiptIntegrityMismatch)
         {
@@ -439,6 +510,25 @@ public sealed partial class TruthReleaseCommandTests
             files[FrozenStatePath.FromModulePath(material.RepoPath).Value] = Encoding.UTF8.GetString(
                 FrozenStateRecord.Encode(material.StatementId, annotations).AsSpan());
         }
+        if (pairedFrozenState)
+        {
+            var material = Assert.Single(realCatalog.ClosedNodes, node => node.RepoPath.Value == TetrahedronPath);
+            var tetrahedron = TetrahedronDeclaration();
+            var strictType = CanonicalStatementWriter.StatementTypeAddress("Omega rational Bloch triangle statement");
+            var officialType = crossedPair ? strictType : tetrahedron.StatementTypeAddress;
+            var mixed = Declaration("mixed");
+            var annotations = new[]
+            {
+                new FrozenDeclaration(tetrahedron.NameKey, tetrahedron.Kind, ["Init", "OmegaMath"], ["propext"],
+                    new(tetrahedron.NameKey, tetrahedron.Kind, strictType, officialType, ["OmegaInit", "OmegaMath"], [])),
+                new FrozenDeclaration(mixed.NameKey, mixed.Kind, ["Init", "Mathlib", "OmegaMathlib"], ["Classical.choice", "Quot.sound", "propext"],
+                    new(mixed.NameKey, mixed.Kind, mixed.StatementTypeAddress, mixed.StatementTypeAddress, ["Mathlib", "OmegaMathlib"], ["propext"])),
+                new FrozenDeclaration(Declaration("legacy").NameKey, "theorem", ["OmegaMath"], []),
+            }.OrderBy(row => row.DeclarationNameKey, StringComparer.Ordinal).ToImmutableArray();
+            var statement = stalePair ? StatementId.Create("sha256:" + new string('0', 64)) : material.StatementId;
+            files[FrozenStatePath.FromModulePath(material.RepoPath).Value] = Encoding.UTF8.GetString(
+                FrozenStateRecord.Encode(statement, annotations).AsSpan());
+        }
         WriteFiles(gitRoot, files.Where(static pair => FrozenStatePath.IsUnderRoot(pair.Key)));
         CommitAll(gitRoot, "fixture frozen state");
         var sourceCommit = GitObject(gitRoot, "HEAD");
@@ -483,6 +573,17 @@ public sealed partial class TruthReleaseCommandTests
         files["Meta/Digestion/atoms/sha256/" + id] = sourceText;
         files[$"Meta/Digestion/backfill/fixture-source/partial-closed/{id}.yaml"] = "malformed: [\n";
     }
+
+    private const string TetrahedronPath = "D5/S3/Quantum/AURICOmega/RationalBlochTetrahedron.lean";
+
+    // Dependency arrays and declaration identity from the issue's official and pre-migration records.
+    // The synthetic report uses distinct backend statement materials for the publication-path test.
+    private static LeanDeclaration TetrahedronDeclaration() => new(
+        "D5.S3.Quantum.AURICOmega.RationalBlochTetrahedron.no_rational_bloch_tetrahedral_triangle",
+        "theorem", "Official rational Bloch triangle statement", ["propext"])
+    {
+        NameKey = "ns(ns(ns(ns(ns(ns(n0,2:D5),2:S3),7:Quantum),10:AURICOmega),24:RationalBlochTetrahedron),38:no_rational_bloch_tetrahedral_triangle)",
+    };
 
     private static LeanDeclaration Declaration(string name) => new(
         name,

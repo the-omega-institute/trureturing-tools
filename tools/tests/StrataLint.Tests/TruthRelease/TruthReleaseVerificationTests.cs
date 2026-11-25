@@ -260,6 +260,34 @@ public sealed class TruthReleaseVerificationTests
         AssertCompositionRejected(() => BuildBundle(truthGraph: graphBytes.ToArray(), truthExport: exportBytes.ToArray()));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RejectsDigestBoundGraphWithMissingOrDifferentStrictMeasurement(bool includeDifferentPair)
+    {
+        var export = TruthExportJsonReader.Read(TruthExportBytes(Commit, Tree));
+        var node = Assert.Single(export.Nodes);
+        var declaration = Assert.Single(node.Declarations) with
+        {
+            Libraries = ["Init", "OmegaMath"], Axioms = ["propext"],
+            StrictOmega = new("nk-a", "theorem", "sha256:" + new string('2', 64), "sha256:" + new string('3', 64),
+                ["OmegaInit", "OmegaMath"], []),
+        };
+        var exportBytes = TruthExportJsonWriter.Write(export with { Nodes = [node with { Declarations = [declaration] }] });
+        var graph = TruthGraphJsonReader.Read(MinimalTruthGraphBytes());
+        var graphNode = new TruthGraphNode(node.RepoPath, null, "closed", null, 0)
+        {
+            StrictOmegaDeclarations = includeDifferentPair
+                ? [declaration with { StrictOmega = declaration.StrictOmega! with { Axioms = ["propext"] } }]
+                : null,
+        };
+        var graphBytes = TruthGraphJsonWriter.Write(graph with
+        {
+            Truth = graph.Truth with { Nodes = [graphNode], StateCounts = new(1, 0, 0, 0) },
+        });
+        AssertCompositionRejected(() => BuildBundle(truthGraph: graphBytes.ToArray(), truthExport: exportBytes.ToArray()));
+    }
+
     [Fact]
     public void RejectsAnExpectedDigestThatDoesNotMatchTheBundle()
     {
