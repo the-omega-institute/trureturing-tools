@@ -245,7 +245,11 @@ class Remote:
         return data
 
     def partials(self, plan):
-        expected = {row['asset']: (name, row) for name, row in plan['shards'].items()}
+        expected = {}
+        for name, row in plan['shards'].items():
+            expected[row['asset']] = (name, row)
+            legacy_key = plan['mathlib'] + '-' + name
+            expected.setdefault(legacy_key + '.tar.gz', (name, dict(row, key=legacy_key, asset=legacy_key + '.tar.gz')))
         result = {}
         for tag, assets in self.candidates(plan):
             for name in expected.keys() & assets.keys():

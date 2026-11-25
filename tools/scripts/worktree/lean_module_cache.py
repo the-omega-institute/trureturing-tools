@@ -15,7 +15,7 @@ import tomllib
 
 import lean_artifact_inventory as inventory
 import lean_compile_layers as compiler
-from lean_cache import resolved_mathlib, seed_partitions
+from lean_cache import publication_mathlib, seed_partitions
 from lean_generation_plan import digest, file_digest, module_config, write
 from lean_module_shards import DEFAULT_CAPACITY, lookup_shard, pack_shard, plan_shards, restore_shard
 
@@ -66,12 +66,12 @@ def matching(plan, rows):
             and row['members'] == plan['shards'][name]['members']}
 
 
-def shard_row(mathlib, targets, name, members):
+def shard_row(mathlib, mathlib_version, targets, name, members):
     members = sorted(members)
-    key = mathlib + '-' + name
+    key = mathlib_version + '-' + name + '.tar.gz'
     if len(key) > 512:
         raise ValueError('Actions key exceeds 512 characters: ' + key)
-    return {'members': members, 'key': key, 'asset': key + '.tar.gz',
+    return {'members': members, 'key': key, 'asset': key,
             'fingerprint': digest([SCHEMA, mathlib, [(n, targets[n]['key']) for n in members]])}
 
 
@@ -85,13 +85,13 @@ def expanded(plan, splits):
         if sorted(n for members in layout.values() for n in members) != expected or groups.keys() & layout.keys():
             raise ValueError('split layout differs from group membership: ' + name)
         for child, members in layout.items():
-            groups[child] = shard_row(plan['mathlib'], targets, child, members)
+            groups[child] = shard_row(plan['mathlib'], plan.get('mathlib_version', plan['mathlib']), targets, child, members)
             for n in members:
                 targets[n] = dict(targets[n], shard=child)
     return dict(plan, targets=targets, shards=groups)
 
 
-def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, legacy=None):
+def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version, legacy=None):
     if workers < 1 or workers > 256:
         raise ValueError('worker count must be within the Actions matrix limit')
     previous = base['shards'] if base else {}
@@ -111,11 +111,11 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, lega
     planned = {}
     targets = {n: dict(row) for n, row in targets.items()}
     for name, members in layout.items():
-        planned[name] = shard_row(mathlib, targets, name, members)
+        planned[name] = shard_row(mathlib, mathlib_version, targets, name, members)
         for n in members:
             targets[n]['shard'] = name
     plan = {'schema': SCHEMA, 'source': source, 'mathlib': mathlib, 'targets': targets,
-            'shards': planned, 'version': VERSION_PREFIX + source, 'capacity': capacity}
+            'shards': planned, 'mathlib_version': mathlib_version, 'version': VERSION_PREFIX + source, 'capacity': capacity}
     plan['base_version'] = base['version'] if base else None
     plan = expanded(plan, remote.splits(plan)) if planned.keys() - matching(plan, previous).keys() else plan
     planned = plan['shards']
@@ -368,8 +368,9 @@ def run():
                 legacy = legacy_compiler_inputs(root, modules, targets, source)
             except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
                 print(f'Compiler checkpoints unavailable; continuing with Lake: {error}', file=sys.stderr)
-        result = make_plan(source, resolved_mathlib(root), targets, base, remote,
-                           args.capacity, args.workers, legacy=legacy)
+        mathlib, mathlib_version = publication_mathlib(root)
+        result = make_plan(source, mathlib, targets, base, remote, args.capacity, args.workers,
+                           mathlib_version=mathlib_version, legacy=legacy)
         if args.prepare_release and result['lanes']:
             publisher()
             remote.catalog(result['version'], refresh=True, create=True)

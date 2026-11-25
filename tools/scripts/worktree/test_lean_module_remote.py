@@ -186,6 +186,22 @@ class VersionedShards(unittest.TestCase):
         self.remote.tags = lambda current, base: [current]
         self.assertEqual(set(dict(self.remote.candidates({'version': version}))), set(self.service.creates))
 
+    def test_unfinished_raw_revision_checkpoint_keeps_its_download_address(self):
+        old = self.plan('a'*40, name='D5.S0')
+        old['mathlib'] = '1'*40
+        previous = old['shards']['D5.S0']
+        previous['key'] = old['mathlib'] + '-D5.S0'
+        previous['asset'] = previous['key'] + '.tar.gz'
+        saved = self.save(old, b'compiled')
+        new = {**old, 'source': 'b'*40, 'version': transport.PREFIX + 'b'*40,
+               'shards': {'D5.S0': dict(previous, key='v4.35.0-D5.S0.tar.gz', asset='v4.35.0-D5.S0.tar.gz')}}
+        found = self.remote.partials(new)['D5.S0']
+        self.assertEqual(found, saved)
+        self.assertEqual(self.service.uploads, 1)
+        output = self.root / 'consumer'
+        self.remote.download(found, output)
+        self.assertEqual(output.read_bytes(), b'compiled')
+
     def test_cache_failure_preserves_release_checkpoint_and_index(self):
         plan = self.plan('a'*40)
         self.remote.actions = transport.Remote.actions.__get__(self.remote)
