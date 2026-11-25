@@ -65,12 +65,17 @@ def all_targets(root, module_rows=None, *, include_reports=True):
         targets[name] = {'key': digest(['native-v1', binary_platform(), package, exe, targets[main]['key']]), 'deps': deps}
     if not include_reports:
         return targets
-    selection = report_selection.Selection(root)
+    reports = module_report_targets(targets, report_selection.Selection(root).modules(), utility_inputs(root))
+    targets.update(('report/' + module, target) for module, target in reports.items())
+    return targets
+
+
+def module_report_targets(targets, selected, utilities):
+    reports = {}
     # The module facet traces its compiler exports, claim inputs and report
     # format. Aggregate configuration and production provenance have their
     # own checks when the report is consumed.
     report_format = report_selection.REPORT_FORMAT
-    utilities = utility_inputs(root)
     # A module cannot contain typed registration inputs without the contract
     # types in its import closure. These are the same runtime roots used by
     # scoped report preparation.
@@ -81,7 +86,7 @@ def all_targets(root, module_rows=None, *, include_reports=True):
     for name in TopologicalSorter(graph).static_order():
         if name in contracts or any(dep in may_register for dep in graph[name]):
             may_register.add(name)
-    for module, path in selection.modules().items():
+    for module, path in selected.items():
         utility = utilities.get(path)
         deps = {module}
         if utility:
@@ -101,8 +106,8 @@ def all_targets(root, module_rows=None, *, include_reports=True):
             target['empty_projection'] = unconditional
         else:
             target = unconditional
-        targets['report/' + module] = target
-    return targets
+        reports[module] = target
+    return reports
 
 
 def report_has_inputs(path, module):
@@ -128,6 +133,19 @@ def use_known_projections(targets, snapshots):
             alternate = target.get('empty_projection')
             if alternate and matches(row, alternate):
                 targets[name] = alternate
+
+
+def materialize(root, names, inputs):
+    """Build the canonical report facets for these members and their compiler prerequisites."""
+    names = sorted(set(names))
+    if not names:
+        return
+    with tempfile.TemporaryDirectory(prefix='module-reports-') as directory:
+        request = Path(directory) / 'members.json'
+        request.write_text(json.dumps(dict(reports=names, inputs=sorted(set(inputs).union(names)))))
+        subprocess.run(['bash', 'tools/scripts/worktree/lean-cache-run.sh', 'lake', '-d',
+                        'tools/lean-inspector-reg', 'script', 'run', 'leanInspector/shardModuleReports',
+                        str(request)], cwd=root, check=True)
 
 
 def build_facets(root, names, targets):

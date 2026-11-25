@@ -1,14 +1,19 @@
 """Namespace layout and transport of scoped Lake compiler artifacts."""
 
+from dataclasses import replace
+import io
+import json
 from pathlib import Path
 import shutil
 import subprocess
 import tarfile
 import tempfile
 import unittest
+import zipfile
 
 from lean_artifact_inventory import Module, PROJECT_BUILD
-from lean_module_shards import DEFAULT_CAPACITY, lookup_shard, pack_shard, plan_shards, restore_shard
+from lean_module_shards import (ARTIFACT_HASH_READER, DEFAULT_CAPACITY, inspector_publication, lookup_shard, pack_shard,
+                                plan_shards, report_paths, restore_shard)
 
 
 class NamespaceLayout(unittest.TestCase):
@@ -82,6 +87,141 @@ class ShardCompilerTransport(unittest.TestCase):
                 if artifact.is_file():
                     self.assertEqual(artifact.read_bytes(), (self.build / artifact.relative_to(dest)).read_bytes())
         self.assertTrue(all(self.descriptor['module_sizes'][n] > 0 for n in self.modules))
+
+    def prepare_report(self, name, *, broken_material=False):
+        module = self.modules[name]
+        public = inspector_publication()
+        material = b'Type'
+        type_id, statement_id = public.materials.material_identities(
+            io.BytesIO(material), module.source.as_posix(), 'def', name)
+        row = dict(module=name, source_path=module.source.as_posix(),
+                   source_sha256='sha256:' + public.digest(self.root / module.source), imports=[],
+                   declarations=[dict(axioms=[], include_in_statement=True, kind='def', name=name,
+                                      name_key=name, statement_id=statement_id, type_sha256=type_id)])
+        input_zip = self.root / (name + ".zip")
+        with tempfile.TemporaryDirectory(dir=self.root) as directory:
+            report = Path(directory) / public.RAW
+            report.write_bytes(public.materials.canonical_json(dict(modules=[row], schema=public.materials.REPORT_SCHEMA)))
+            with zipfile.ZipFile(public.member(report, '.materials.zip'), 'w') as materials:
+                materials.writestr('sha256/' + type_id[7:], b'wrong' if broken_material else material)
+            public.write_origin(report, name, dict(inspector_executable_sha256='a'*64, producer_sources_sha256='b'*64),
+                                dict(schema='stratalint-judge-input-projection-v1', module=name, inputs=[]))
+            public.zip_files(input_zip, [(public.RAW + suffix, public.member(report, suffix))
+                                       for suffix in ('', '.materials.zip', '.provenance.json')])
+        reader = self.root / ARTIFACT_HASH_READER
+        reader.parent.mkdir(parents=True, exist_ok=True)
+        reader.write_text('import Lake.Build.Trace\n'
+                          'def main : IO Unit := do\n'
+                          '  for path in (← (← IO.getStdin).readToEnd).splitOn "\\n" do\n'
+                          '    IO.println (← Lake.computeBinFileHash path).hex\n')
+        # Exercise the same Lake artifact primitive used by the Inspector's report facet.
+        config = self.root / 'reports.lean'
+        config.write_text('''import Lake
+open Lake DSL
+package ns_fixture
+lean_lib Demo
+module_facet report (mod : Module) : System.FilePath := withCurrPackage mod.pkg do
+  let input := mod.pkg.dir / s!"{mod.name}.zip"
+  let file := mod.pkg.buildDir / "lean-inspector/modules" / s!"{mod.name}.zip"
+  (← inputBinFile input).mapM fun _ => do
+    let _ ← buildArtifactUnlessUpToDate file (do
+      IO.FS.createDirAll file.parent.get!
+      IO.FS.writeBinFile file (← IO.FS.readBinFile input)) (ext := "zip") (restore := true)
+    return file
+''')
+        subprocess.run(['lake', '-f', config.name, '--no-cache', 'build', '+' + name + ':report'],
+                       cwd=self.root, check=True, stdout=subprocess.DEVNULL)
+        self.modules[name] = replace(module, report=True)
+
+    def test_module_reports_restore_together_with_the_requested_compiler_files(self):
+        name = 'Demo.A'
+        self.prepare_report(name)
+        self.prepare_report('Demo.B')
+        with self.assertRaisesRegex(ValueError, 'report inventory differs'):
+            restore_shard(self.archive, self.descriptor, [name], self.modules, self.root / 'legacy', root=self.root)
+        self.descriptor = pack_shard(self.root, self.modules, self.modules, self.archive, 'c'*64)
+        consumer = self.root / 'consumer'
+        dest = consumer / PROJECT_BUILD
+        archive, sidecar, trace = report_paths(name)
+        # A matching warm Lake trace can record a different producer checkout path.
+        (dest / trace).parent.mkdir(parents=True)
+        local_trace = json.loads((self.build / trace).read_bytes())
+        local_trace['inputs'][0][0] = str(consumer / (name + '.zip'))
+        (dest / trace).write_text(json.dumps(local_trace))
+        self.assertEqual(restore_shard(self.archive, self.descriptor, [name], self.modules, dest, root=self.root), {name})
+        self.assertEqual(json.loads((dest / trace).read_bytes()), local_trace)
+        for path in (archive, sidecar):
+            self.assertEqual((dest / path).read_bytes(), (self.build / path).read_bytes())
+        self.assertFalse((dest / report_paths('Demo.B')[0]).exists())
+        self.assertTrue((dest / 'lib/lean/Demo/A.olean').is_file())
+        for path in (Path('lean-toolchain'), Path('reports.lean'), Path(name + '.zip'), self.modules[name].source):
+            (consumer / path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.root / path, consumer / path)
+        subprocess.run(['lake', '-f', 'reports.lean', '--no-cache', '--no-build', 'build', '+' + name + ':report'],
+                       cwd=consumer, check=True, stdout=subprocess.DEVNULL)
+
+        conflict = self.root / 'conflict'
+        (conflict / archive).parent.mkdir(parents=True)
+        (conflict / archive).write_bytes(b'local report')
+        self.assertEqual(restore_shard(self.archive, self.descriptor, [name], self.modules, conflict, root=self.root), set())
+        self.assertEqual((conflict / archive).read_bytes(), b'local report')
+        self.assertFalse((conflict / 'lib/lean/Demo/A.olean').exists())
+
+    def test_compiler_only_restore_leaves_stale_reports_out_of_the_requested_outputs(self):
+        names = ['Demo.A', 'Demo.B']
+        for name in names:
+            self.prepare_report(name)
+        descriptor = pack_shard(self.root, self.modules, names, self.archive, 'c'*64)
+        for local, report_eligible in ((False, True), (True, True), (True, False)):
+            with self.subTest(local=local, report_eligible=report_eligible):
+                dest = self.root / f'consumer-{local}-{report_eligible}'
+                expected = {}
+                if local:
+                    for path in report_paths('Demo.A'):
+                        (dest / path).parent.mkdir(parents=True, exist_ok=True)
+                        expected[path] = ('previous local ' + path.name).encode()
+                        (dest / path).write_bytes(expected[path])
+                modules = dict(self.modules)
+                modules['Demo.A'] = replace(modules['Demo.A'], report=report_eligible)
+                installed = restore_shard(self.archive, descriptor, names, modules, dest, root=self.root,
+                                          compiler_only=['Demo.A'])
+                self.assertEqual(installed, set(names))
+                for name in names:
+                    self.assertTrue((dest / f'lib/lean/Demo/{name[-1]}.olean').is_file())
+                for path in report_paths('Demo.A'):
+                    self.assertEqual((dest / path).read_bytes() if (dest / path).exists() else None,
+                                     expected.get(path))
+                for path in report_paths('Demo.B'):
+                    self.assertEqual((dest / path).read_bytes(), (self.build / path).read_bytes())
+
+    def test_crossed_missing_unsafe_and_corrupt_report_material(self):
+        name = 'Demo.A'
+        self.prepare_report(name)
+        self.prepare_report('Demo.B')
+        descriptor = pack_shard(self.root, self.modules, [name], self.archive, 'c'*64)
+        archive, _, trace = report_paths(name)
+        rejected = self.root / 'rejected.tar.gz'
+        # Substitute all three artifacts from a different, internally consistent module.
+        for left, right in zip(report_paths(name), report_paths('Demo.B'), strict=True):
+            shutil.copyfile(self.build / right, self.build / left)
+        with self.assertRaisesRegex(ValueError, 'current module or source'):
+            pack_shard(self.root, self.modules, [name], rejected, 'c'*64)
+        with (self.root / self.modules[name].source).open('a') as source:
+            source.write('-- different current bytes\n')
+        with self.assertRaisesRegex(ValueError, 'current module or source'):
+            restore_shard(self.archive, descriptor, [name], self.modules, self.root / 'fresh', root=self.root)
+        self.assertFalse((self.root / 'fresh').exists())
+
+        self.prepare_report(name, broken_material=True)
+        with self.assertRaisesRegex(ValueError, 'material or declaration identity mismatch'):
+            pack_shard(self.root, self.modules, [name], rejected, 'c'*64)
+        (self.build / trace).unlink()
+        with self.assertRaisesRegex(ValueError, 'missing module report'):
+            pack_shard(self.root, self.modules, [name], rejected, 'c'*64)
+        (self.build / trace).symlink_to(self.build / archive)
+        with self.assertRaisesRegex(ValueError, 'unsafe compiler artifact'):
+            pack_shard(self.root, self.modules, [name], rejected, 'c'*64)
+        self.assertFalse(rejected.exists())
 
     def test_conflicting_module_is_skipped_and_malformed_input_cannot_install(self):
         dest = self.root / 'consumer'

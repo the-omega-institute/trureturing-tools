@@ -102,6 +102,46 @@ class NativeLocalReportConsumerTests:
         self.assertIn('git version ', result.stdout)
 
 class NativeReportConsumerTests:
+    def test_shard_materializes_only_member_reports_and_reuses_them(self):
+        self.reg_package()
+        self.restore_compiler()
+        worktree = HERE.parent / 'scripts/worktree'
+        with patch.object(sys, 'path', [str(worktree), *sys.path]):
+            from lean_artifact_inventory import Module, PROJECT_BUILD
+            from lean_module_shards import pack_shard, report_paths, restore_shard
+        executed = ('from lean_generation_facets import materialize; '
+                    'from pathlib import Path; '
+                    'materialize(Path.cwd(), ["Fixture", "D5.Alone"], ["External"])')
+        environment = dict(self.env, PYTHONPATH=str(worktree), STRATALINT_ACCEPT_COLD_BUILD='1')
+        programs = self.root / '.lake/build/lean-inspector/producer/bin'
+        self.assertFalse((programs / 'reportInspector').exists())
+        def materialize():
+            self.write('activity.jsonl', '')
+            result = self.guarded_command([sys.executable, '-B', '-c', executed], cwd=self.root, env=environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(set(self.stamps()), {'Fixture', 'D5.Alone'})
+            return [json.loads(line) for line in (self.root / 'activity.jsonl').read_text().splitlines()]
+
+        self.assertEqual(materialize(), [{'kind': 'extract', 'count': 2}])
+        self.assertTrue((programs / 'reportInspector').is_file())
+        self.assertTrue((programs / 'inputDiscovery').is_file())
+        self.assertTrue((self.root / '.lake/build/lib/lean/External.olean').is_file())
+        self.copy('src/OmegaChecks/Portable/ArtifactHashes.lean')
+        build = self.root / PROJECT_BUILD
+        modules = {name: Module('trureturing', Path(*name.split('.')).with_suffix('.lean'), Path('.'),
+                                report=True) for name in ('Fixture', 'D5.Alone')}
+        artifacts = [build / path for name in modules for path in report_paths(name)]
+        archive = self.root / 'module-shard.tar.gz'
+        with patch.dict(os.environ, environment):
+            descriptor = pack_shard(self.root, modules, sorted(modules), archive, 'a' * 64)
+            for path in artifacts:
+                path.unlink()
+            self.assertEqual(restore_shard(archive, descriptor, modules, modules, build, root=self.root), set(modules))
+        stamps = [path.stat().st_mtime_ns for path in artifacts]
+        environment.update(LAKE_ARTIFACT_CACHE='false', LAKE_RESTORE_ARTIFACTS='false')
+        self.assertEqual(materialize(), [])
+        self.assertEqual([path.stat().st_mtime_ns for path in artifacts], stamps)
+
     def test_reg_dependency_closure_reassessment(self):
         # Typed Reg leaf and interface inputs select their compiler dependency closure.
         # Tiny typed transport inputs exercise production discovery, facets and publication;

@@ -166,11 +166,26 @@ def checkout_targets(root):
     graph = compiler.scoped_imports(root, modules, roots)
     modules, graph, omega_inputs = omega_build_plan(root, modules, graph)
     scope = set(graph)
+    reported = {}
+    if (root / 'lean-report-inputs.json').is_file():
+        from lean_cache_release import report_selection
+        from lean_generation_facets import module_report_targets, utility_inputs
+        reported = report_selection.Selection(root).modules()
+        if not reported.keys() <= scope:
+            raise ValueError('reported module is outside the compiler release')
+        utilities = utility_inputs(root)
+        reported_paths = set(reported.values())
+        report_roots = {row['claimModule'] for path, row in utilities.items() if path in reported_paths}
+        if 'LeanInformationAudit.TemplateEnrollment' in modules:
+            report_roots.add('LeanInformationAudit.TemplateEnrollment')
+        # These compiler inputs identify reports. Their own reports do not enter the import graph.
+        extra_graph = compiler.scoped_imports(root, modules, report_roots - scope)
+        graph = {**extra_graph, **graph}
     configs = {}
     pins = {}
     directories = {'trureturing': Path('.'), 'reg': Path('Reg'), 'leanInspectorInterface': inventory.INTERFACE,
                    'leanInspector': inventory.INSPECTOR, 'regInspector': inventory.REG_INSPECTOR}
-    for package in {modules[n].package for n in scope}:
+    for package in {modules[n].package for n in graph}:
         directory = directories[package]
         path = root / directory
         dsl = path / 'lakefile.lean'
@@ -197,7 +212,21 @@ def checkout_targets(root):
             inputs.extend(omega_inputs[name])
         key = digest(inputs)
         targets[name] = {'key': key, 'deps': dependencies}
-    return modules, targets
+    if reported:
+        modules = dict(modules)
+        reports = module_report_targets(targets, reported, utilities)
+        for name, report in reports.items():
+            row = targets[name]
+            targets[name] = dict(row, key=report['key'], compiler_input=row['key'], report_inputs=report['deps'])
+            modules[name] = replace(modules[name], report=True)
+        # Older readers validate every member of a tar against a compiler-only allowlist.
+        # A compiler-only sibling must not pick a mixed namespace's archive at the old identity.
+        namespaces = {namespace(n) for n in reported}
+        for name in scope - reported.keys():
+            if namespace(name) in namespaces:
+                row = targets[name]
+                targets[name] = dict(row, key=digest(['module-report-shard', row['key']]), compiler_input=row['key'])
+    return modules, {name: targets[name] for name in sorted(scope)}
 
 
 def matching(plan, rows):
@@ -286,7 +315,7 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
     return plan
 
 
-def restore_matching(root, modules, targets, index, names, remote, destination):
+def restore_matching(root, modules, targets, index, names, remote, destination, *, compiler_seeds=None):
     """Read one authenticated asset per selected shard, including old-version references."""
     if not index or not names:
         return set()
@@ -295,9 +324,15 @@ def restore_matching(root, modules, targets, index, names, remote, destination):
     owners = {n: t['shard'] for n, t in index['targets'].items()}
     groups = {s: set(row['members']) for s, row in index['shards'].items()}
     selected = defaultdict(list)
+    seed_only = set()
     for name in sorted(names & targets.keys() & index['targets'].keys()):
-        if targets[name]['key'] != index['targets'][name]['key']:
-            continue
+        previous = index['targets'][name]
+        if targets[name]['key'] != previous['key']:
+            # Report inputs may change independently of the compiler output in the same shard.
+            current_compiler = targets[name].get('compiler_input', targets[name]['key'])
+            if compiler_seeds is None or previous.get('compiler_input', previous['key']) != current_compiler:
+                continue
+            seed_only.add(name)
         shard = lookup_shard(name, owners, groups)
         selected[shard].append(name)
     restored = set()
@@ -307,7 +342,12 @@ def restore_matching(root, modules, targets, index, names, remote, destination):
         for shard, members in selected.items():
             row = index['shards'][shard]
             remote.download(row, archive)
-            restored.update(restore_shard(archive, row, members, modules, destination, root=root))
+            compiler_only = seed_only.intersection(members)
+            installed = restore_shard(archive, row, members, modules, destination, root=root, compiler_only=compiler_only)
+            missing_reports = {n for n in installed & compiler_only if modules[n].report}
+            restored.update(installed - missing_reports)
+            if compiler_seeds is not None:
+                compiler_seeds.update(missing_reports)
             archive.unlink()
     return restored
 
@@ -365,12 +405,14 @@ def work(root, plan, lane, remote, output):
     plan = expanded(original, splits)
     modules, current = checkout_targets(root)
     targets = plan['targets']
-    if current != {name: {k: row[k] for k in ('key', 'deps')} for name, row in targets.items()}:
+    if current != {name: {k: v for k, v in row.items() if k != 'shard'} for name, row in targets.items()}:
         raise ValueError('worker compiler inputs differ from its plan')
     graph = {n: set(row['deps']) for n, row in targets.items()}
     base = remote.latest(plan['base_version']) if plan['base_version'] else None
     complete = recover_partials(plan, matching(plan, plan['inherited']), remote)
     installed = set()
+    restored_reports = set()
+    produced_reports = 0
     compiled = uploaded = 0
     common_prepared = False
     legacy = plan.get('legacy')
@@ -386,7 +428,11 @@ def work(root, plan, lane, remote, output):
         scope = inventory.import_closure(graph, members)
         destination = root / inventory.PROJECT_BUILD
         for index in (partial_index(plan, complete), base):
-            installed.update(restore_matching(root, modules, targets, index, scope - installed, remote, destination))
+            seeds = set()
+            exact = restore_matching(root, modules, targets, index, scope - installed, remote, destination,
+                                     compiler_seeds=seeds)
+            restored_reports.update(n for n in exact if modules[n].report)
+            installed.update(exact | seeds)
         if legacy:
             try:
                 installed.update(restore_legacy(old_remote, legacy, {n for n in scope - installed if not modules[n].extra_builds}, destination))
@@ -402,6 +448,13 @@ def work(root, plan, lane, remote, output):
             common_prepared = compile_omega_outputs(root, modules, missing, common_prepared)
             installed.update(missing)
             compiled += len(missing)
+        reports = sorted(n for n in members - restored_reports if modules[n].report)
+        if reports:
+            from lean_generation_facets import materialize
+            inputs = {dep for n in reports for dep in targets[n]['report_inputs']}
+            materialize(root, reports, inputs)
+            restored_reports.update(reports)
+            produced_reports += len(reports)
         output.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=output) as temporary:
             directory = Path(temporary)
@@ -419,9 +472,18 @@ def work(root, plan, lane, remote, output):
             for n in installed:
                 for path in inventory.lean_artifact_paths(n, modules[n]):
                     (destination / path).unlink(missing_ok=True)
+            if restored_reports:
+                from lean_module_shards import report_paths
+                for n in restored_reports:
+                    for path in report_paths(n):
+                        (destination / path).unlink(missing_ok=True)
+                restored_reports.clear()
             installed.clear()
         write(output / 'worker.json', {'compiled_modules': compiled, 'saved_shards': uploaded})
-    return {'compiled_modules': compiled, 'saved_shards': uploaded}
+    result = {'compiled_modules': compiled, 'saved_shards': uploaded}
+    if produced_reports:
+        result['prepared_reports'] = produced_reports
+    return result
 
 
 def finish(plan, remote):
@@ -441,8 +503,14 @@ def restore(root, index, requested, remote, destination):
     modules, targets = checkout_targets(root)
     graph = {n: row['deps'] for n, row in targets.items()}
     wanted = inventory.import_closure(graph, set(requested) & targets.keys()) if requested is not None else set(targets)
-    restored = restore_matching(root, modules, targets, index, wanted, remote, destination)
-    return {'requested': len(wanted), 'restored': len(restored), 'source': index['source']}
+    seeds = set()
+    restored = restore_matching(root, modules, targets, index, wanted, remote, destination, compiler_seeds=seeds)
+    result = {'requested': len(wanted), 'restored': len(restored), 'source': index['source']}
+    reports = {n for n in wanted if modules[n].report}
+    if reports:
+        result.update(reports_requested=len(reports), reports_restored=len(reports & restored),
+                      compiler_restored=len(restored | seeds))
+    return result
 
 
 def fetch_published(root, names, deadline, *, refresh_stale, version=None):
@@ -463,7 +531,7 @@ def fetch_published(root, names, deadline, *, refresh_stale, version=None):
         stage = Path(temporary)
         output = destination if names else stage / 'build'
         stats = restore(root, index, names or None, remote, output)
-        if not stats['restored']:
+        if not stats.get('compiler_restored', stats['restored']):
             receipt('fetch', 'miss', reason='no matching published compiler targets', **stats)
             return 1
         if not names:
