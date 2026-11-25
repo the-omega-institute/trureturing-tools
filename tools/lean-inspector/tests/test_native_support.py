@@ -63,7 +63,8 @@ def transport_inspector(source):
     end = source.index('  let store ← state.get', start)
     source = source[:start] + source[end:]
     start = source.index('  let (current, generatedNames, binding, enrollmentErrors) ←')
-    end = source.index('  let row ← inspectData', start)
+    assessment_end = '    else pure (store, #[], empty, #[])\n'
+    end = source.index(assessment_end, start) + len(assessment_end)
     source = source[:start] + ('  let current := store\n'
         '  let generatedNames : Array Name := #[]\n'
         '  let binding := empty\n'
