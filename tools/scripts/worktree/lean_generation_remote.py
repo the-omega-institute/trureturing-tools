@@ -44,13 +44,21 @@ class GitHub:
                                      headers={'Content-Type': 'application/json'} if fields else None)
 
     def current(self):
+        # The initial v1 marker probe also serves legacy CLI-authenticated consumers.
+        path = "git/ref/" + MARKER
         try:
-            ref = self.api("git/ref/" + MARKER)
+            ref = json.loads(host.gh(self.deadline, 'api', 'repos/' + host.REPO + '/' + path))
         except host.GitHubCommandError as error:
-            # Never bootstrap after a transport/auth failure.
-            if (error.stderr or '').startswith('HTTP 404:'):
+            try:
+                failure = json.loads(error.output or '{}')
+            except ValueError:
+                failure = {}
+            if isinstance(failure, dict) and failure.get('status') == '404':
                 return "", None
-            raise
+            if not re.search(r'HTTP 429|rate limit|HTTP 403', error.stderr or '', re.I):
+                raise
+            # Read the actual response headers so a throttled probe can wait for reset.
+            ref = self.api(path)
         commit = ref["object"]["sha"]
         if ref["ref"] != "refs/" + MARKER or not re.fullmatch("[0-9a-f]{40}", commit):
             raise ValueError("invalid published generation ref")
