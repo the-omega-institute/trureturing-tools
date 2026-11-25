@@ -6,10 +6,15 @@ open Lean
 
 namespace LeanInformationAudit.RawArtifacts
 
+/-- All targets sharing this compiled module share its input classification.
+The classification reads the module's own constants on first demand. -/
+structure LoadedModule extends ModuleData where
+  typedInputs : Thunk Bool
+
 /-- The pinned compiler's private declaration view, without an Environment or
 extension state. Each store owns only the regions loaded into that store. -/
 structure Store where
-  modules : NameMap ModuleData := {}
+  modules : NameMap LoadedModule := {}
   constants : SMap Name ConstantInfo := {}
   owners : SMap Name Name := {}
   -- Like Lean's module index, `owners` records the first import. A compatible
@@ -238,7 +243,7 @@ unsafe def loadModule (name : Name) (store : IO.Ref Store) : IO Unit := do
     selectedOwnerOverrides := overrides
     duplicateDefinitions := duplicates
     owners := data.constNames.foldl (fun owners constant => if owners.contains constant then owners else owners.insert constant name) s.owners
-    modules := s.modules.insert name data
+    modules := s.modules.insert name ⟨data, Thunk.mk fun _ => hasTypedInputs data⟩
     moduleIndices
     protectedModules := s.protectedModules.insert name (moduleIsProtected name data s.protectedModules)
     moduleOrder := s.moduleOrder.push name
@@ -273,7 +278,7 @@ unsafe def checkBatchConstants (base store : Store) (seen : IO.Ref (NameMap Name
 def Store.getModule (store : Store) (name : Name) : IO ModuleData := do
   let some data := store.modules.find? name
     | throw <| IO.userError s!"raw.missing_module:{name}"
-  return data
+  return data.toModuleData
 
 def getConstant (find : Name → Option ConstantInfo) (name : Name) : IO ConstantInfo := do
   let some info := find name
