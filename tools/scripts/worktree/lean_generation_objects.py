@@ -1,12 +1,12 @@
 """Append-only Release asset buckets shared by full versions and partial checkpoints."""
 
 import json
-import os
-from pathlib import Path
-import tempfile
+import http.client
+import re
 
 import lean_cache_release as host
 from lean_release_index import valid_digest
+from lean_generation_http import GitHubHTTP
 
 BUCKET = "lean-cache-objects-v1"
 # Leave room for the concurrent final writes of workers with the same bucket view.
@@ -17,22 +17,29 @@ class Objects:
     def __init__(self, deadline):
         self.deadline = deadline
         self.buckets = {}
+        self.ids = {}
+        self.http = GitHubHTTP(deadline)
+
+    def remember(self, tag, release):
+        if (release.get('tag_name') != tag or release.get('draft') is not False
+                or type(release.get('id')) is not int or release['id'] < 1):
+            raise ValueError('invalid generation object bucket: ' + tag)
+        self.ids[tag] = release['id']
+        rows = release['assets']
+        self.buckets[tag] = {row['name']: row for row in rows}
+        if len(self.buckets[tag]) != len(rows):
+            raise ValueError('duplicate immutable asset names')
 
     def assets(self, tag):
         if tag not in self.buckets:
-            release = host.existing_release(tag, self.deadline)
-            if release is None:
+            try:
+                release = self.http.api('releases/tags/' + tag)
+            except host.GitHubCommandError as error:
+                if not error.stderr.startswith('HTTP 404:'):
+                    raise
                 self.buckets[tag] = None
             else:
-                if release["draft"]:
-                    raise ValueError("generation object bucket is unpublished: " + tag)
-                url = f"repos/{host.REPO}/releases/{release['id']}/assets?per_page=100"
-                output = host.gh(self.deadline, "api", url, "--paginate", "--jq",
-                                 ".[]|{name,id,size,digest,state}")
-                rows = [json.loads(line) for line in output.splitlines() if line]
-                self.buckets[tag] = {row["name"]: row for row in rows}
-                if len(self.buckets[tag]) != len(rows):
-                    raise ValueError("duplicate immutable asset names")
+                self.remember(tag, release)
         return self.buckets[tag]
 
     def locate(self, digest, name):
@@ -61,31 +68,28 @@ class Objects:
     def ensure(self, digest, name, size, path):
         from lean_generation_checkpoints import publisher
         publisher()
-        for attempt in range(2):
+        for attempt in range(3):
             tag, asset = self.locate(digest, name)
             if self.checked(asset, digest, size):
                 return False
-            if self.buckets[tag] is None:
-                try:
-                    host.gh(self.deadline, "release", "create", tag, "--repo", host.REPO,
-                            "--prerelease", "--latest=false", "--title", tag,
-                            "--notes", "Content-addressed Lean build objects shared by published generations.")
-                except host.GitHubCommandError:
-                    if host.existing_release(tag, self.deadline) is None:
-                        raise
-            with tempfile.TemporaryDirectory(dir=path.parent) as temp:
-                alias = Path(temp) / name
-                os.link(path, alias)
-                try:
-                    host.gh(self.deadline, "release", "upload", tag, str(alias), "--repo", host.REPO)
-                except host.GitHubCommandError:
-                    self.buckets.pop(tag, None)
-                    if attempt == 0:
-                        continue
+            try:
+                if self.buckets[tag] is None:
+                    body = {'tag_name': tag, 'name': tag, 'prerelease': True, 'make_latest': 'false',
+                            'body': 'Content-addressed Lean build objects shared by published generations.'}
+                    self.remember(tag, self.http.api('releases', method='POST', payload=json.dumps(body).encode(),
+                                                     headers={'Content-Type': 'application/json'}))
+                uploaded = self.http.upload(self.ids[tag], name, path)
+                if uploaded['name'] != name or not self.checked(uploaded, digest, size):
+                    raise ValueError('unexpected upload receipt for ' + name)
+                self.buckets[tag][name] = uploaded
+                return True
+            except (host.GitHubCommandError, http.client.HTTPException, OSError, json.JSONDecodeError) as error:
+                if isinstance(error, host.GitHubCommandError) and error.stderr != 'GitHub connection interrupted' and not re.search(r'HTTP (409|422|5\d\d):', error.stderr):
                     raise
-            self.buckets.pop(tag, None)
-            _, asset = self.locate(digest, name)
-            if not self.checked(asset, digest, size):
-                raise ValueError("uploaded generation object is unavailable")
-            return True
-        raise ValueError("unable to stage generation object")
+                # Reconcile a concurrent insertion, a full bucket, or a lost acknowledgement.
+                self.buckets.pop(tag, None)
+                _, actual = self.locate(digest, name)
+                if self.checked(actual, digest, size):
+                    return False
+                if attempt == 2:
+                    raise

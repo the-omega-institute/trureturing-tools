@@ -39,15 +39,16 @@ class GitHub:
         self.deadline = deadline
         self.objects = Objects(deadline)
 
-    def api(self, path, *args):
-        return json.loads(host.gh(self.deadline, "api", "repos/" + host.REPO + "/" + path, *args))
+    def api(self, path, method='GET', **fields):
+        return self.objects.http.api(path, method=method, payload=json.dumps(fields).encode() if fields else None,
+                                     headers={'Content-Type': 'application/json'} if fields else None)
 
     def current(self):
         try:
             ref = self.api("git/ref/" + MARKER)
         except host.GitHubCommandError as error:
             # Never bootstrap after a transport/auth failure.
-            if json.loads(error.output).get("status") == "404":
+            if (error.stderr or '').startswith('HTTP 404:'):
                 return "", None
             raise
         commit = ref["object"]["sha"]
@@ -80,13 +81,13 @@ class GitHub:
         return {digest: size for digest, size in sizes.items() if self.has_volume(digest, size)}
 
     def volume(self, digest, size):
-        _, asset = self.objects.locate(digest, digest)
+        tag, asset = self.objects.locate(digest, digest)
         if not self.objects.checked(asset, digest, size):
             raise ValueError("missing immutable generation volume: " + digest)
-        return asset
+        return {**asset, 'tag': tag}
 
     def blocks(self, asset, start, size):
-        return host.range_blocks(asset, start, size, self.deadline)
+        return self.objects.http.asset(asset, asset['tag'], start, size)
 
     def ci(self, operation, digest, path):
         adapter = self.root / ".github/actions/lean-cache-shards/run.mjs"
@@ -118,19 +119,6 @@ class GitHub:
                 self.objects.checked(asset, digest, size)
             except ValueError as error:
                 raise InvalidIndexBody("invalid checkpoint asset metadata: " + digest) from error
-            with tempfile.TemporaryDirectory(dir=path.parent) as temp:
-                try:
-                    host.gh(self.deadline, "release", "download", tag, "--repo", host.REPO, "--dir", temp,
-                            "--pattern", name)
-                except host.GitHubCommandError as error:
-                    diagnostic = (error.stderr or "").strip()
-                    if re.search(r"\bHTTP 404\b", diagnostic) or diagnostic == "no assets match the file pattern":
-                        raise MissingCheckpoint("checkpoint asset disappeared: " + digest) from error
-                    raise
-                candidate = Path(temp) / name
-                if candidate.stat().st_size != size:
-                    raise InvalidIndexBody("checkpoint body differs from its recorded length: " + digest)
-                os.replace(candidate, path)
         else:
             tag = INDEX_PREFIX + digest
             metadata = host.existing_release(tag, self.deadline)
@@ -139,11 +127,20 @@ class GitHub:
             assets = metadata["assets"]
             if len(assets) != 1 or not 0 < assets[0]["size"] <= MAX_INDEX:
                 raise ValueError("invalid generation index asset")
-            remote.checked_asset(metadata, tag, digest, assets[0]["size"])
-            with tempfile.TemporaryDirectory(dir=path.parent) as temporary:
-                host.gh(self.deadline, "release", "download", tag, "--repo", host.REPO, "--dir",
-                        temporary, "--pattern", digest)
-                os.replace(Path(temporary) / digest, path)
+            asset = remote.checked_asset(metadata, tag, digest, assets[0]["size"])
+        if transport != 'ci':
+            with tempfile.TemporaryDirectory(dir=path.parent) as directory, (Path(directory) / 'index').open('wb') as temp:
+                try:
+                    for block in self.objects.http.asset(asset, tag):
+                        temp.write(block)
+                except host.GitHubCommandError as error:
+                    if transport == 'checkpoint' and (error.stderr or '').startswith('HTTP 404:'):
+                        raise MissingCheckpoint('checkpoint asset disappeared: ' + digest) from error
+                    raise
+                temp.close()
+                if Path(temp.name).stat().st_size != asset['size']:
+                    raise InvalidIndexBody('index body differs from its recorded length: ' + digest)
+                os.replace(temp.name, path)
         if path.stat().st_size > MAX_INDEX or host.archive_sha(path, self.deadline) != digest:
             raise InvalidIndexBody("generation index readback digest mismatch")
         try:
@@ -170,14 +167,14 @@ class GitHub:
         elif old is not None:
             raise ValueError("source commit already has a different published generation")
         tree = self.api("git/commits/" + marker["source"])["tree"]["sha"]
-        child = self.api("git/commits", "-X", "POST", "-f", "message=" + encode(marker).decode(),
-                         "-f", "tree=" + tree, "-f", "parents[]=" + (current or marker["source"]))["sha"]
+        child = self.api("git/commits", "POST", message=encode(marker).decode(), tree=tree,
+                         parents=[current or marker["source"]])["sha"]
         if current:
             # The new commit's only parent is the observed marker. A racing
             # sibling can never be its ancestor, so Git rejects the stale swap.
-            ref = self.api("git/refs/" + MARKER, "-X", "PATCH", "-f", "sha=" + child, "-F", "force=false")
+            ref = self.api("git/refs/" + MARKER, "PATCH", sha=child, force=False)
         else:
-            ref = self.api("git/refs", "-X", "POST", "-f", "ref=refs/" + MARKER, "-f", "sha=" + child)
+            ref = self.api("git/refs", "POST", ref="refs/" + MARKER, sha=child)
         if ref["object"]["sha"] != child:
             raise ValueError("generation marker did not advance to its verified index")
         return child
