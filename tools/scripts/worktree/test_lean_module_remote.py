@@ -1,10 +1,13 @@
 """Versioned module Release assets, mutable Actions keys, retries and independent readback."""
 
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import json
 from pathlib import Path
 import tempfile
+from threading import Barrier
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -15,6 +18,7 @@ import lean_module_remote as transport
 class Service:
     def __init__(self):
         self.releases = {}
+        self.creates = Counter()
         self.files = {}
         self.ref = None
         self.uploads = 0
@@ -28,6 +32,7 @@ class Service:
             return self.releases[tag]
         if path == 'releases':
             tag = body['tag_name']
+            self.creates[tag] += 1
             release = {'id': len(self.releases) + 1, 'tag_name': tag, 'draft': False, 'assets': []}
             self.releases[tag] = release
             return release
@@ -36,6 +41,9 @@ class Service:
             assets = next(r['assets'] for r in self.releases.values() if r['id'] == rid)
             page = int(parse_qs(urlsplit(path).query)['page'][0])
             return assets[(page-1)*100:page*100]
+        if path.startswith('git/matching-refs/tags/'):
+            prefix = path.removeprefix('git/matching-refs/tags/')
+            return [{'ref': 'refs/tags/' + tag} for tag in self.releases if tag.startswith(prefix)]
         if path.startswith('git/refs'):
             self.ref = body['sha']
             return {}
@@ -142,6 +150,57 @@ class VersionedShards(unittest.TestCase):
             self.remote.publish(index)
             self.assertEqual(self.remote.latest(), index)
             self.assertNotIn((shard['version'], 'index.json'), self.service.files)
+
+    def test_planner_owns_primary_and_parallel_workers_own_sparse_overflow(self):
+        version = transport.PREFIX + 'a' * 40
+        payload = self.root / 'payload'
+        payload.write_bytes(b'payload')
+        digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+
+        def worker(lane):
+            remote = transport.Remote(self.root, lane=lane, lanes=4)
+            remote.http = self.service
+            return remote
+
+        with self.assertRaisesRegex(ValueError, 'planner did not prepare'):
+            worker(1).stage(version, 'early', payload, digest, digest)
+        self.assertFalse(self.service.creates)
+        self.remote.catalog(version, create=True)
+        start = Barrier(2)
+
+        def upload_primary(lane):
+            start.wait(timeout=5)
+            return worker(lane).stage(version, str(lane), payload, digest, digest)[0]
+
+        def overflow(lane):
+            remote = worker(lane)
+            start.wait(timeout=5)
+            return [remote.stage(version, f'{lane}-{n}', payload, digest, digest)[0] for n in range(2)]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(list(pool.map(upload_primary, (1, 3))), [version, version])
+            with patch.object(transport, 'CAPACITY', 1):
+                parts = list(pool.map(overflow, (1, 3)))
+        self.assertEqual(parts, [[f'{version}-part-{n}' for n in seq] for seq in [(3, 7), (5, 9)]])
+        self.assertEqual(self.service.creates, {tag: 1 for tag in [version, *parts[0], *parts[1]]})
+        self.remote.tags = lambda current, base: [current]
+        self.assertEqual(set(dict(self.remote.candidates({'version': version}))), set(self.service.creates))
+
+    def test_unfinished_raw_revision_checkpoint_keeps_its_download_address(self):
+        old = self.plan('a'*40, name='D5.S0')
+        old['mathlib'] = '1'*40
+        previous = old['shards']['D5.S0']
+        previous['key'] = old['mathlib'] + '-D5.S0'
+        previous['asset'] = previous['key'] + '.tar.gz'
+        saved = self.save(old, b'compiled')
+        new = {**old, 'source': 'b'*40, 'version': transport.PREFIX + 'b'*40,
+               'shards': {'D5.S0': dict(previous, key='v4.35.0-D5.S0.tar.gz', asset='v4.35.0-D5.S0.tar.gz')}}
+        found = self.remote.partials(new)['D5.S0']
+        self.assertEqual(found, saved)
+        self.assertEqual(self.service.uploads, 1)
+        output = self.root / 'consumer'
+        self.remote.download(found, output)
+        self.assertEqual(output.read_bytes(), b'compiled')
 
     def test_cache_failure_preserves_release_checkpoint_and_index(self):
         plan = self.plan('a'*40)
