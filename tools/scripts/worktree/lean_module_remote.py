@@ -152,6 +152,16 @@ class Remote:
         if path.stat().st_size != asset['size'] or host.archive_sha(path, self.deadline) != digest:
             raise ValueError('Release asset readback differs from metadata')
 
+    def confirmed(self, rows):
+        confirmed = {}
+        for name, row in rows.items():
+            catalog = self.catalog(row['version'])
+            asset = catalog[1].get(row['asset']) if catalog else None
+            if (asset and asset['state'] == 'uploaded' and asset['size'] == row['bytes']
+                    and asset['digest'] == 'sha256:' + row['sha256'] and asset['label'] == row['fingerprint']):
+                confirmed[name] = row
+        return confirmed
+
     def download(self, row, path):
         digest = row['sha256']
         if (self.actions('get', row['key'], digest, path) and path.is_file()
@@ -289,6 +299,9 @@ class Remote:
         source = index['source']
         if index['version'] != PREFIX + source or not re.fullmatch('[0-9a-f]{40}', source):
             raise ValueError('invalid module version for publication')
+        self.inventory.clear()
+        if self.confirmed(index['shards']).keys() != index['shards'].keys():
+            raise ValueError('complete module index references an unavailable shard')
         data = json_body(index)
         digest = hashlib.sha256(data).hexdigest()
         current = self.current()

@@ -143,6 +143,16 @@ class VersionedShards(unittest.TestCase):
             self.assertEqual(self.remote.latest(), index)
             self.assertNotIn((shard['version'], 'index.json'), self.service.files)
 
+    def test_removed_shard_cannot_be_inherited_in_a_new_version(self):
+        plan = self.plan('a'*40)
+        row = self.save(plan, b'payload')
+        self.assertEqual(self.remote.confirmed({'Small': row}), {'Small': row})
+        self.service.releases[plan['version']]['assets'].clear()
+        fresh = self.plan('b'*40)
+        with self.assertRaisesRegex(ValueError, 'unavailable shard'):
+            self.remote.publish({**fresh, 'shards': {'Small': row}})
+        self.assertIsNone(self.service.ref)
+
     def test_manifest_readback_failure_blocks_advance(self):
         plan = self.plan('a'*40)
         row = self.save(plan, b'payload')
