@@ -307,7 +307,7 @@ def restore_matching(root, modules, targets, index, names, remote, destination):
         for shard, members in selected.items():
             row = index['shards'][shard]
             remote.download(row, archive)
-            restored.update(restore_shard(archive, row, members, modules, destination))
+            restored.update(restore_shard(archive, row, members, modules, destination, root=root))
             archive.unlink()
     return restored
 
