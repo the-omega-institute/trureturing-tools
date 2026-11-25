@@ -501,7 +501,6 @@ def run():
     final = commands.add_parser('finish')
     final.add_argument('--plan', type=Path, required=True)
     final.add_argument('--output', type=Path, required=True)
-    commands.add_parser('omega-targets', help='list module-cache roots for the Omega audit')
     get = commands.add_parser('restore')
     get.add_argument('--version')
     roots = get.add_mutually_exclusive_group()
@@ -510,10 +509,6 @@ def run():
     get.add_argument('--destination', type=Path)
     args = parser.parse_args()
     root = args.repository.resolve()
-    if args.command == 'omega-targets':
-        modules, targets = checkout_targets(root)
-        print('\n'.join(name for name in sorted(targets) if modules[name].extra_builds))
-        return 0
     if args.command == 'worker':
         plan = json.loads(args.plan.read_bytes())
         remote = Remote(root, lane=args.lane, lanes=len(plan['lanes']))
