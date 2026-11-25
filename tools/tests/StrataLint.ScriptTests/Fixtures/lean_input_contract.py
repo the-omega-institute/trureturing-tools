@@ -51,13 +51,10 @@ class PartitionTests(PartitionFixture, unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
             flat = dict(line.split("=", 1) for line in result.stdout.splitlines()
                         if not line.startswith("LEAN_ACTIONS_CACHE "))
-            self.assertEqual(flat["project_key"], flat["project_restore_key"])
+            self.assertNotIn("project_key", flat)
             self.assertFalse(any(key.startswith("report_") for key in flat), flat)
             flat["save_allowed"] = flat["save_allowed"] == "true"
-            return {**flat, **{
-                layer: {"restore_prefix": flat[layer + "_restore_prefix"],
-                        "key": flat[layer + "_key"], "path": flat[layer + "_path"]}
-                for layer in ("dependency", "project")}}
+            return flat
         first = keys("12", "1", "push", "refs/heads/dev")
         self.manifest["packages"].append({"name": "other", "rev": OTHER})
         self.manifest["packages"][0]["inputRev"] = "another-tag"
@@ -82,14 +79,12 @@ class PartitionTests(PartitionFixture, unittest.TestCase):
         upgraded = keys("15", "1", "push", "refs/heads/dev")
         self.assertEqual(first["release_prefix"], second["release_prefix"])
         self.assertNotEqual(first["release_prefix"], upgraded["release_prefix"])
-        for layer in ["dependency", "project"]:
-            a, b = first[layer], second[layer]
-            self.assertEqual(a["restore_prefix"], b["restore_prefix"])
-            self.assertIn(REV, a["restore_prefix"])
-            self.assertTrue(a["key"].endswith("12-1"))
-            self.assertTrue(b["key"].endswith("13-2"))
-            self.assertNotEqual(a["key"], b["key"])
-            self.assertNotEqual(a["restore_prefix"], upgraded[layer]["restore_prefix"])
+        self.assertEqual(first["dependency_restore_prefix"], second["dependency_restore_prefix"])
+        self.assertIn(REV, first["dependency_restore_prefix"])
+        self.assertTrue(first["dependency_key"].endswith("12-1"))
+        self.assertTrue(second["dependency_key"].endswith("13-2"))
+        self.assertNotEqual(first["dependency_key"], second["dependency_key"])
+        self.assertNotEqual(first["dependency_restore_prefix"], upgraded["dependency_restore_prefix"])
 
     def test_binary_platform_isolates_all_seed_layers(self):
         sys.path.insert(0, str(ROOT / "tools/scripts/worktree"))
@@ -107,11 +102,9 @@ class PartitionTests(PartitionFixture, unittest.TestCase):
                 keys = module.actions_keys(self.root)
                 self.assertEqual(f"{REV}/{expected}", keys["partition"])
                 self.assertEqual(f"lean-cache-v2-{REV}-{expected}-", keys["release_prefix"])
-                for layer in ["dependency", "project"]:
-                    generation = "project-push" if layer == "project" else "dependency-v4"
-                    prefix = f"lean-{generation}-{REV}-{expected}-"
-                    self.assertEqual(prefix, keys[layer]["restore_prefix"])
-                    self.assertEqual(prefix + "12-1", keys[layer]["key"])
+                prefix = f"lean-dependency-v4-{REV}-{expected}-"
+                self.assertEqual(prefix, keys["dependency"]["restore_prefix"])
+                self.assertEqual(prefix + "12-1", keys["dependency"]["key"])
 
     def test_manual_producer_requires_a_validated_protected_source_pin(self):
         spec = importlib.util.spec_from_file_location("lean_actions", ROOT / "tools/scripts/worktree/lean_actions.py")

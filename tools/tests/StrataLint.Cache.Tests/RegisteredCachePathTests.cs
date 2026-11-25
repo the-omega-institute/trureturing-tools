@@ -12,15 +12,29 @@ public sealed class RegisteredCachePathTests
     public void NativeArchivePathsComeOnlyFromTheRegisteredLayer()
     {
         using var fixture = new Fixture();
-        string[] paths = [".lake/build/lib", ".lake/build/ir/**/*.c", ".lake/build/ir/**/*.c.hash"];
+        string[] paths = [".lake/packages/mathlib/Mathlib", ".lake/packages/mathlib/.lake/build/lib"];
         fixture.Manifest(paths);
-        Directory.CreateDirectory(Path.Combine(fixture.Root, ".lake/build/unregistered"));
-        File.WriteAllText(Path.Combine(fixture.Root, ".lake/build/unregistered/large.setup.json"), "unselected");
-        var result = fixture.Keys("project");
+        Directory.CreateDirectory(Path.Combine(fixture.Root, ".lake/packages/unregistered"));
+        File.WriteAllText(Path.Combine(fixture.Root, ".lake/packages/unregistered/large.setup.json"), "unselected");
+        var result = fixture.Keys("dependency");
         Assert.True(result.Exit == 0, result.Text);
-        Assert.Equal(string.Join('\n', paths.Order(StringComparer.Ordinal)), ReadOutput(result.Output, "project_archive_path"));
-        Assert.Equal(".lake/build", ReadOutput(result.Output, "project_path"));
-        Assert.DoesNotContain("dependency_archive_path", result.Output, StringComparison.Ordinal);
+        Assert.Equal(string.Join('\n', paths.Order(StringComparer.Ordinal)), ReadOutput(result.Output, "dependency_archive_path"));
+        Assert.Equal(".lake/packages", ReadOutput(result.Output, "dependency_path"));
+        Assert.DoesNotContain("project_archive_path", result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProducerResumeIncludesRegisteredProjectAndDependencyPaths()
+    {
+        using var fixture = new Fixture();
+        fixture.Manifest([".lake/packages/mathlib"]);
+        File.WriteAllText(Path.Combine(fixture.Root, "lakefile.toml"), "name = \"fixture\"\n");
+        File.WriteAllText(Path.Combine(fixture.Root, "lean-report-inputs.json"),
+            """{"report_execution":{"environment":[]}}""");
+        var result = fixture.Command("resume-keys");
+        Assert.True(result.Exit == 0, result.Text);
+        Assert.Equal(".lake/build/lib\n.lake/packages/mathlib", ReadOutput(result.Output, "resume_archive_path"));
+        Assert.StartsWith("lean-producer-resume-v1-", ReadOutput(result.Output, "resume_key"), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -39,23 +53,23 @@ public sealed class RegisteredCachePathTests
     public void InvalidRegistrationCannotBecomeAnOptionalCacheMiss(string defect)
     {
         using var fixture = new Fixture();
-        fixture.Manifest([".lake/build/lib"]);
+        fixture.Manifest([".lake/packages/mathlib"]);
         switch (defect)
         {
             case "missing-file": File.Delete(fixture.ManifestPath); break;
             case "unregistered-file": File.WriteAllText(Path.Combine(fixture.Root, "Meta/FILEMAP.toml"), "files = []\n"); break;
-            case "missing-layer": fixture.Raw("{\"schema_version\":1,\"layers\":{\"dependency\":[\".lake/packages\"]}}"); break;
-            case "duplicate-layer": fixture.Raw("{\"schema_version\":1,\"layers\":{\"project\":[\".lake/build/lib\"],\"project\":[\".lake/build/ir\"]}}"); break;
-            case "unknown-layer": fixture.Raw("{\"schema_version\":1,\"layers\":{\"guess\":[\".lake/build/lib\"]}}"); break;
-            case "unsupported-schema": fixture.Raw("{\"schema_version\":2,\"layers\":{\"project\":[\".lake/build/lib\"]}}"); break;
+            case "missing-layer": fixture.Raw("{\"schema_version\":1,\"layers\":{\"project\":[\".lake/build/lib\"]}}"); break;
+            case "duplicate-layer": fixture.Raw("{\"schema_version\":1,\"layers\":{\"dependency\":[\".lake/packages/mathlib\"],\"dependency\":[\".lake/packages/other\"]}}"); break;
+            case "unknown-layer": fixture.Raw("{\"schema_version\":1,\"layers\":{\"guess\":[\".lake/packages/mathlib\"]}}"); break;
+            case "unsupported-schema": fixture.Raw("{\"schema_version\":2,\"layers\":{\"dependency\":[\".lake/packages/mathlib\"]}}"); break;
             case "empty-paths": fixture.Manifest([]); break;
-            case "duplicate-paths": fixture.Manifest([".lake/build/lib", ".lake/build/lib"]); break;
-            case "wrong-root": fixture.Manifest([".lake/packages"]); break;
-            case "parent-path": fixture.Manifest([".lake/build/../outside"]); break;
+            case "duplicate-paths": fixture.Manifest([".lake/packages/mathlib", ".lake/packages/mathlib"]); break;
+            case "wrong-root": fixture.Manifest([".lake/build"]); break;
+            case "parent-path": fixture.Manifest([".lake/packages/../outside"]); break;
             case "absolute-path": fixture.Manifest(["/tmp/material"]); break;
-            case "newline": fixture.Manifest([".lake/build/lib\nother=value"]); break;
+            case "newline": fixture.Manifest([".lake/packages/mathlib\nother=value"]); break;
         }
-        var result = fixture.Keys("project");
+        var result = fixture.Keys("dependency");
         Assert.True(result.Exit == 2, result.Text);
         Assert.Contains("cache path registration", result.Text, StringComparison.Ordinal);
         Assert.Empty(result.Output);
@@ -65,25 +79,26 @@ public sealed class RegisteredCachePathTests
     public void ArchiveLayoutChangesDoNotCreateAnotherMathlibPartition()
     {
         using var fixture = new Fixture();
-        fixture.Manifest([".lake/build/lib"]);
-        var before = fixture.Keys("project");
-        fixture.Manifest([".lake/build/lib", ".lake/build/lean-inspector", ".lake/build/reg"]);
-        var after = fixture.Keys("project");
+        fixture.Manifest([".lake/packages/mathlib"]);
+        var before = fixture.Keys("dependency");
+        fixture.Manifest([".lake/packages/mathlib", ".lake/packages/batteries", ".lake/packages/aesop"]);
+        var after = fixture.Keys("dependency");
         Assert.True(before.Exit == 0 && after.Exit == 0, before.Text + after.Text);
-        foreach (var key in new[] { "mathlib_revision", "partition", "project_key", "project_restore_prefix" })
+        foreach (var key in new[] { "mathlib_revision", "partition", "dependency_key", "dependency_restore_prefix" })
             Assert.Equal(ReadOutput(before.Output, key), ReadOutput(after.Output, key));
-        Assert.NotEqual(ReadOutput(before.Output, "project_archive_path"), ReadOutput(after.Output, "project_archive_path"));
-        fixture.Manifest([".lake/build/reg", ".lake/build/lean-inspector", ".lake/build/lib"]);
-        var reordered = fixture.Keys("project");
+        Assert.NotEqual(ReadOutput(before.Output, "dependency_archive_path"), ReadOutput(after.Output, "dependency_archive_path"));
+        fixture.Manifest([".lake/packages/aesop", ".lake/packages/batteries", ".lake/packages/mathlib"]);
+        var reordered = fixture.Keys("dependency");
         Assert.True(reordered.Exit == 0, reordered.Text);
-        Assert.Equal(ReadOutput(after.Output, "project_archive_path"), ReadOutput(reordered.Output, "project_archive_path"));
+        Assert.Equal(ReadOutput(after.Output, "dependency_archive_path"), ReadOutput(reordered.Output, "dependency_archive_path"));
     }
 
     [Theory]
+    [InlineData("project")]
     [InlineData("judge")]
     [InlineData("engineering")]
     [InlineData("current")]
-    public void RemovedEvidenceLayersCannotBeSelected(string layer)
+    public void RemovedLayersCannotBeSelected(string layer)
     {
         using var fixture = new Fixture();
         var result = fixture.Keys(layer);
@@ -120,16 +135,20 @@ public sealed class RegisteredCachePathTests
         }
         internal void Manifest(string[] paths) => Raw(JsonSerializer.Serialize(new
         {
-            schema_version = 1, layers = new { dependency = new[] { ".lake/packages" }, project = paths }
+            schema_version = 1, layers = new { dependency = paths, project = new[] { ".lake/build/lib" } }
         }));
         internal void Raw(string value) => File.WriteAllText(ManifestPath, value);
-        internal (int Exit, string Text, string Output) Keys(string layer)
+        internal (int Exit, string Text, string Output) Keys(string layer) => Command("keys", "--layers", layer);
+
+        internal (int Exit, string Text, string Output) Command(string command, params string[] args)
         {
             var output = Path.Combine(Root, "outputs");
             File.Delete(output);
             var script = Path.Combine(TestRepositoryLayout.FindRoot(), "tools/scripts/worktree/lean_actions.py");
-            var result = EngineeringProcess.Process(Root, "env", ["GH_TOKEN=", "GITHUB_RUN_ID=17", "GITHUB_RUN_ATTEMPT=1", "GITHUB_OUTPUT=" + output,
-                "python3", "-B", script, "keys", "--repository", Root, "--layers", layer],
+            var result = EngineeringProcess.Process(Root, "env", ["GITHUB_RUN_ID=17", "GITHUB_RUN_ATTEMPT=1", "GITHUB_OUTPUT=" + output,
+                "GITHUB_REPOSITORY=owner/repository", "GITHUB_EVENT_NAME=push", "GITHUB_REF=refs/heads/dev",
+                "GITHUB_REF_PROTECTED=true", "STRATALINT_CACHE_WRITES=true",
+                "python3", "-B", script, command, "--repository", Root, .. args],
                 hangGuard: TestBudgets.WorkflowProcessHangGuard, maximumOutputBytes: 1024 * 1024);
             return (result.Exit, result.Text,
                 File.Exists(output) ? File.ReadAllText(output) : "");

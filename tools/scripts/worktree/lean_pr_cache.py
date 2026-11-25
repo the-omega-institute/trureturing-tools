@@ -637,7 +637,6 @@ def adopt(root, cache_action=None, *, require_pr_opt_in=False):
         actions.output(dict(adopted=True))
         if sharded:
             actions.output(dict(sharded=True))
-        actions.output(dict(STRATALINT_ACTIONS_CACHE_SEEDED="0"), "GITHUB_ENV")
         return receipt("adopted", identity, runtime=runtime, artifact=artifact["id"],
                        downloaded_bytes=downloaded_bytes, download_seconds=round(download_seconds, 3),
                        unpack_seconds=round(unpack_seconds, 3),

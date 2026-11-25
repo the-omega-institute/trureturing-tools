@@ -269,9 +269,7 @@ def prepare(root, identity, state, previous, anchor, targets=(), available=froze
     elif state == "complete":
         allowed, reason, _ = project_publication(root)
         keys = actions_keys(root)
-        native_seed = (os.environ.get("STRATALINT_MIGRATE_NATIVE_PROJECT") == "true"
-                       and os.environ.get("STRATALINT_ACTIONS_CACHE_SEEDED") == "1")
-        migrated = reason == "no-build-work" and (manual_source_is_valid() or resume_verified(root) or native_seed)
+        migrated = reason == "no-build-work" and (manual_source_is_valid() or resume_verified(root))
         if (not (allowed or migrated) or not keys["project_save_allowed"]
                 or os.environ.get("GITHUB_REF_PROTECTED") != "true"):
             raise ValueError("Actions shard publication denied: " + reason)

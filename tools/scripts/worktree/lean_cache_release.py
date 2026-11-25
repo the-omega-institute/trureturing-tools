@@ -1375,9 +1375,6 @@ def fetch(root, partition, writer_owned=False, refresh_stale=False, approved_tag
         receipt("fetch", "refused", reason="linked worktree: release archive disabled",
                 remediation=warm_dev_remediation(main_checkout))
         return 1
-    if os.environ.get("STRATALINT_ACTIONS_CACHE_SEEDED", "").lower() in ("1", "true"):
-        receipt("fetch", "skipped", reason="Actions supplied an applicable seed")
-        return 0
     try:
         deadline = operation_deadline()
         with contextlib.nullcontext() if writer_owned else cache_guard(root):

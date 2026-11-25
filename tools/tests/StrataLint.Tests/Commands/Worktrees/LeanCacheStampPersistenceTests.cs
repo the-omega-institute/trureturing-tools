@@ -9,17 +9,14 @@ namespace StrataLint.Tests;
 public sealed class LeanCacheStampPersistenceTests
 {
     [Theory]
-    [InlineData("complete", true, 0)]
-    [InlineData("complete", true, 23)]
-    [InlineData("dependency-only", true, 0)]
-    [InlineData("project-corrupt", true, 0)]
+    [InlineData("dependency-hit", true, 0)]
+    [InlineData("dependency-hit", true, 23)]
     [InlineData("dependency-corrupt", false, 0)]
     [InlineData("dependency-matched-key-missing", false, 0)]
     [InlineData("dependency-matched-key-missing", false, 23)]
-    [InlineData("project-matched-key-missing", true, 0)]
     [InlineData("transfer-miss", false, 0)]
+    [InlineData("preparation-adopted", true, 0)]
     [InlineData("publication-failed", false, 0)]
-    [InlineData("project-only", false, 0)]
     [InlineData("foreign-mathlib", false, 0)]
     [InlineData("foreign-platform", false, 0)]
     [InlineData("existing-mismatch", true, 0)]
@@ -52,36 +49,32 @@ public sealed class LeanCacheStampPersistenceTests
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(contents)
             keys = actions.actions_keys(root)
-            # Actions extracts native build directories before this adapter runs.
-            # This fixture exercises restoration and the real C# writer handoff,
-            # without invoking the independent optional snapshot-save policy.
+            # Actions extracts dependency files before the writer validates their stamp.
             stamp = root / '.lake/.stratalint-lean-cache-stamp.json'
             stamp.unlink()
-            matched = {layer: keys[layer]['key'] for layer in actions.LAYERS}
-            outcomes = {layer: 'success' for layer in actions.LAYERS}
-            if scenario == 'dependency-only':
-                matched['project'] = ''
-                outcomes['project'] = 'skipped'
-                shutil.rmtree(root / keys['project']['path'])
-            if scenario in ('transfer-miss', 'project-only') or scenario.endswith('-miss'):
-                matched['dependency'] = ''
-                outcomes['dependency'] = 'skipped'
+            matched = keys['dependency']['key']
+            outcome = 'success'
+            if scenario == 'transfer-miss' or scenario.endswith('-miss'):
+                matched, outcome = '', 'skipped'
                 shutil.rmtree(root / keys['dependency']['path'])
-            if scenario.endswith('-corrupt') and not scenario.startswith('existing-'):
-                layer = scenario.removesuffix('-corrupt')
-                damaged = (package / '.lake/build/lib/lean/Mathlib/Fixture.olean' if layer == 'dependency'
-                    else root / '.lake/build/lib/lean/Fixture.olean')
-                damaged.write_text('partial damaged extraction')
-                # Actions reports archive corruption; the adapter must discard
-                # its incomplete directory while retaining the other layer.
-                outcomes[layer] = 'failure'
-            if scenario.endswith('-matched-key-missing'):
-                matched[scenario.removesuffix('-matched-key-missing')] = ''
-            if scenario == 'publication-failed': outcomes['dependency'] = 'failure'
+            if scenario == 'dependency-corrupt':
+                (package / '.lake/build/lib/lean/Mathlib/Fixture.olean').write_text('partial damaged extraction')
+                outcome = 'failure'
+            if scenario == 'dependency-matched-key-missing':
+                matched = ''
+            if scenario == 'publication-failed':
+                outcome = 'failure'
             if scenario == 'foreign-mathlib':
-                matched['dependency'] = matched['dependency'].replace('a' * 40, 'b' * 40)
+                matched = matched.replace('a' * 40, 'b' * 40)
             if scenario == 'foreign-platform':
-                matched['dependency'] = matched['dependency'].replace(keys['arch'], 'foreign-arch')
+                matched = matched.replace(keys['arch'], 'foreign-arch')
+            if scenario == 'preparation-adopted':
+                os.environ['STRATALINT_CACHE_CHECKED_OUT_SHA'] = 'a' * 40
+                actions.write_small_record(root / 'build/lean-cache/pr-adopted.json', {
+                    'run': '17', 'attempt': '2', 'repository': str(root.resolve()), 'checkout': 'a' * 40,
+                    'ref': 'refs/heads/dev', 'artifact': 3, 'merged': True})
+                actions.stamp_restored_dependency(root, keys)
+                matched, outcome = '', 'failure'
             if scenario.startswith('existing-') or scenario == 'stamp-publication-failed':
                 stamp.parent.mkdir(parents=True, exist_ok=True)
                 if scenario.startswith(('existing-mismatch', 'existing-platform')):
@@ -90,31 +83,26 @@ public sealed class LeanCacheStampPersistenceTests
                         os=keys['os'], arch='foreign' if scenario.startswith('existing-platform') else keys['arch'])))
                 elif scenario == 'existing-corrupt': stamp.write_text('corrupt')
                 else: stamp.mkdir()
-            actions.restore(root, keys, matched, outcomes=outcomes)
+            actions.restore_dependency(root, keys, matched, outcome)
             """, repository, fixture.Reader, scenario], repository,
             TestBudgets.LongWorkflowProcessHangGuard, 1024 * 1024);
         Assert.True(restore.ExitCode == 0,
             Encoding.UTF8.GetString(restore.StandardOutput) + Encoding.UTF8.GetString(restore.StandardError));
         var lake = Path.Combine(fixture.Reader, ".lake");
-        var restoreReceipts = Encoding.UTF8.GetString(restore.StandardOutput).Split('\n')
-            .Where(line => line.StartsWith("LEAN_ACTIONS_CACHE ", StringComparison.Ordinal))
-            .Select(line =>
-            {
-                using var receipt = JsonDocument.Parse(line["LEAN_ACTIONS_CACHE ".Length..]);
-                return receipt.RootElement.Clone();
-            }).ToDictionary(receipt => receipt.GetProperty("layer").GetString()!, StringComparer.Ordinal);
-        var projectAccepted = scenario is not ("dependency-only" or "project-corrupt" or "project-matched-key-missing");
-        Assert.Equal(dependencyAccepted ? "restored" : "miss", restoreReceipts["dependency"].GetProperty("status").GetString());
-        Assert.Equal(projectAccepted ? "restored" : "miss", restoreReceipts["project"].GetProperty("status").GetString());
+        var receiptLine = Assert.Single(Encoding.UTF8.GetString(restore.StandardOutput).Split('\n'),
+            line => line.StartsWith("LEAN_ACTIONS_CACHE ", StringComparison.Ordinal));
+        using var restoreReceipt = JsonDocument.Parse(receiptLine["LEAN_ACTIONS_CACHE ".Length..]);
+        var adopted = scenario == "preparation-adopted";
+        Assert.Equal(adopted ? "project" : "dependency", restoreReceipt.RootElement.GetProperty("layer").GetString());
+        var status = adopted ? "preparation-retained" : dependencyAccepted ? "restored" : "miss";
+        Assert.Equal(status, restoreReceipt.RootElement.GetProperty("status").GetString());
         Assert.Equal(dependencyAccepted, Directory.Exists(Path.Combine(lake, "packages")));
-        Assert.Equal(projectAccepted, Directory.Exists(Path.Combine(lake, "build")));
         if (dependencyAccepted)
         {
             Assert.Equal("cached module", File.ReadAllText(Path.Combine(lake, "packages/mathlib/.lake/build/lib/lean/Mathlib/Fixture.olean")));
             Assert.Equal("retained dependency identity", File.ReadAllText(Path.Combine(lake, "packages/mathlib/.git/config")));
         }
-        if (projectAccepted)
-            Assert.Equal("fixture output\n", File.ReadAllText(Path.Combine(lake, "build/lib/lean/Fixture.olean")));
+        Assert.Equal("fixture output\n", File.ReadAllText(Path.Combine(lake, "build/lib/lean/Fixture.olean")));
         var beforeEnsure = LeanCacheStamp.Inspect(lake,
             LeanPinSet.TryReadWorktree(fixture.Reader, out _)!);
         File.WriteAllText(fixture.Lake, """

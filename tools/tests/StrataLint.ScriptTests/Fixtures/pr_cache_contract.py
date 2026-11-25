@@ -250,7 +250,7 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
             keys = producer.actions.actions_keys(self.root)
             self.assertFalse(keys["save_allowed"])
             self.assertFalse(keys["project_save_allowed"])
-            self.assertTrue(keys["project"]["key"].endswith("28-1"))
+            self.assertTrue(keys["dependency"]["key"].endswith("28-1"))
 
     def test_prepare_accepts_same_head_draft_association_and_moved_target(self):
         result = self.run_with(lambda: producer.prepare(self.root, self.identity), env=self.runtime())
@@ -754,13 +754,10 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
         self.build_work(self.env)
         with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stdout(io.StringIO()) as out:
             actions = producer.actions
-            actions.restore(self.root, actions.actions_keys(self.root), {})
+            actions.restore_dependency(self.root, actions.actions_keys(self.root), "", "skipped")
             self.assertTrue((self.root / ".lake/build/lib/Module.olean").is_file())
             self.assertEqual((True, "adopted-merged-preparation", 0), actions.project_publication(self.root))
-            actions.snapshot(self.root, actions.actions_keys(self.root), ["project"])
-        self.assertIn('"build_work": 0', out.getvalue())
-        self.assertIn("project_ready=true", out.getvalue())
-        self.assertNotIn("STRATALINT_ACTIONS_CACHE_SEEDED=1", out.getvalue())
+        self.assertIn("preparation-retained", out.getvalue())
 
     def test_adoption_record_cannot_override_unknown_work_report_failure_or_another_invocation(self):
         self.preparation()
@@ -782,8 +779,7 @@ class PrCacheContracts(CacheFixture, unittest.TestCase):
         self.build_work(self.env)
         with mock.patch.dict(os.environ, dict(self.env, STRATALINT_REPORT_SUCCEEDED="false"), clear=True), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
-            actions.snapshot(self.root, actions.actions_keys(self.root), ["project"])
-        self.assertIn("project_ready=false", out.getvalue())
+            self.assertFalse(actions.actions_keys(self.root)["project_save_allowed"])
 
     def test_actual_merge_source_tree_drift_is_left_to_native_increment(self):
         self.preparation()

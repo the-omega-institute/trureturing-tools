@@ -231,7 +231,7 @@ internal sealed class LeanCacheChunkFixture : IDisposable
             "FULL_BUILD=1",
             $"PATH={bin}:{Environment.GetEnvironmentVariable("PATH")}",
             $"HOME={temporary.Path}", $"PYTHONPATH={bin}", $"CHUNK_FIXTURE={temporary.Path}",
-            "STRATALINT_CACHE_REPO=fixture/cache", "STRATALINT_ACTIONS_CACHE_SEEDED=",
+            "STRATALINT_CACHE_REPO=fixture/cache",
             $"GITHUB_SHA={commit}", $"GITHUB_RUN_ID={run}", "GITHUB_RUN_ATTEMPT=1",
             "CI=true", $"GITHUB_ACTIONS={(verb == "fetch" ? "false" : "true")}", "GITHUB_EVENT_NAME=schedule",
             "GITHUB_REF=refs/heads/dev", "GITHUB_REF_NAME=dev", "LC_ALL=C.UTF-8",
