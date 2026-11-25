@@ -353,7 +353,7 @@ class Generations(unittest.TestCase):
                     self.assertRaises(ValueError):
                 list(client.asset(asset, BUCKET, 1, 6))
             self.assertEqual(get.call_count, 2)
-        for error, count in [(denied, 1), (bad_gateway, 5)]:
+        for error, count in [(denied, 1), (http.RateLimitTimeout('rate limit exceeds budget'), 1), (bad_gateway, 5)]:
             with patch.object(client, 'open_asset', side_effect=error) as get, self.assertRaises(type(error)):
                 list(client.asset(asset, BUCKET, 1, 6))
             self.assertEqual(get.call_count, count)

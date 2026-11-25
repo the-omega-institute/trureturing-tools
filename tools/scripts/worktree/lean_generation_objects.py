@@ -24,6 +24,10 @@ BUCKET = "lean-cache-objects-v1"
 CAPACITY = 980
 
 
+class RateLimitTimeout(TimeoutError):
+    """The server's earliest allowed retry is beyond the operation's deadline."""
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args):
         return None
@@ -104,7 +108,7 @@ class GitHubHTTP:
                 if delay is None or attempt == 7:
                     raise failure from None
                 if delay >= host.remaining(self.deadline):
-                    raise TimeoutError(f'GitHub rate limit requires {delay}s beyond the remaining Release budget') from None
+                    raise RateLimitTimeout(f'GitHub rate limit requires {delay}s beyond the remaining Release budget') from None
                 print(f'GitHub rate limit: waiting {delay}s before retrying {method}', file=sys.stderr, flush=True)
                 time.sleep(delay)
             except (http.client.HTTPException, urllib.error.URLError, TimeoutError) as error:
@@ -185,6 +189,8 @@ class GitHubHTTP:
                         cursor += len(block)
                         yield block
                     return
+            except RateLimitTimeout:
+                raise
             except (EOFError, ConnectionError, TimeoutError, ssl.SSLEOFError,
                     http.client.HTTPException, host.GitHubCommandError) as error:
                 if isinstance(error, host.GitHubCommandError) and not (
