@@ -18,8 +18,14 @@ public static class StatementProjectionReconciliation
         return changes.Paths.Any(path =>
             path.Value.StartsWith(FixtureRoot, StringComparison.Ordinal)
                 && path.Value.EndsWith(".json", StringComparison.Ordinal)
-            || implementation.Contains(path.Value));
+            || implementation.Contains(path.Value) && !IsDefinitionSource(path.Value));
     }
+
+    // The Scribe producer scope registers definition sources as producer data. The pinned
+    // fixtures compare only Lean declarations, so a definition source cannot change the result.
+    private static bool IsDefinitionSource(string path) =>
+        path.StartsWith("Blueprint/", StringComparison.Ordinal)
+        && path.EndsWith(".scribe.cs", StringComparison.Ordinal);
 
     public static void Verify(string repositoryRoot, DeclarationCatalog catalog)
     {
