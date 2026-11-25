@@ -2,7 +2,9 @@
 
 import argparse
 import json
+import os
 from graphlib import TopologicalSorter
+from itertools import batched
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
@@ -14,9 +16,9 @@ from lean_artifact_inventory import Artifact, PROJECT_BUILD
 from lean_cache import binary_platform
 from lean_cache_generation import restore, stage_frames
 from lean_cache_release import report_selection
-from lean_compile_layers import lake_build
+from lean_compile_layers import checkout, lake_build
 from lean_generation_checkpoints import discover, remote_for, save
-from lean_generation_index import matches, read
+from lean_generation_index import assemble, matches, read
 from lean_generation_plan import checked_hits, digest, module_targets, write
 from lean_release_index import write_frame
 
@@ -165,8 +167,7 @@ def stage(root, remote, plan, names, directory):
     return receipt
 
 
-def run(root, compiler, base, receipts, output):
-    remote = remote_for(root)
+def plan_facets(root, remote, compiler, base, receipts):
     targets = all_targets(root, compiler['targets'])
     plan = {**compiler, 'targets': targets}
     snapshots = [base, *(read(p) for p in sorted(receipts.glob('*.json')))]
@@ -189,19 +190,27 @@ def run(root, compiler, base, receipts, output):
     if not compiler['targets'].keys() <= rows.keys():
         raise ValueError('compiler receipts omit required inputs')
     index = {'source': plan['source'], 'targets': dict(rows), 'volumes': sizes.copy()}
-    write(receipts / 'inherited.json', index)
     missing = sorted(targets.keys() - rows.keys())
-    if not missing:
-        write(output, plan)
-        return
-    subprocess.run(['bash', '.github/actions/lean-compile-layer/prepare-dependencies.sh'], cwd=root, check=True)
     native = [name for name in missing if name.startswith('native/')]
+    if native:
+        produce(root, remote, plan, index, [native])
     reports = [name for name in missing if name.startswith('report/')]
+    # Keep related targets in each Lake batch, spread consecutive batches across runners.
+    batches = list(batched(reports, 32))
+    count = min(20, len(batches))
+    shards = [[name for batch in batches[i::count] for name in batch] for i in range(count)]
+    return {'plan': plan, 'inherited': index, 'shards': shards}
+
+
+def produce(root, remote, plan, index, batches):
+    if not batches:
+        return
+    targets = plan['targets']
+    subprocess.run(['bash', '.github/actions/lean-compile-layer/prepare-dependencies.sh'], cwd=root, check=True)
     restored = set()
-    batches = ([native] if native else []) + [reports[i:i+32] for i in range(0, len(reports), 32)]
-    if reports:
+    if batches[0][0].startswith('report/'):
         subprocess.run(['python3', 'tools/lean-inspector/native.py', 'prepare', str(root)], cwd=root, check=True)
-    for number, names in enumerate(batches):
+    for names in batches:
         needed = {dep for name in names for dep in targets[name]['deps']}
         if names[0].startswith('report/'):
             needed.update(('native/inputDiscovery', 'native/reportInspector'))
@@ -220,7 +229,6 @@ def run(root, compiler, base, receipts, output):
         build_facets(root, names, targets)
         with tempfile.TemporaryDirectory() as temp:
             receipt = stage(root, remote, plan, names, Path(temp))
-        write(receipts / f'facets-{number}.json', receipt)
         index['targets'].update(receipt['targets'])
         index['volumes'].update(receipt['volumes'])
         restored.update(names)
@@ -229,12 +237,99 @@ def run(root, compiler, base, receipts, output):
                 for relative in index['targets'][target]['paths']:
                     (root / PROJECT_BUILD / relative).unlink(missing_ok=True)
             restored.clear()
+
+
+def receipt_for(index, names):
+    rows = {name: index['targets'][name] for name in names}
+    return {'source': index['source'], 'targets': rows,
+            'volumes': {r['volume']: index['volumes'][r['volume']] for r in rows.values()}}
+
+
+def build_shard(root, remote, layout, shard, resume):
+    if not 0 <= shard < len(layout['shards']):
+        raise ValueError('unassigned report shard: ' + str(shard))
+    plan = layout['plan']
+    names = layout['shards'][shard]
+    index = receipt_for(layout['inherited'], layout['inherited']['targets'])
+    if resume:
+        # A failed worker can have published batches after this plan was written.
+        targets = {name: plan['targets'][name] for name in names}
+        keys = {variant['key'] for row in targets.values() for variant in (row, row.get('empty_projection', row))}
+        partials = list(discover(remote, plan['domain'], keys))
+        use_known_projections(targets, partials)
+        plan['targets'].update(targets)
+        rows, sizes = checked_hits(plan['targets'], [index, *partials])
+        volumes = remote.confirmed_volumes({r['volume']: sizes[r['volume']] for n, r in rows.items() if n in targets})
+        index['targets'].update({n: r for n, r in rows.items() if n in targets and r['volume'] in volumes})
+        index['volumes'].update(volumes)
+    missing = [name for name in names if name not in index['targets']]
+    produce(root, remote, plan, index, list(batched(missing, 32)))
+    return receipt_for(index, names)
+
+
+def finish(layout, receipts, output):
+    expected = {f'report-{i}.json' for i in range(len(layout['shards']))}
+    if {p.name for p in receipts.glob('*.json')} - {'inherited.json'} != expected:
+        raise ValueError('missing or unexpected report shard receipts')
+    workers = []
+    for i, names in enumerate(layout['shards']):
+        receipt = read(receipts / f'report-{i}.json')
+        if receipt['targets'].keys() != set(names):
+            raise ValueError('receipt differs from its assigned report shard: ' + str(i))
+        workers.append(receipt)
+    plan, inherited = layout['plan'], layout['inherited']
+    use_known_projections(plan['targets'], workers)
+    assemble(plan, None, [inherited, *workers])
+    write(receipts / 'inherited.json', inherited)
     write(output, plan)
 
 
-if __name__ == '__main__':
+def run(root, compiler, base, receipts, output):
+    remote = remote_for(root)
+    layout = plan_facets(root, remote, compiler, base, receipts)
+    write(receipts / 'inherited.json', layout['inherited'])
+    reports = sorted(name for shard in layout['shards'] for name in shard)
+    if reports:
+        index = layout['inherited']
+        produce(root, remote, layout['plan'], index, list(batched(reports, 32)))
+        write(receipts / 'facets-reports.json', receipt_for(index, reports))
+    write(output, layout['plan'])
+
+
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--stage', choices=('plan', 'worker', 'finish'))
+    parser.add_argument('--shard', type=int)
     for flag in ('plan', 'base', 'receipts', 'output'):
-        parser.add_argument('--' + flag, type=Path, required=True)
+        parser.add_argument('--' + flag, type=Path, required=flag in ('plan', 'output'))
     args = parser.parse_args()
-    run(Path.cwd(), read(args.plan), read(args.base), args.receipts, args.output)
+    if args.stage != 'worker' and args.receipts is None:
+        parser.error('--receipts is required')
+    if args.stage in (None, 'plan') and args.base is None:
+        parser.error('--base is required')
+    if (args.stage == 'worker') != (args.shard is not None):
+        parser.error('--shard is required only for --stage worker')
+    root = Path.cwd()
+    data = read(args.plan)
+    if args.stage is None:
+        run(root, data, read(args.base), args.receipts, args.output)
+        return
+    if checkout(root) != (data if args.stage == 'plan' else data['plan'])['source']:
+        raise ValueError('facet plan belongs to another checkout')
+    if args.stage == 'plan':
+        layout = plan_facets(root, remote_for(root), data, read(args.base), args.receipts)
+        write(args.output, layout)
+        shards = list(range(len(layout['shards'])))
+        if path := os.environ.get('GITHUB_OUTPUT'):
+            with open(path, 'a') as stream:
+                print('matrix=' + json.dumps({'shard': shards}, separators=(',', ':')), file=stream)
+                print('has_reports=' + ('true' if shards else 'false'), file=stream)
+    elif args.stage == 'worker':
+        resume = os.environ.get('GITHUB_RUN_ATTEMPT') != '1'
+        write(args.output, build_shard(root, remote_for(root), data, args.shard, resume))
+    else:
+        finish(data, args.receipts, args.output)
+
+
+if __name__ == '__main__':
+    main()
