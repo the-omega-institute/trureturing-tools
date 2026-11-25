@@ -32,6 +32,7 @@ class Module:
     package: str
     source: Path
     build: Path
+    extra_builds: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -197,7 +198,13 @@ def required_compiler_paths(name, module):
     return library | {compiler_path(name, module, "ir", "c")}
 
 
+def compiler_variants(module):
+    return [Module(module.package, module.source, build) for build in (module.build, *module.extra_builds)]
+
+
 def lean_artifact_paths(name, module):
+    if module.extra_builds:
+        return set().union(*(lean_artifact_paths(name, variant) for variant in compiler_variants(module)))
     relative = PurePosixPath(*name.split("."))
     output = set()
     for location, suffixes in (("lib/lean", LEAN_SUFFIXES), ("ir", ("c", "bc"))):

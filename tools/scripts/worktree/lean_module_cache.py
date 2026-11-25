@@ -15,6 +15,7 @@ import tomllib
 
 import lean_artifact_inventory as inventory
 import lean_compile_layers as compiler
+import lean_omega_cache as omega
 from lean_cache import publication_mathlib, seed_partitions
 from lean_generation_plan import digest, file_digest, module_config, write
 from lean_module_shards import DEFAULT_CAPACITY, lookup_shard, pack_shard, plan_shards, restore_shard
@@ -27,8 +28,10 @@ DEFAULT_MODULE_BYTES = 712650
 
 def checkout_targets(root):
     modules = inventory.workspace_modules(root)
-    graph = compiler.scoped_imports(root, modules, inventory.release_roots(modules))
-    scope = inventory.release_scope(modules, graph)
+    roots = inventory.release_roots(modules) | omega.roots(root, modules)
+    graph = compiler.scoped_imports(root, modules, roots)
+    modules, graph, omega_inputs = omega.plan(root, modules, graph)
+    scope = set(graph)
     configs = {}
     pins = {}
     directories = {'trureturing': Path('.'), 'reg': Path('Reg'), 'leanInspectorInterface': inventory.INTERFACE,
@@ -54,8 +57,11 @@ def checkout_targets(root):
         module = modules[name]
         dependencies = sorted(graph[name])
         source = file_digest(root / module.source)
-        key = digest([environment, module.package, pins[module.package], str(module.source), str(module.build),
-                      module_config(configs[module.package], name), source, [(d, targets[d]['key']) for d in dependencies]])
+        inputs = [environment, module.package, pins[module.package], str(module.source), str(module.build),
+                  module_config(configs[module.package], name), source, [(d, targets[d]['key']) for d in dependencies]]
+        if name in omega_inputs:
+            inputs.extend(omega_inputs[name])
+        key = digest(inputs)
         targets[name] = {'key': key, 'deps': dependencies}
     return modules, targets
 
@@ -185,7 +191,8 @@ def legacy_compiler_inputs(root, modules, targets, source):
     remote = legacy.checkpoints.remote_for(root)
     empty = {'source': source, 'targets': {}, 'volumes': {}}
     rows, sizes = legacy.verified_inputs(remote, domain, criteria, empty)
-    return dict(empty, targets=rows, volumes=sizes)
+    rows = {name: row for name, row in rows.items() if not modules[name].extra_builds}
+    return dict(empty, targets=rows, volumes={row['volume']: sizes[row['volume']] for row in rows.values()})
 
 
 def restore_legacy(remote, index, names, destination):
@@ -222,13 +229,16 @@ def work(root, plan, lane, remote, output):
     original = plan
     splits = remote.splits(original)
     plan = expanded(original, splits)
-    modules = inventory.workspace_modules(root)
+    modules, current = checkout_targets(root)
     targets = plan['targets']
+    if current != {name: {k: row[k] for k in ('key', 'deps')} for name, row in targets.items()}:
+        raise ValueError('worker compiler inputs differ from its plan')
     graph = {n: set(row['deps']) for n, row in targets.items()}
     base = remote.latest(plan['base_version']) if plan['base_version'] else None
     complete = recover_partials(plan, matching(plan, plan['inherited']), remote)
     installed = set()
     compiled = uploaded = 0
+    common_prepared = False
     legacy = plan.get('legacy')
     if legacy:
         from lean_generation_checkpoints import remote_for
@@ -245,13 +255,17 @@ def work(root, plan, lane, remote, output):
             installed.update(restore_matching(root, modules, targets, index, scope - installed, remote, destination))
         if legacy:
             try:
-                installed.update(restore_legacy(old_remote, legacy, scope - installed, destination))
+                installed.update(restore_legacy(old_remote, legacy, {n for n in scope - installed if not modules[n].extra_builds}, destination))
             except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
                 print(f'Compiler seed unavailable; continuing with Lake: {error}', file=sys.stderr)
                 legacy = None
         missing = scope - installed
         if missing:
-            compiler.compile_roots(root, modules, sorted(compiler.terminal(missing, graph)))
+            # The official and strict import graphs can have different edges.
+            # Explicitly name the missing modules for each active backend.
+            roots = missing if any(modules[n].extra_builds for n in missing) else compiler.terminal(missing, graph)
+            compiler.compile_roots(root, modules, sorted(roots))
+            common_prepared = omega.compile_missing(root, modules, missing, common_prepared)
             installed.update(missing)
             compiled += len(missing)
         output.mkdir(parents=True, exist_ok=True)
@@ -353,6 +367,7 @@ def run():
     final = commands.add_parser('finish')
     final.add_argument('--plan', type=Path, required=True)
     final.add_argument('--output', type=Path, required=True)
+    commands.add_parser('omega-targets', help='list module-cache roots for the Omega audit')
     get = commands.add_parser('restore')
     get.add_argument('--version')
     roots = get.add_mutually_exclusive_group()
@@ -361,6 +376,10 @@ def run():
     get.add_argument('--destination', type=Path)
     args = parser.parse_args()
     root = args.repository.resolve()
+    if args.command == 'omega-targets':
+        modules, targets = checkout_targets(root)
+        print('\n'.join(name for name in sorted(targets) if modules[name].extra_builds))
+        return 0
     if args.command == 'worker':
         plan = json.loads(args.plan.read_bytes())
         remote = Remote(root, lane=args.lane, lanes=len(plan['lanes']))

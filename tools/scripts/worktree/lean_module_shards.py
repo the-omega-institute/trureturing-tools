@@ -105,6 +105,9 @@ def pack_shard(root, modules, members, output, fingerprint):
     check_outputs(build, selected, grouped)
     index = {n: {'build': selected[n].build.as_posix(), 'paths': sorted(map(str, grouped[n]))}
              for n in sorted(selected)}
+    for name, row in index.items():
+        if selected[name].extra_builds:
+            row['extra_builds'] = [p.as_posix() for p in selected[name].extra_builds]
     manifest = json.dumps(index, separators=(',', ':')).encode()
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output.parent) as directory:
@@ -162,8 +165,11 @@ def restore_shard(archive, descriptor, members, modules, destination):
             for name, row in manifest.items():
                 if not NAME.fullmatch(name):
                     raise ValueError('invalid archived module name')
-                module = Module('', Path(), Path(row['build']))
-                if name in wanted and module.build != modules[name].build:
+                extra_builds = tuple(Path(safe_path(p)) for p in row.get('extra_builds', []))
+                module = Module('', Path(), Path(row['build']), extra_builds)
+                if len(set((module.build, *extra_builds))) != 1 + len(extra_builds):
+                    raise ValueError('duplicate compiler build path: ' + name)
+                if name in wanted and (module.build, extra_builds) != (modules[name].build, modules[name].extra_builds):
                     raise ValueError('module build path differs from the checkout: ' + name)
                 paths = {safe_path(p) for p in row['paths']}
                 if (not paths or len(paths) != len(row['paths']) or not paths <= lean_artifact_paths(name, module)
