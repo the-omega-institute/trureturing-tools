@@ -17,33 +17,15 @@ public sealed class AdmissionWorkflowTopologyTests
         Assert.True(AdmissionWorkflowTopology.HasRequiredBaseGate(bytes, "dev"));
     }
 
-    [Theory]
-    [InlineData(true, "workflow_call", "check-delta", true)]
-    [InlineData(false, "workflow_call", "check-delta", false)]
-    [InlineData(true, "push", "check-delta", false)]
-    [InlineData(true, "workflow_call", "check-current", false)]
-    public void ReleasedGateRequiresTheLockedReusableWorkflowAndItsDeltaStep(
-        bool matches, string trigger, string command, bool expected)
+    [Fact]
+    public void AReusableJobDoesNotSupplyTheNativeDeltaStep()
     {
-        var workflowSha = new string('a', 40);
-        var caller = Encoding.UTF8.GetBytes($"""
-            on:
-              pull_request:
-                branches: [dev]
-            jobs:
-              checks:
-                uses: the-omega-institute/trureturing-tools/.github/workflows/ci-current.yml@{workflowSha}
+        var bytes = Encoding.UTF8.GetBytes("""
+            on: {pull_request: {branches: [dev]}}
+            jobs: {current: {uses: './.github/workflows/checks.yml'}}
             """);
-        var pin = $$"""{"workflow_sha":"{{(matches ? workflowSha : new string('b', 40))}}"}""";
-        var definition = $"""
-            on: [{trigger}]
-            jobs:
-              current:
-                runs-on: fixture
-                steps:
-                  - run: dotnet judge.dll {command}
-            """;
-        Assert.Equal(expected, AdmissionWorkflowTopology.HasRequiredBaseGate(caller, "dev", () => (pin, definition)));
+
+        Assert.False(AdmissionWorkflowTopology.HasRequiredBaseGate(bytes, "dev"));
     }
 
     [Theory]
@@ -82,7 +64,7 @@ public sealed class AdmissionWorkflowTopologyTests
     [InlineData(".github/workflows/ci-Tests.yml", false)]
     [InlineData(".github/workflows/ci-tests-fixture.yaml", false)]
     [InlineData(".github/scripts/harness-gate.sh", false)]
-    [InlineData(".github/actions/lean-cache-produce/action.yml", true)]
+    [InlineData(".github/actions/lean-cache-shards/action.yml", true)]
     [InlineData(".github/actions/unregistered/action.yml", false)]
     public void ControlPathRegistrationKeepsOnlyTheRequiredGateTransition(string value, bool accepted)
     {

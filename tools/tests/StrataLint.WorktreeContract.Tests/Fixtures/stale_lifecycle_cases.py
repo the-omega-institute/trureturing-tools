@@ -603,11 +603,9 @@ raise SystemExit(cleanup.main(arguments[1:]))
         branch = "lane/governance/finished"
         head = self.commit_branch(branch, tree, 60)
         (tree / "ordinary-untracked").write_text("keep until reassignment")
-        for target in ("worktree-stale", "worktree-return"):
-            with self.subTest(target=target):
-                self.make(target, cwd=tree)
-                self.assertEqual(protocol.stale_head(self.main, "refs/heads/" + branch), head)
-                run(self.main, "config", "--unset-all", protocol.branch_config_key("refs/heads/" + branch))
+        self.make("worktree-stale", cwd=tree)
+        self.assertEqual(protocol.stale_head(self.main, "refs/heads/" + branch), head)
+        run(self.main, "config", "--unset-all", protocol.branch_config_key("refs/heads/" + branch))
         self.make("worktree-stale", "WORKTREE_PATH=" + str(tree))
         self.assertEqual(protocol.stale_head(self.main, "refs/heads/" + branch), head)
         self.assertTrue((tree / "ordinary-untracked").exists())
@@ -638,7 +636,7 @@ raise SystemExit(cleanup.main(arguments[1:]))
                 branch = "lane/governance/old-" + reason
                 head = self.commit_branch(branch, tree, age)
                 if reason == "stale":
-                    self.make("worktree-return", cwd=tree)
+                    self.make("worktree-stale", cwd=tree)
                 result = self.make("worktree", "KIND=governance", "NAME=new-" + reason,
                                    "DEST=" + str(tree), "BASE=" + self.base, "ALLOW_LOW_DISK=1", cwd=tree)
                 self.assertIn('"status": "claimed"', result.stdout)

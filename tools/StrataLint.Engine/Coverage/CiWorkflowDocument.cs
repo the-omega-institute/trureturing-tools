@@ -1,5 +1,4 @@
 using System.Collections.Immutable;
-using System.Text.Json;
 using YamlDotNet.Core;
 using YamlDotNet.RepresentationModel;
 
@@ -13,7 +12,6 @@ internal sealed class CiWorkflowDocument(
     ImmutableDictionary<string, CiWorkflowJob> jobs)
 {
     internal const string DeltaJobName = "current";
-    internal ImmutableDictionary<string, CiWorkflowJob> Jobs => jobs;
 
     internal static CiWorkflowDocument? Parse(string text)
     {
@@ -58,56 +56,14 @@ internal sealed class CiWorkflowDocument(
         }
     }
 
-    internal bool HasEvent(string name) => Child(root, "on") switch
-    {
-        YamlMappingNode triggers => Child(triggers, name) is not null,
-        YamlScalarNode scalar => scalar.Value == name,
-        YamlSequenceNode sequence => sequence.Children.OfType<YamlScalarNode>().Any(item => item.Value == name),
-        _ => false,
-    };
-
     internal bool RunsOnBranch(string name, string branch) =>
         Child(root, "on") is YamlMappingNode triggers
         && Child(triggers, name) is YamlMappingNode trigger
         && Child(trigger, "branches") is YamlSequenceNode branches
         && branches.Children.OfType<YamlScalarNode>().Any(item => item.Value == branch);
 
-    internal const string ReleaseGatePath = "tools/ci/workflows/ci-current.yml";
-    private const string GateUsesPrefix = "the-omega-institute/trureturing-tools/.github/workflows/ci-current.yml@";
-
-    internal string? CalledGateRevision
-    {
-        get
-        {
-            if (!Jobs.TryGetValue("checks", out var job) || job.Uses is not { } uses
-                || !uses.StartsWith(GateUsesPrefix, StringComparison.Ordinal))
-                return null;
-            var revision = uses[GateUsesPrefix.Length..];
-            return revision.Length == 40 && revision.All(char.IsAsciiHexDigitLower) ? revision : null;
-        }
-    }
-
-    internal CiWorkflowDocument? ResolveCalledGate(string? pin, string? definition)
-    {
-        if (CalledGateRevision is not { } revision || pin is null || definition is null) return null;
-        try
-        {
-            using var document = JsonDocument.Parse(pin);
-            if (document.RootElement.ValueKind != JsonValueKind.Object
-                || !document.RootElement.TryGetProperty("workflow_sha", out var sha)
-                || sha.ValueKind != JsonValueKind.String || sha.GetString() != revision)
-                return null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-        var called = Parse(definition);
-        return called?.HasEvent("workflow_call") == true ? called : null;
-    }
-
     internal bool HasDeltaStep() =>
-        Jobs.TryGetValue(DeltaJobName, out var job)
+        jobs.TryGetValue(DeltaJobName, out var job)
         && job is { Name: DeltaJobName, Uses: null }
         && Child(root, "jobs") is YamlMappingNode jobs
         && jobs.Children.TryGetValue(new YamlScalarNode(DeltaJobName), out var rawJob)

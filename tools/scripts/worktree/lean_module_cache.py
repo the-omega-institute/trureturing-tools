@@ -7,8 +7,6 @@ import json
 import datetime
 import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 import shutil
 import tomllib
@@ -102,13 +100,11 @@ def expanded(plan, splits):
     return dict(plan, targets=targets, shards=groups)
 
 
-def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version, legacy=None):
+def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version):
     if workers < 1 or workers > 256:
         raise ValueError('worker count must be within the Actions matrix limit')
     previous = base['shards'] if base else {}
     sizes = {n: DEFAULT_MODULE_BYTES for n in targets}
-    if legacy:
-        sizes.update({n: row['bytes'] for n, row in legacy['targets'].items() if n in targets})
     for row in previous.values():
         average = max(1, row['bytes'] // len(row['members']))
         for name in row['members']:
@@ -141,8 +137,6 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
         lanes[lane].append(name)
         loads[lane] += sum(sizes[n] for n in planned[name]['members'])
     plan['lanes'] = lanes
-    if legacy and lanes:
-        plan['legacy'] = legacy
     return plan
 
 
@@ -177,28 +171,6 @@ def partial_index(plan, rows):
             'shards': rows}
 
 
-def legacy_compiler_inputs(root, modules, targets, source):
-    import lean_generation_plan as legacy
-    graph = {n: set(r['deps']) for n, r in targets.items()}
-    criteria = legacy.module_targets(root, modules, graph)
-    domain, _ = legacy.package_inputs(root)
-    remote = legacy.checkpoints.remote_for(root)
-    empty = {'source': source, 'targets': {}, 'volumes': {}}
-    rows, sizes = legacy.verified_inputs(remote, domain, criteria, empty)
-    return dict(empty, targets=rows, volumes=sizes)
-
-
-def restore_legacy(remote, index, names, destination):
-    from lean_cache_generation import restore as restore_frames
-    rows = {n: index['targets'][n] for n in names & index['targets'].keys()}
-    if not rows:
-        return set()
-    subset = {'source': index['source'], 'targets': rows,
-              'volumes': {r['volume']: index['volumes'][r['volume']] for r in rows.values()}}
-    report = restore_frames(remote, subset, subset, rows, destination)
-    return set(rows) if report['restored'] == len(rows) else set()
-
-
 def measured_archives(root, modules, name, members, directory, plan):
     capacity = plan['capacity']
     path = directory / (name + '.tar.gz')
@@ -229,10 +201,6 @@ def work(root, plan, lane, remote, output):
     complete = recover_partials(plan, matching(plan, plan['inherited']), remote)
     installed = set()
     compiled = uploaded = 0
-    legacy = plan.get('legacy')
-    if legacy:
-        from lean_generation_checkpoints import remote_for
-        old_remote = remote_for(root)
     assigned = [child for name in original['lanes'][lane] for child in splits.get(name, {name: None})]
     for name in assigned:
         if name in complete:
@@ -243,12 +211,6 @@ def work(root, plan, lane, remote, output):
         destination = root / inventory.PROJECT_BUILD
         for index in (partial_index(plan, complete), base):
             installed.update(restore_matching(root, modules, targets, index, scope - installed, remote, destination))
-        if legacy:
-            try:
-                installed.update(restore_legacy(old_remote, legacy, scope - installed, destination))
-            except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
-                print(f'Compiler seed unavailable; continuing with Lake: {error}', file=sys.stderr)
-                legacy = None
         missing = scope - installed
         if missing:
             compiler.compile_roots(root, modules, sorted(compiler.terminal(missing, graph)))
@@ -341,7 +303,6 @@ def run():
     commands = parser.add_subparsers(dest='command', required=True)
     plan = commands.add_parser('plan')
     plan.add_argument('--base', type=Path)
-    plan.add_argument('--legacy-checkpoints', action='store_true')
     plan.add_argument('--prepare-release', action='store_true', help='create the shared Release before starting its workers')
     plan.add_argument('--capacity', type=int, default=DEFAULT_CAPACITY)
     plan.add_argument('--workers', type=int, default=20)
@@ -368,18 +329,12 @@ def run():
         return 0
     remote = Remote(root)
     if args.command == 'plan':
-        modules, targets = checkout_targets(root)
+        _, targets = checkout_targets(root)
         base = json.loads(args.base.read_bytes()) if args.base else remote.latest()
         source = compiler.checkout(root)
-        legacy = None
-        if args.legacy_checkpoints and not base:
-            try:
-                legacy = legacy_compiler_inputs(root, modules, targets, source)
-            except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
-                print(f'Compiler checkpoints unavailable; continuing with Lake: {error}', file=sys.stderr)
         mathlib, mathlib_version = publication_mathlib(root)
         result = make_plan(source, mathlib, targets, base, remote, args.capacity, args.workers,
-                           mathlib_version=mathlib_version, legacy=legacy)
+                           mathlib_version=mathlib_version)
         if args.prepare_release and result['lanes']:
             publisher()
             remote.catalog(result['version'], refresh=True, create=True)
