@@ -207,6 +207,10 @@ def exercise(directory):
     assert "Init" in rows["mathlibProof"]["libraries"], rows
     assert "D5" not in rows["mathlibProof"]["libraries"], rows
     assert rows["oneAxiom"]["axioms"] == ["propext"], rows
+    family = {d["declaration_name_key"]: d for d in record["declarations"]}
+    for name in ("plain", "dependent"):
+        key = f"ns(ns(ns(n0,13:FrozenFixture),11:AxiomFamily),{len(name)}:{name})"
+        assert family[key]["axioms"] == ["propext"], family[key]
     assert "axioms" not in rows["fullAxioms"], rows
     run("dotnet", CLI, "ledger-frozen", "--target", MODULE)
     assert list(STATE.rglob("*.json")) == [RECORD]
@@ -221,7 +225,7 @@ def exercise(directory):
     write_record(record)
     run("dotnet", CLI, "ledger-frozen", "--target", MODULE)
     with tempfile.TemporaryDirectory(prefix="frozen-reader-") as reader:
-        check_independent_reader(Path(reader), (deposited, RECORD.read_bytes()), len(rows))
+        check_independent_reader(Path(reader), (deposited, RECORD.read_bytes()), len(record["declarations"]))
     run(REFRESH)
     assert RECORD.read_bytes() == deposited
     timestamp = RECORD.stat().st_mtime_ns

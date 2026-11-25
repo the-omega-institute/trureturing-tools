@@ -15,6 +15,10 @@ structure Store where
   -- Like Lean's module index, `owners` records the first import. A compatible
   -- later declaration can replace the term without changing that index.
   selectedOwnerOverrides : NameMap Name := {}
+  -- A downstream report resolves a name through its first imported module, as
+  -- the compiler does for exported declaration metadata. Retain the actual
+  -- term for that view when a compatible later import replaces the kernel term.
+  duplicateDefinitions : NameMap (NameMap ConstantInfo) := {}
   moduleOrder : Array Name := #[]
   moduleIndices : Std.TreeMap Name Nat Name.quickCmp := {}
   protectedModules : Std.TreeMap Name Bool Name.quickCmp := {}
@@ -29,6 +33,27 @@ def Store.fork (base : Store) : Store :=
 
 def Store.selectedOwner? (store : Store) (name : Name) : Option Name :=
   (store.selectedOwnerOverrides.find? name).orElse fun _ => store.owners.find? name
+
+-- Shared batch inputs may be loaded in a different order to a target's imports.
+-- Resolve only duplicated names in the target's dependency-first import order.
+def Store.reportOverrides (store : Store) (targets : Array Name) : NameMap ConstantInfo := Id.run do
+  if store.duplicateDefinitions.isEmpty then return {}
+  let mut seen : NameSet := {}
+  let mut first : NameMap ConstantInfo := {}
+  let mut todo := targets.reverse.map (fun name => (name, false))
+  while !todo.isEmpty do
+    let (name, visited) := todo.back!
+    todo := todo.pop
+    if visited then
+      if let some defs := store.duplicateDefinitions.find? name then
+        first := defs.foldl (fun entries n info =>
+          if entries.contains n then entries else entries.insert n info) first
+    else if !seen.contains name then
+      seen := seen.insert name
+      todo := todo.push (name, true)
+      if let some data := store.modules.find? name then
+        for item in data.imports.reverse do todo := todo.push (item.module, false)
+  return first
 
 /-- Assessment can replace compiled entries with generated report declarations. -/
 def Store.insertGenerated (store : Store) (owner : Name) (info : ConstantInfo) : Store :=
@@ -187,12 +212,19 @@ unsafe def loadModule (name : Name) (store : IO.Ref Store) : IO Unit := do
   let (data, regions) ← readOwn name
   store.modify fun s => { s with regions := s.regions ++ regions }
   for item in data.imports do loadModule item.module store
-  let (constants, overrides) ← store.modifyGet fun s =>
-    ((s.constants, s.selectedOwnerOverrides), { s with constants := {}, selectedOwnerOverrides := {} })
+  let (constants, overrides, duplicates, owners) ← store.modifyGet fun s =>
+    ((s.constants, s.selectedOwnerOverrides, s.duplicateDefinitions, s.owners),
+     { s with constants := {}, selectedOwnerOverrides := {}, duplicateDefinitions := {} })
   let mut constants := constants
   let mut overrides := overrides
+  let mut duplicates := duplicates
   for info in data.constants do
     if let some previous := constants.find? info.name then
+      let some previousOwner := (overrides.find? info.name).orElse (fun _ => owners.find? info.name)
+        | throw <| IO.userError s!"raw.missing_module_owner:{info.name}"
+      for (owner, entry) in #[(previousOwner, previous), (name, info)] do
+        let owned := (duplicates.find? owner).getD {}
+        duplicates := duplicates.insert owner (owned.insert entry.name entry)
       if subsumes constants info previous then
         constants := constants.insert info.name info
         overrides := overrides.insert info.name name
@@ -204,6 +236,7 @@ unsafe def loadModule (name : Name) (store : IO.Ref Store) : IO Unit := do
     { s with
     constants := constants
     selectedOwnerOverrides := overrides
+    duplicateDefinitions := duplicates
     owners := data.constNames.foldl (fun owners constant => if owners.contains constant then owners else owners.insert constant name) s.owners
     modules := s.modules.insert name data
     moduleIndices

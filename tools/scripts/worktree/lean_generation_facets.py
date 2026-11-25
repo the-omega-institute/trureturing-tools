@@ -23,6 +23,7 @@ from lean_release_index import write_frame
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lean-inspector"))
 import publication as report_publication
+from build_inputs import TOOLS as REPORT_PROGRAMS
 
 
 # These Lake executables are required by the CI report and audit consumers.
@@ -132,10 +133,10 @@ def build_facets(root, names, targets):
     if programs:
         subprocess.run([*wrapper, '--build-report-programs', *programs], cwd=root, check=True)
     if reports:
-        # Reports open compiler exports in no-build mode. Their project frames
-        # may already be restored while a third-party import is still cold.
+        # Report facets open both compiler exports and native readers with
+        # noBuild. Published frames omit private compiler and linker inputs.
         inputs = sorted({module for name in reports for module in targets['report/' + name]['deps']})
-        lake_build(root, ['+' + name + ':olean' for name in inputs], no_build=False)
+        lake_build(root, [*REPORT_PROGRAMS, *['+' + name + ':olean' for name in inputs]], no_build=False)
         lake_build(root, ['+' + name + ':report' for name in reports], no_build=False)
 
 
