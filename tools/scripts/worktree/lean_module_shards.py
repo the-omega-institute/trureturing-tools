@@ -15,7 +15,7 @@ from lean_cache_release_io import archive_sha, copy_chunks
 from lean_compile_layers import check_outputs
 from lean_release_index import safe_path
 
-DEFAULT_CAPACITY = 64 * 1024**2
+DEFAULT_CAPACITY = 256 * 1024**2
 MANIFEST = 'shard-members.json'
 NAME = re.compile(r'[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*')
 

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from lean_artifact_inventory import Module, PROJECT_BUILD
-from lean_module_shards import lookup_shard, pack_shard, plan_shards, restore_shard
+from lean_module_shards import DEFAULT_CAPACITY, lookup_shard, pack_shard, plan_shards, restore_shard
 
 
 class NamespaceLayout(unittest.TestCase):
@@ -30,6 +30,11 @@ class NamespaceLayout(unittest.TestCase):
         self.assertEqual(lookup_shard('External.Small', owners, layout), 'D5')
         with self.assertRaisesRegex(ValueError, 'disagrees'):
             lookup_shard('D5.Foo.Big', dict(owners, **{'D5.Foo.Big': 'D5'}), layout)
+
+    def test_default_capacity_splits_large_groups_and_keeps_indivisible_modules(self):
+        self.assertEqual(DEFAULT_CAPACITY, 256 * 1024**2)
+        sizes = {'D5.A': 150 * 1024**2, 'D5.B': 110 * 1024**2, 'Reg.Large': 300 * 1024**2}
+        self.assertEqual(plan_shards(sizes), {'D5': ['D5.B'], 'D5.A': ['D5.A'], 'Reg.Large': ['Reg.Large']})
 
     def test_two_small_siblings_share_one_named_shard(self):
         self.assertEqual(plan_shards({'Math.A': 1, 'Math.B': 1}, 2), {'Math': ['Math.A', 'Math.B']})
