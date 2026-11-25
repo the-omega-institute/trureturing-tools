@@ -63,6 +63,90 @@ class Migration(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp, self.assertRaisesRegex(ValueError, "fingerprint or required"):
                 seed.extract_shard(self.archive, self.digest, fingerprint, expected, set(self.paths), Path(temp))
 
+    def test_only_reusable_missing_seed_outputs_trigger_downloads(self):
+        import zipfile
+        import lean_generation_facets as facets
+        from test_lean_cache_generation import Store
+
+        target = self.root / "target"
+        target.mkdir()
+        producer = self.root / "tools/lean-inspector/materials.py"
+        producer.parent.mkdir(parents=True)
+        public = facets.report_publication
+        report = "report/" + self.name
+        native = "native/reportInspector"
+        report_paths = list(facets.facet_paths(report))
+        bundle, *sidecars = [self.build / path for path in report_paths]
+        bundle.parent.mkdir(parents=True)
+        for path in sidecars:
+            path.write_bytes(b"trace")
+        raw = self.root / public.RAW
+        raw.write_bytes(public.materials.canonical_json(dict(schema=public.materials.REPORT_SCHEMA,
+                                                            modules=[{"module": self.name}])))
+        public.write_origin(raw, self.name, {"producer_sources_sha256": "a"*64, "inspector_executable_sha256": "b"*64},
+                            {"schema": "stratalint-judge-input-projection-v1", "module": self.name, "inputs": []})
+        with zipfile.ZipFile(bundle, "w") as output:
+            output.write(raw, public.RAW)
+            output.write(public.member(raw, ".provenance.json"), public.RAW + ".provenance.json")
+            output.writestr(public.RAW + ".materials.zip", b"")
+        native_paths = list(facets.facet_paths(native))
+        for path in native_paths:
+            file = self.build / path
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(b"executable")
+        (self.build / native_paths[0]).chmod(0o755)
+
+        modules = {self.name: self.module}
+        graph = {self.name: set()}
+        planned = {n: {"key": sha(n.encode()), "deps": []} for n in
+                   [self.name, *[main for _, main, _ in facets.PROGRAMS.values()]]}
+        selection = self.enterContext(patch.object(facets.report_selection, "Selection"))
+        selection.return_value.modules.return_value = {self.name: str(self.module.source)}
+        self.enterContext(patch.object(facets, "utility_inputs", return_value={}))
+        for host in [facets, seed]:
+            self.enterContext(patch.object(host, "module_targets", return_value=planned))
+        self.enterContext(patch.object(seed.inventory, "workspace_modules", return_value=modules))
+        self.enterContext(patch.object(seed.inventory, "project_imports", return_value=graph))
+        self.enterContext(patch.object(seed.compiler, "checkout", return_value="c"*40))
+        self.enterContext(patch.object(seed, "package_inputs", return_value=("domain", {})))
+        self.enterContext(patch.object(seed.checkpoints, "remote_for", return_value=Store()))
+        self.enterContext(patch.object(seed.checkpoints, "save"))
+        checkpoint = self.enterContext(patch.object(seed, "checkpoint_rows"))
+        record = {"layout": {"group": [[self.name]]}, "sources": {self.name: archive_sha(self.root / self.module.source, None)},
+                  "required": legacy.required_outputs(self.root, modules, graph, {self.name: "group"}),
+                  "entries": {}, "fingerprints": {}}
+        self.enterContext(patch.object(seed, "pinned_seed", return_value=({}, record)))
+        for group, paths in [("group", self.paths + report_paths), (legacy.EXTRAS, native_paths)]:
+            record["entries"][group] = legacy.write_payload(self.root, self.build, paths)
+            record["fingerprints"][group] = legacy.digest([
+                (p, (self.build / p).stat().st_mode & 0o777, archive_sha(self.build / p, None)) for p in sorted(paths)])
+
+        def migrate(schema, hits):
+            hits = set(hits) | {"native/" + exe for exe in facets.PROGRAMS if "native/" + exe != native}
+            producer.write_text(f"REPORT_SCHEMA = {schema!r}\n")
+            checkpoint.return_value = ({n: {} for n in hits}, {})
+            requests = []
+            def download(digests):
+                requests.extend(digests)
+                for digest in digests:
+                    relative = legacy.transport_payload(digest)
+                    (target / relative).parent.mkdir(parents=True, exist_ok=True)
+                    (target / relative).write_bytes((self.root / relative).read_bytes())
+                return digests
+            result = seed.migrate(target, self.root, target, download)
+            indexed = seed.read(target / "base.json")["targets"]
+            return requests, result["seed_bytes_read"], set(indexed) - set(hits)
+
+        old = "stratalint-raw-lean-report-v3"
+        self.assertEqual(migrate(old, [self.name, native]), ([], 0, set()))
+        group = record["entries"]["group"]
+        extras = record["entries"][legacy.EXTRAS]
+        size = (self.root / legacy.transport_payload(group)).stat().st_size
+        native_size = (self.root / legacy.transport_payload(extras)).stat().st_size
+        self.assertEqual(migrate(old, [native]), ([group], size, {self.name}))
+        self.assertEqual(migrate(old, [self.name]), ([extras], native_size, {native}))
+        self.assertEqual(migrate(public.materials.REPORT_SCHEMA, [self.name, native]), ([group], size, {report}))
+
     def test_index_is_bound_to_exact_run_attempt_source_and_cache_key(self):
         identity = {"schema": legacy.SCHEMA, "mathlib": "b"*40, "os": "linux", "arch": "arm64",
                     "config": sha(b"config"), "execution": sha(b"execution"), "runtime": sha(b"runtime")}

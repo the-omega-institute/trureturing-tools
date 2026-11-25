@@ -160,6 +160,209 @@ class Generations(unittest.TestCase):
             self.assertEqual(generation.fetch_published(self.directory, ["B"], None, refresh_stale=False, tag=tag), 0)
         self.assertEqual((self.directory / ".lake/build/lib/lean/B.olean").read_bytes(), b"consumer")
 
+    def test_uploaded_receipt_and_conflict_refresh(self):
+        import lean_generation_objects as http
+        from unittest.mock import Mock
+
+        path = self.directory / 'payload'
+        path.write_bytes(b'body')
+        digest = sha(path.read_bytes())
+        asset = {'id': 9, 'state': 'uploaded', 'size': 4, 'digest': 'sha256:' + digest, 'name': digest}
+        collision = generation.host.GitHubCommandError(1, 'POST', stderr='HTTP 422: validation failed')
+        denied = generation.host.GitHubCommandError(1, 'POST', stderr='HTTP 403: Forbidden')
+        child = BUCKET + '-' + digest[0]
+        def bucket(tag, rows):
+            return {'id': 11 if tag == BUCKET else 12, 'tag_name': tag, 'draft': False, 'assets': rows}
+        full = [{'name': str(i)} for i in range(CAPACITY)]
+        with patch.object(checkpoints, 'publisher'):
+            for ambiguous in (collision, ConnectionResetError('lost ACK')):
+                objects = Objects(None)
+                objects.http = Mock(spec=http.GitHubHTTP)
+                objects.http.api.side_effect = [bucket(BUCKET, []), bucket(BUCKET, [asset])]
+                objects.http.upload.side_effect = ambiguous
+                self.assertFalse(objects.ensure(digest, digest, 4, path))
+                objects.http.upload.assert_called_once()
+                self.assertEqual(objects.http.api.call_count, 2)
+            objects = Objects(None)
+            objects.http = Mock(spec=http.GitHubHTTP)
+            objects.http.api.side_effect = [bucket(BUCKET, []), bucket(BUCKET, full), bucket(child, [])]
+            objects.http.upload.side_effect = [collision, asset]
+            self.assertTrue(objects.ensure(digest, digest, 4, path))
+            self.assertFalse(objects.ensure(digest, digest, 4, path))
+            self.assertEqual(objects.locate(digest, digest), (child, asset))
+            self.assertEqual([call.args[0] for call in objects.http.upload.call_args_list], [11, 12])
+            self.assertEqual(objects.http.api.call_count, 3)
+            fresh = Objects(None)
+            fresh.http.api = Mock(side_effect=[bucket(BUCKET, full), bucket(child, [asset])])
+            self.assertEqual(fresh.locate(digest, digest), (child, asset))
+            blocked = Objects(None)
+            blocked.http = Mock(spec=http.GitHubHTTP)
+            blocked.http.api.return_value = bucket(BUCKET, [])
+            blocked.http.upload.side_effect = denied
+            with self.assertRaisesRegex(generation.host.GitHubCommandError, '403'):
+                blocked.ensure(digest, digest, 4, path)
+            blocked.http.api.assert_called_once()
+            blocked.http.upload.assert_called_once()
+
+    def test_rate_limit_headers_and_asset_redirect_boundaries(self):
+        import urllib.error
+        from unittest.mock import Mock
+        from email.message import Message
+        from urllib.parse import urlsplit
+        import lean_generation_objects as http
+
+        now = 'Tue, 24 Nov 2026 23:00:00 GMT'
+        date = int(http.timestamp(now))
+        limits = {'Date': now, 'Retry-After': '2', 'X-RateLimit-Reset': str(date + 120), 'X-RateLimit-Remaining': '0'}
+        self.assertEqual(http.retry_delay(403, limits, '', 0), 121)
+        self.assertEqual(http.retry_delay(429, {'Date': now, 'Retry-After': 'Tue, 24 Nov 2026 23:15:00 GMT'}, '', 0), 900)
+        self.assertIsNone(http.retry_delay(403, {}, 'Resource not accessible by integration', 0))
+        digest = sha(b'material')
+        asset = {'id': 42, 'size': 8, 'name': digest}
+        client = http.GitHubHTTP(None)
+        client.token = 'token-for-this-test'
+        requests = []
+        def error(url, status, headers=None, message=b''):
+            fields = Message()
+            for key, value in (headers or {}).items(): fields[key] = value
+            return urllib.error.HTTPError(url, status, 'failure', fields, io.BytesIO(message))
+        def served(request, timeout):
+            hostname = urlsplit(request.full_url).hostname
+            requests.append((hostname, request.get_header('Authorization')))
+            if hostname == 'github.com': raise error(request.full_url, 404)
+            if hostname == 'api.github.com':
+                if len(requests) == 2: raise error(request.full_url, 403, limits, b'API rate limit exceeded')
+                raise error(request.full_url, 302, {'Location': 'https://release-assets.githubusercontent.com/asset'})
+            response = io.BytesIO(b'm')
+            response.status, response.headers = 206, {'Content-Range': 'bytes 0-0/8'}
+            return response
+        with patch.object(client.opener, 'open', side_effect=served), patch.object(http.time, 'sleep') as sleep:
+            self.assertEqual(b''.join(client.asset(asset, BUCKET, 0, 1)), b'm')
+            self.assertEqual(b''.join(client.asset(asset, BUCKET, 0, 1)), b'm')
+            sleep.assert_called_once_with(121)
+        self.assertEqual(requests, [('github.com', None), ('api.github.com', 'Bearer token-for-this-test'),
+                                   ('api.github.com', 'Bearer token-for-this-test'),
+                                   ('release-assets.githubusercontent.com', None), ('release-assets.githubusercontent.com', None)])
+        with patch.object(client.opener, 'open', side_effect=error('url', 403, limits)), \
+                patch.object(http.host, 'remaining', return_value=20), patch.object(http.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(TimeoutError, 'remaining Release budget'):
+                client.api('git/ref/tags/x')
+            sleep.assert_not_called()
+        expired = error('url', 618)
+        redirect = error('url', 302, {'Location': 'https://release-assets.githubusercontent.com/fresh'})
+        chunk = io.BytesIO(b'm')
+        chunk.status, chunk.headers = 206, {'Content-Range': 'bytes 0-0/8'}
+        with patch.object(client.opener, 'open', side_effect=[expired, redirect, chunk]) as calls:
+            self.assertEqual(b''.join(client.asset(asset, BUCKET, 0, 1)), b'm')
+            self.assertEqual([urlsplit(call.args[0].full_url).hostname for call in calls.call_args_list],
+                             ['release-assets.githubusercontent.com', 'github.com', 'release-assets.githubusercontent.com'])
+            self.assertTrue(all(call.args[0].get_header('Authorization') is None for call in calls.call_args_list))
+        body = io.BytesIO(b'material'); body.status, body.headers = 200, {}
+        with patch.object(client.opener, 'open', return_value=body), self.assertRaisesRegex(ValueError, 'HTTP 200'):
+            list(client.asset(asset, BUCKET, 0, 1))
+
+    def test_release_socket_eof_resumes_range_and_whole_index(self):
+        from http.client import HTTPResponse
+        import socket
+        import lean_generation_objects as http
+
+        index = generation.assemble(self.plan, None, [self.receipt])
+        data = encode(index)
+        digest = sha(data)
+        asset = {'id': 7, 'name': 'checkpoint-' + digest, 'state': 'uploaded',
+                 'digest': 'sha256:' + digest, 'size': len(data)}
+        remote = GitHub(self.directory, None)
+        self.enterContext(patch.object(remote.objects, 'locate', return_value=(BUCKET, asset)))
+        self.enterContext(patch.object(http.time, 'sleep'))
+        requests = []
+
+        def serve(request, timeout):
+            requested = request.get_header('Range')
+            requests.append(requested)
+            start, end = (map(int, requested[6:].split('-')) if requested else (0, len(data) - 1))
+            body = data[start:end + 1]
+            length = len(body)
+            if len(requests) == 1:
+                body = body[:5]
+            status = '206 Partial Content' if requested else '200 OK'
+            headers = [f'HTTP/1.1 {status}', f'Content-Length: {length}']
+            if requested:
+                headers.append(f'Content-Range: bytes {start}-{end}/{len(data)}')
+            client, server = socket.socketpair()
+            with server:
+                server.sendall(('\r\n'.join(headers) + '\r\n\r\n').encode() + body)
+            with client:
+                response = HTTPResponse(client)
+                response.begin()
+                return response
+
+        client = remote.objects.http
+        with patch.object(client.opener, 'open', side_effect=serve):
+            self.assertEqual(b''.join(client.asset(asset, BUCKET, 12, 32)), data[12:44])
+            self.assertEqual(requests, ['bytes=12-43', 'bytes=17-43'])
+            requests.clear()
+            output = self.directory / 'index.json'
+            self.assertEqual(remote.get_index(digest, output, 'checkpoint'), index)
+            self.assertEqual(sha(output.read_bytes()), digest)
+            self.assertEqual(requests, [None, f'bytes=5-{len(data)-1}'])
+
+            volume, = index['volumes']
+            data = self.remote.volumes[volume]
+            self.enterContext(patch.object(remote, 'volume', return_value={
+                'tag': BUCKET, 'id': 8, 'size': len(data), 'name': volume}))
+            requests.clear()
+            destination = self.directory / 'restored'
+            result = generation.restore(remote, index, self.plan, ['B'], destination)
+            self.assertEqual(result['restored'], 2)
+            self.assertEqual(requests, [f'bytes=0-{len(data)-1}', f'bytes=5-{len(data)-1}'])
+            self.assertEqual((destination / 'lib/lean/A.olean').read_bytes(), b'library')
+            index['targets']['A']['sha256'] = sha(b'other compressed frame')
+            requests.clear()
+            with self.assertRaisesRegex(ValueError, 'checksum'):
+                generation.restore(remote, index, self.plan, ['B'], self.directory / 'corrupt')
+            self.assertFalse((self.directory / 'corrupt/lib/lean/A.olean').exists())
+
+    def test_asset_retries_only_transport_failures_and_validates_each_suffix(self):
+        from unittest.mock import Mock
+        import lean_generation_objects as http
+
+        client = http.GitHubHTTP(None)
+        asset = {'id': 9, 'size': 8, 'name': sha(b'material')}
+        def response(body, span, length=None):
+            reader = io.BytesIO(body)
+            reader.status, reader.headers = 206, {'Content-Range': span}
+            if length is not None:
+                reader.headers['Content-Length'] = length
+            return reader
+
+        sleep = self.enterContext(patch.object(http.time, 'sleep'))
+        denied = generation.host.GitHubCommandError(1, 'GET', stderr='HTTP 403: Forbidden')
+        bad_gateway = generation.host.GitHubCommandError(1, 'GET', stderr='HTTP 502: Bad Gateway')
+        unavailable = generation.host.GitHubCommandError(1, 'GET', stderr='HTTP 503: unavailable')
+        stream = response(b'', 'bytes 1-6/8')
+        stream.read = Mock(side_effect=[b'at', ConnectionResetError('read interrupted')])
+        with patch.object(client, 'open_asset', side_effect=[
+                bad_gateway, unavailable, stream, ConnectionResetError('open interrupted'),
+                response(b'eria', 'bytes 3-6/8')]) as get:
+            self.assertEqual(b''.join(client.asset(asset, BUCKET, 1, 6)), b'ateria')
+            self.assertEqual([call.args[-1]['Range'] for call in get.call_args_list],
+                             ['bytes=1-6'] * 3 + ['bytes=3-6'] * 2)
+        for bad in [response(b'rial', 'bytes 4-7/8'), response(b'erial', 'bytes 3-6/8'),
+                    response(b'eria', 'bytes 3-6/8', '3')]:
+            with patch.object(client, 'open_asset', side_effect=[response(b'at', 'bytes 1-6/8'), bad]) as get, \
+                    self.assertRaises(ValueError):
+                list(client.asset(asset, BUCKET, 1, 6))
+            self.assertEqual(get.call_count, 2)
+        for error, count in [(denied, 1), (http.RateLimitTimeout('rate limit exceeds budget'), 1), (bad_gateway, 5)]:
+            with patch.object(client, 'open_asset', side_effect=error) as get, self.assertRaises(type(error)):
+                list(client.asset(asset, BUCKET, 1, 6))
+            self.assertEqual(get.call_count, count)
+        sleep.reset_mock()
+        with patch.object(client, 'open_asset', side_effect=unavailable), \
+                patch.object(http.host, 'remaining', return_value=0.5), self.assertRaises(TimeoutError):
+            list(client.asset(asset, BUCKET))
+        sleep.assert_not_called()
+
     def test_shared_asset_bucket_overflow_and_interrupted_upload(self):
         objects = Objects(None)
         digest = sha(b"one volume")
@@ -249,16 +452,19 @@ class Generations(unittest.TestCase):
             with self.subTest(metadata=bad), patch.object(remote.objects, "locate", return_value=("tag", asset | bad)), \
                     self.assertRaises(InvalidIndexBody):
                 remote.get_index(digest, self.directory / "download", "checkpoint")
-        def corrupt(_deadline, *args):
-            (Path(args[args.index("--dir") + 1]) / name).write_bytes(b"corrupt!")
+        def corrupt(asset, tag):
+            yield b"corrupt!"
         errors = [(corrupt, InvalidIndexBody),
                   (generation.host.GitHubCommandError(1, "gh", stderr="HTTP 404: Not Found"), MissingCheckpoint),
                   (generation.host.GitHubCommandError(1, "gh", stderr="HTTP 403: Forbidden"),
                    generation.host.GitHubCommandError)]
+        output = self.directory / "download"
+        output.write_bytes(b"previous verified index")
         for transport, expected in errors:
             with self.subTest(transport=transport), patch.object(remote.objects, "locate", return_value=("tag", asset)), \
-                    patch.object(generation.host, "gh", side_effect=transport), self.assertRaises(expected):
-                remote.get_index(digest, self.directory / "download", "checkpoint")
+                    patch.object(remote.objects.http, "asset", side_effect=transport), self.assertRaises(expected):
+                remote.get_index(digest, output, "checkpoint")
+            self.assertEqual(output.read_bytes(), b"previous verified index")
 
     def test_checkpoint_ref_retries_ambiguous_create_only_if_missing(self):
         name = "checkpoint"
@@ -272,8 +478,8 @@ class Generations(unittest.TestCase):
                     patch.object(self.remote, "api", create=True, side_effect=[error, missing, ref]) as api:
                 self.assertEqual(checkpoints.create_ref(self.remote, name, tag), ref)
                 create, lookup, retry = api.call_args_list
-                self.assertEqual(create.args, ("git/refs", "-X", "POST", "-f", "ref=refs/tags/checkpoint",
-                                               "-f", "sha=" + tag))
+                self.assertEqual(create.args, ("git/refs", "POST"))
+                self.assertEqual(create.kwargs, {'ref': 'refs/tags/checkpoint', 'sha': tag})
                 self.assertEqual(lookup.args, ("git/ref/tags/checkpoint",))
                 self.assertEqual(retry, create)
                 sleep.assert_called_once_with(delay)
@@ -307,11 +513,11 @@ class Generations(unittest.TestCase):
     def test_partial_checkpoint_discoverable_before_ci_quota_failure(self):
         remote = self.remote
         discovered = []
-        def api(endpoint, *args):
+        def api(endpoint, method="GET", **fields):
             if endpoint == "git/tags":
                 return {"sha": "f"*40}
             if endpoint == "git/refs":
-                digest = next(a.rsplit("-", 1)[1] for a in args if a.startswith("ref="))
+                digest = fields["ref"].rsplit("-", 1)[1]
                 advertised = [r["key"] for r in self.receipt["targets"].values()]
                 discovered.append((digest, self.receipt["source"], advertised))
                 return {"object": {"sha": "f"*40}}
