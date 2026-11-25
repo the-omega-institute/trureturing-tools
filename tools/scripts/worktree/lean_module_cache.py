@@ -160,27 +160,40 @@ def compile_omega_outputs(root, modules, names, common_prepared):
     return common_prepared
 
 
-def checkout_targets(root):
+def checkout_targets(root, *, requested=None, restore_only=False):
     modules = inventory.workspace_modules(root)
     roots = inventory.release_roots(modules) | omega_roots(root, modules)
     graph = compiler.scoped_imports(root, modules, roots)
     modules, graph, omega_inputs = omega_build_plan(root, modules, graph)
     scope = set(graph)
     reported = {}
+    selected = {}
+    utilities = {}
     if (root / 'lean-report-inputs.json').is_file():
         from lean_cache_release import report_selection
         from lean_generation_facets import module_report_targets, utility_inputs
         reported = report_selection.Selection(root).modules()
         if not reported.keys() <= scope:
             raise ValueError('reported module is outside the compiler release')
-        utilities = utility_inputs(root)
-        reported_paths = set(reported.values())
-        report_roots = {row['claimModule'] for path, row in utilities.items() if path in reported_paths}
-        if 'LeanInformationAudit.TemplateEnrollment' in modules:
-            report_roots.add('LeanInformationAudit.TemplateEnrollment')
-        # These compiler inputs identify reports. Their own reports do not enter the import graph.
-        extra_graph = compiler.scoped_imports(root, modules, report_roots - scope)
-        graph = {**extra_graph, **graph}
+        wanted = scope if requested is None else inventory.import_closure(graph, set(requested) & scope)
+        selected = {n: reported[n] for n in reported.keys() & wanted}
+        if selected:
+            # The CLI accepts an explicit scope. Large selections use one snapshot parse.
+            subset = sorted(selected) if requested is not None and sum(len(n)+1 for n in selected) < 64000 else None
+            try:
+                utilities = utility_inputs(root, subset)
+            except (OSError, subprocess.CalledProcessError) as error:
+                if not restore_only:
+                    raise
+                print(f'Report inputs unavailable; restoring matching compiler artifacts: {error}', file=sys.stderr)
+                selected = {}
+        if selected:
+            paths = set(selected.values())
+            report_roots = {row['claimModule'] for path, row in utilities.items() if path in paths}
+            if 'LeanInformationAudit.TemplateEnrollment' in modules:
+                report_roots.add('LeanInformationAudit.TemplateEnrollment')
+            # Report-only compiler prerequisites do not introduce report-to-report edges.
+            graph = {**compiler.scoped_imports(root, modules, report_roots - scope), **graph}
     configs = {}
     pins = {}
     directories = {'trureturing': Path('.'), 'reg': Path('Reg'), 'leanInspectorInterface': inventory.INTERFACE,
@@ -214,11 +227,13 @@ def checkout_targets(root):
         targets[name] = {'key': key, 'deps': dependencies}
     if reported:
         modules = dict(modules)
-        reports = module_report_targets(targets, reported, utilities)
-        for name, report in reports.items():
+        reports = module_report_targets(targets, selected, utilities) if selected else {}
+        for name, path in reported.items():
             row = targets[name]
-            targets[name] = dict(row, key=report['key'], compiler_input=row['key'], report_inputs=report['deps'])
-            modules[name] = replace(modules[name], report=True)
+            report = reports.get(name)
+            targets[name] = dict(row, key=report['key'] if report else None, compiler_input=row['key'],
+                                 report_inputs=report['deps'] if report else [])
+            modules[name] = replace(modules[name], report=True, report_utility=utilities.get(path))
         # Older readers validate every member of a tar against a compiler-only allowlist.
         # A compiler-only sibling must not pick a mixed namespace's archive at the old identity.
         namespaces = {namespace(n) for n in reported}
@@ -315,7 +330,8 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
     return plan
 
 
-def restore_matching(root, modules, targets, index, names, remote, destination, *, compiler_seeds=None):
+def restore_matching(root, modules, targets, index, names, remote, destination, *,
+                     compiler_seeds=None, compiler_only=(), available_compilers=()):
     """Read one authenticated asset per selected shard, including old-version references."""
     if not index or not names:
         return set()
@@ -327,7 +343,9 @@ def restore_matching(root, modules, targets, index, names, remote, destination, 
     seed_only = set()
     for name in sorted(names & targets.keys() & index['targets'].keys()):
         previous = index['targets'][name]
-        if targets[name]['key'] != previous['key']:
+        if name in compiler_only or targets[name]['key'] != previous['key']:
+            if name in available_compilers:
+                continue
             # Report inputs may change independently of the compiler output in the same shard.
             current_compiler = targets[name].get('compiler_input', targets[name]['key'])
             if compiler_seeds is None or previous.get('compiler_input', previous['key']) != current_compiler:
@@ -342,9 +360,10 @@ def restore_matching(root, modules, targets, index, names, remote, destination, 
         for shard, members in selected.items():
             row = index['shards'][shard]
             remote.download(row, archive)
-            compiler_only = seed_only.intersection(members)
-            installed = restore_shard(archive, row, members, modules, destination, root=root, compiler_only=compiler_only)
-            missing_reports = {n for n in installed & compiler_only if modules[n].report}
+            selected_seeds = seed_only.intersection(members)
+            installed = restore_shard(archive, row, members, modules, destination, root=root,
+                                      compiler_only=selected_seeds, compiler_hits=compiler_seeds)
+            missing_reports = {n for n in installed & selected_seeds if modules[n].report}
             restored.update(installed - missing_reports)
             if compiler_seeds is not None:
                 compiler_seeds.update(missing_reports)
@@ -429,8 +448,10 @@ def work(root, plan, lane, remote, output):
         destination = root / inventory.PROJECT_BUILD
         for index in (partial_index(plan, complete), base):
             seeds = set()
-            exact = restore_matching(root, modules, targets, index, scope - installed, remote, destination,
-                                     compiler_seeds=seeds)
+            missing_reports = {n for n in members - restored_reports if modules[n].report}
+            exact = restore_matching(root, modules, targets, index, (scope - installed) | missing_reports,
+                                     remote, destination, compiler_seeds=seeds,
+                                     compiler_only=scope - members, available_compilers=installed)
             restored_reports.update(n for n in exact if modules[n].report)
             installed.update(exact | seeds)
         if legacy:
@@ -500,16 +521,22 @@ def finish(plan, remote):
 
 
 def restore(root, index, requested, remote, destination):
-    modules, targets = checkout_targets(root)
+    modules, targets = checkout_targets(root, requested=requested, restore_only=True)
     graph = {n: row['deps'] for n, row in targets.items()}
     wanted = inventory.import_closure(graph, set(requested) & targets.keys()) if requested is not None else set(targets)
+    prerequisites = {d for n in wanted for d in targets[n].get('report_inputs', ()) if d in graph}
+    supporting = inventory.import_closure(graph, prerequisites) - wanted
     seeds = set()
-    restored = restore_matching(root, modules, targets, index, wanted, remote, destination, compiler_seeds=seeds)
-    result = {'requested': len(wanted), 'restored': len(restored), 'source': index['source']}
+    restored = restore_matching(root, modules, targets, index, wanted | supporting, remote, destination,
+                                compiler_seeds=seeds, compiler_only=supporting)
+    result = {'requested': len(wanted), 'restored': len(wanted & restored), 'source': index['source']}
+    if supporting:
+        result.update(supporting_compilers_requested=len(supporting),
+                      supporting_compilers_restored=len(supporting & (restored | seeds)))
     reports = {n for n in wanted if modules[n].report}
     if reports:
         result.update(reports_requested=len(reports), reports_restored=len(reports & restored),
-                      compiler_restored=len(restored | seeds))
+                      compiler_restored=len(wanted & (restored | seeds)))
     return result
 
 

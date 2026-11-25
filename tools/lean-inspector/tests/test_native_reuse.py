@@ -160,6 +160,11 @@ class NativeReportConsumerTests:
         self.write('Reg/Parent.lean', 'import Reg.Leaf\n'
             'def Reg.Parent.entry : LeanInformationAudit.Contract.Registration := { value := Reg.Leaf.entry.value + 1 }\n')
         self.write('Reg/Unrelated.lean', 'def Reg.Unrelated.value : Nat := 1\n')
+        support = 'LeanInformationAudit/Support.lean'
+        self.write(support, 'module\npublic theorem registryPin : True := True.intro\n')
+        driver = self.root / 'LeanInformationAudit/TemplateEnrollment.lean'
+        driver.write_text('module\npublic import LeanInformationAudit.Support\n'
+                          'public def fixtureDriver : Nat := 1\n')
         work = self.root / 'module-work.jsonl'
         self.env['STRATALINT_INSPECTOR_MODULE_WORK'] = str(work)
         output = self.root / 'public.json'
@@ -278,9 +283,26 @@ package_facet compilerRegistrationContender (pkg : Package) : Unit := do
                          '[FAIL] shared compiler prerequisites must be registered once per Lake invocation')
         self.assertEqual(sync.read_text(), 'contended', '[FAIL] compiler registration overlap must be controlled')
         self.assertEqual(initial['assessed'], ['Reg.Leaf', 'Reg.Parent'])
-        driver = self.root / 'LeanInformationAudit/TemplateEnrollment.lean'
-        driver.write_text('def fixtureDriver : Nat := 2\n')
-        warm = entry('implementation')
+        def report_hashes():
+            return {name: json.loads((native.state(self.root) / 'modules' /
+                    (name + '.zip.trace')).read_text())['depHash'] for name in self.stamps()}
+
+        typed = ['Reg.Leaf', 'Reg.Parent']
+        before = report_hashes()
+        for phase, path, contents in [
+            ('registry', driver, driver.read_text().replace(':= 1', ':= 2')),
+            ('registry-import', self.root / support,
+             'module\npublic theorem registryPin : True := Classical.choice ⟨True.intro⟩\n'),
+        ]:
+            path.write_text(contents)
+            changed = entry(phase)
+            self.assertEqual(changed['extracted'], typed)
+            self.assertEqual(changed['assessed'], typed)
+            self.assertEqual(changed['reg_recompiled'], [])
+            after = report_hashes()
+            self.assertEqual(sorted(name for name in after if before[name] != after[name]), typed)
+            before = after
+        warm = entry('warm-registry')
         self.assertEqual(warm['extracted'], [])
         self.assertEqual(warm['assessed'], [])
         self.assertEqual(warm['reg_recompiled'], [])

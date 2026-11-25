@@ -332,12 +332,13 @@ private def prepareNativeModuleReport (mod : Module) : FetchM (Job PreparedArtif
     observePhase "lake-module-inputs" "finish"
     let ownInputs ← IO.ofExcept (inputs.getObjValAs? (Array Json) "inputs")
     let mut deps := deps
+    let mut tracedExports := exports
     unless ownInputs.isEmpty do
       let some registry := (← getWorkspace).findModule? `LeanInformationAudit.TemplateEnrollment
         | error "IE-C050 reason=incomplete_closure rule=dtr.report_producer"
       let enrollment ← reportState.graphFetch.atomically fun _ =>
         JobM.runFetchM (prebuilt registry.exportInfo.fetch)
-      deps := deps.add enrollment
+      tracedExports := tracedExports.push enrollment
     deps := deps.mix (← inputBinFile mod.leanFile)
     deps := deps.mix (← inputBinFile utility)
     -- Await without mixing: the compiled tool must be current, but its implementation
@@ -348,13 +349,13 @@ private def prepareNativeModuleReport (mod : Module) : FetchM (Job PreparedArtif
     -- Schedule the format input before the callback. Waiting on a freshly
     -- created job inside every callback makes the runtime spawn spare workers.
     let format ← inputBinFile (root / ".lake/build/lean-inspector" / "report-format")
-    (deps.add (Job.mixArray exports) |>.add projection |>.add inspector |>.add format).mapM fun _ => do
+    (deps.add (Job.mixArray tracedExports) |>.add projection |>.add inspector |>.add format).mapM fun _ => do
       observePhase "lake-report-programs-callback" "start"
       -- The compiler reader consumes transitive private values, also
       -- through public imports. Lake's legacy trace follows that same closure;
       -- allTransTrace follows each import's visibility and can omit those values.
-      -- Apply this to the module and every external utility claim.
-      for exportJob in exports do
+      -- Trace the module, its external utility claims, and the registry used for typed inputs.
+      for exportJob in tracedExports do
         let info ← exportJob.await
         addTrace (info.allArtsTrace.mix info.legacyTransTrace)
       addTrace format.getTrace

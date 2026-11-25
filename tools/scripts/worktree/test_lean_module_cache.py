@@ -128,8 +128,17 @@ class ModuleReleases(unittest.TestCase):
         result = cache.restore(self.root, index, ['D5.C'], self.remote, destination)
         self.assertEqual((result['requested'], result['restored'], result['compiler_restored']), (2, 1, 2))
         self.assertEqual((result['reports_requested'], result['reports_restored']), (1, 0))
+        self.assertEqual((result['supporting_compilers_requested'], result['supporting_compilers_restored']), (1, 1))
+        self.assertTrue((destination/'lib/lean/D5/B.olean').is_file())
         self.assertTrue((destination/'lib/lean/D5/A.olean').is_file())
         self.assertFalse((destination/'lean-inspector/modules/D5.A.zip').exists())
+
+        with patch.object(facets, 'utility_inputs', side_effect=FileNotFoundError('dotnet')) as reader:
+            plain = cache.restore(self.root, index, ['D5.B'], self.remote, self.root / 'ordinary')
+            self.assertEqual(plain['restored'], 1)
+            reader.assert_not_called()
+            cold = cache.restore(self.root, index, ['D5.A'], self.remote, self.root / 'compiler-seed')
+            self.assertEqual((cold['reports_restored'], cold['compiler_restored']), (0, 1))
 
         (self.root / 'D5/B.lean').write_text('def valueB := 8')
         _, changed = cache.checkout_targets(self.root)

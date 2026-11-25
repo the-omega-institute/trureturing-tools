@@ -12,7 +12,7 @@ import unittest
 import zipfile
 
 from lean_artifact_inventory import Module, PROJECT_BUILD
-from lean_module_shards import (ARTIFACT_HASH_READER, DEFAULT_CAPACITY, inspector_publication, lookup_shard, pack_shard,
+from lean_module_shards import (DEFAULT_CAPACITY, inspector_publication, lookup_shard, pack_shard,
                                 plan_shards, report_paths, restore_shard)
 
 
@@ -88,7 +88,7 @@ class ShardCompilerTransport(unittest.TestCase):
                     self.assertEqual(artifact.read_bytes(), (self.build / artifact.relative_to(dest)).read_bytes())
         self.assertTrue(all(self.descriptor['module_sizes'][n] > 0 for n in self.modules))
 
-    def prepare_report(self, name, *, broken_material=False):
+    def prepare_report(self, name, *, broken_material=False, utility=None):
         module = self.modules[name]
         public = inspector_publication()
         material = b'Type'
@@ -98,6 +98,10 @@ class ShardCompilerTransport(unittest.TestCase):
                    source_sha256='sha256:' + public.digest(self.root / module.source), imports=[],
                    declarations=[dict(axioms=[], include_in_statement=True, kind='def', name=name,
                                       name_key=name, statement_id=statement_id, type_sha256=type_id)])
+        if utility:
+            row['utility_refutation'] = dict(claim_gid=utility['claimGid'], claim_source_path=utility['claimSourcePath'],
+                                             claim_source_sha256=utility['claimSourceSha256'], result_gid=utility['resultGid'],
+                                             is_closed_negation=True)
         input_zip = self.root / (name + ".zip")
         with tempfile.TemporaryDirectory(dir=self.root) as directory:
             report = Path(directory) / public.RAW
@@ -108,12 +112,12 @@ class ShardCompilerTransport(unittest.TestCase):
                                 dict(schema='stratalint-judge-input-projection-v1', module=name, inputs=[]))
             public.zip_files(input_zip, [(public.RAW + suffix, public.member(report, suffix))
                                        for suffix in ('', '.materials.zip', '.provenance.json')])
-        reader = self.root / ARTIFACT_HASH_READER
-        reader.parent.mkdir(parents=True, exist_ok=True)
-        reader.write_text('import Lake.Build.Trace\n'
-                          'def main : IO Unit := do\n'
-                          '  for path in (← (← IO.getStdin).readToEnd).splitOn "\\n" do\n'
-                          '    IO.println (← Lake.computeBinFileHash path).hex\n')
+        inputs = self.build / 'lean-inspector/inputs'
+        inputs.mkdir(parents=True, exist_ok=True)
+        record = dict(utilities=[utility] if utility else [], claims=[utility['claimModule']] if utility else [],
+                      source_path=module.source.as_posix())
+        (inputs / (name + '.json')).write_bytes(public.materials.canonical_json(record))
+        (inputs.parent / 'report-format').write_text(public.selection.REPORT_FORMAT + '\n')
         # Exercise the same Lake artifact primitive used by the Inspector's report facet.
         config = self.root / 'reports.lean'
         config.write_text('''import Lake
@@ -123,7 +127,16 @@ lean_lib Demo
 module_facet report (mod : Module) : System.FilePath := withCurrPackage mod.pkg do
   let input := mod.pkg.dir / s!"{mod.name}.zip"
   let file := mod.pkg.buildDir / "lean-inspector/modules" / s!"{mod.name}.zip"
-  (← inputBinFile input).mapM fun _ => do
+  let sources ← inputBinFile mod.leanFile
+  let utility ← inputBinFile (mod.pkg.buildDir / "lean-inspector/inputs" / s!"{mod.name}.json")
+  let format ← inputBinFile (mod.pkg.buildDir / "lean-inspector/report-format")
+  let exports ← mod.exportInfo.fetch
+  let zip ← inputBinFile input
+  (Job.nil.mix sources |>.mix utility |>.add exports |>.add zip |>.add format).mapM fun _ => do
+    let info ← exports.await
+    addTrace (info.allArtsTrace.mix info.legacyTransTrace)
+    addTrace zip.getTrace
+    addTrace format.getTrace
     let _ ← buildArtifactUnlessUpToDate file (do
       IO.FS.createDirAll file.parent.get!
       IO.FS.writeBinFile file (← IO.FS.readBinFile input)) (ext := "zip") (restore := true)
@@ -131,7 +144,7 @@ module_facet report (mod : Module) : System.FilePath := withCurrPackage mod.pkg 
 ''')
         subprocess.run(['lake', '-f', config.name, '--no-cache', 'build', '+' + name + ':report'],
                        cwd=self.root, check=True, stdout=subprocess.DEVNULL)
-        self.modules[name] = replace(module, report=True)
+        self.modules[name] = replace(module, report=True, report_utility=utility)
 
     def test_module_reports_restore_together_with_the_requested_compiler_files(self):
         name = 'Demo.A'
@@ -146,7 +159,7 @@ module_facet report (mod : Module) : System.FilePath := withCurrPackage mod.pkg 
         # A matching warm Lake trace can record a different producer checkout path.
         (dest / trace).parent.mkdir(parents=True)
         local_trace = json.loads((self.build / trace).read_bytes())
-        local_trace['inputs'][0][0] = str(consumer / (name + '.zip'))
+        local_trace = json.loads(json.dumps(local_trace).replace(str(self.root.resolve()), str(consumer.resolve())))
         (dest / trace).write_text(json.dumps(local_trace))
         self.assertEqual(restore_shard(self.archive, self.descriptor, [name], self.modules, dest, root=self.root), {name})
         self.assertEqual(json.loads((dest / trace).read_bytes()), local_trace)
@@ -154,7 +167,9 @@ module_facet report (mod : Module) : System.FilePath := withCurrPackage mod.pkg 
             self.assertEqual((dest / path).read_bytes(), (self.build / path).read_bytes())
         self.assertFalse((dest / report_paths('Demo.B')[0]).exists())
         self.assertTrue((dest / 'lib/lean/Demo/A.olean').is_file())
-        for path in (Path('lean-toolchain'), Path('reports.lean'), Path(name + '.zip'), self.modules[name].source):
+        for path in (Path('lean-toolchain'), Path('reports.lean'), Path(name + '.zip'), self.modules[name].source,
+                     PROJECT_BUILD / 'lean-inspector' / 'report-format',
+                     PROJECT_BUILD / 'lean-inspector' / 'inputs' / (name + '.json')):
             (consumer / path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(self.root / path, consumer / path)
         subprocess.run(['lake', '-f', 'reports.lean', '--no-cache', '--no-build', 'build', '+' + name + ':report'],
@@ -193,6 +208,56 @@ module_facet report (mod : Module) : System.FilePath := withCurrPackage mod.pkg 
                                      expected.get(path))
                 for path in report_paths('Demo.B'):
                     self.assertEqual((dest / path).read_bytes(), (self.build / path).read_bytes())
+
+    def test_current_claim_source_is_required_for_report_reuse(self):
+        name = 'Demo.A'
+        claim = self.modules['Demo.B'].source
+        utility = dict(modulePath='Demo/A.lean', resultModule=name, resultGid='result', resultSelector='valueA',
+                       claimGid='claim', claimModule='Demo.B', claimSelector='valueB', claimSourcePath=claim.as_posix(),
+                       claimSourceSha256='sha256:' + inspector_publication().digest(self.root / claim))
+        self.prepare_report(name, utility=utility)
+        descriptor = pack_shard(self.root, self.modules, [name], self.archive, 'c'*64)
+        for differing in (None, dict(utility, resultGid='wrong'), dict(utility, resultModule='Demo.B')):
+            with self.subTest(utility=differing), self.assertRaisesRegex(ValueError, 'utility'):
+                modules = {name: replace(self.modules[name], report_utility=differing)}
+                restore_shard(self.archive, descriptor, [name], modules, self.root / 'unused', root=self.root)
+        with (self.root / claim).open('a') as source:
+            source.write('-- changed claim only\n')
+        for action in (lambda: pack_shard(self.root, self.modules, [name], self.root / 'stale.tar.gz', 'c'*64),
+                       lambda: restore_shard(self.archive, descriptor, [name], self.modules, self.root / 'unused', root=self.root)):
+            with self.assertRaisesRegex(ValueError, 'stale or unsafe report utility claim'):
+                action()
+        self.assertFalse((self.root / 'unused').exists())
+
+    def test_invalid_report_traces_and_compiler_fallback_with_local_report_conflict(self):
+        name = 'Demo.A'
+        self.prepare_report(name)
+        descriptor = pack_shard(self.root, self.modules, [name], self.archive, 'c'*64)
+        relative = report_paths(name)[2]
+        path = self.build / relative
+        native_trace = json.loads(path.read_bytes())
+        for field, value in [('inputs', 'malformed'), ('inputs', [['source', False]]), ('log', [None]),
+                             ('schemaVersion', 'unknown'), ('depHash', '0'*16)]:
+            with self.subTest(field=field, value=value):
+                broken = dict(native_trace, **{field: value})
+                path.write_text(json.dumps(broken))
+                with self.assertRaisesRegex(ValueError, 'Lake artifact or report trace'):
+                    pack_shard(self.root, self.modules, [name], self.root/'bad.tar.gz', 'c'*64)
+        path.write_text(json.dumps(dict(native_trace, synthetic=True, inputs=[])))
+        pack_shard(self.root, self.modules, [name], self.root/'synthetic.tar.gz', 'd'*64)
+        path.write_text(json.dumps(native_trace))
+        dest = self.root / 'conflict'
+        (dest / relative).parent.mkdir(parents=True)
+        invalid_live = json.dumps(dict(native_trace, inputs='malformed'))
+        (dest / relative).write_text(invalid_live)
+        hits = set()
+        self.assertEqual(restore_shard(self.archive, descriptor, [name], self.modules, dest,
+                                       root=self.root, compiler_hits=hits), set())
+        self.assertEqual(hits, {name})
+        self.assertTrue((dest/'lib/lean/Demo/A.olean').is_file())
+        self.assertEqual((dest / relative).read_text(), invalid_live)
+        self.assertFalse((dest / report_paths(name)[0]).exists())
+        self.assertFalse((dest / report_paths(name)[1]).exists())
 
     def test_crossed_missing_unsafe_and_corrupt_report_material(self):
         name = 'Demo.A'

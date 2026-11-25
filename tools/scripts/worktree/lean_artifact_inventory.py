@@ -34,6 +34,7 @@ class Module:
     build: Path
     extra_builds: tuple[Path, ...] = ()
     report: bool = False
+    report_utility: dict | None = field(default=None, compare=False, hash=False)
 
 
 @dataclass(frozen=True)
