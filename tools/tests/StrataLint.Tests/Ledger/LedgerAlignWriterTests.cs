@@ -209,6 +209,10 @@ public sealed class LedgerAlignWriterTests
     }
 
     [Theory]
+    [InlineData("official-derived-with-strict")]
+    [InlineData("official-derived-ineligible")]
+    [InlineData("official-derived-false")]
+    [InlineData("official-derived-string")]
     [InlineData("eligibility")]
     [InlineData("missing")]
     [InlineData("ineligible")]
@@ -226,6 +230,20 @@ public sealed class LedgerAlignWriterTests
             var strict = row["strict_omega"]!.AsObject();
             switch (defect)
             {
+                case "official-derived-with-strict": row["officialDerivedOnly"] = true; break;
+                case "official-derived-ineligible":
+                    module["strictEligible"] = false;
+                    row.Remove("strict_omega");
+                    row["officialDerivedOnly"] = true;
+                    break;
+                case "official-derived-false":
+                    row.Remove("strict_omega");
+                    row["officialDerivedOnly"] = false;
+                    break;
+                case "official-derived-string":
+                    row.Remove("strict_omega");
+                    row["officialDerivedOnly"] = "true";
+                    break;
                 case "eligibility": module.Remove("strictEligible"); break;
                 case "missing": row.Remove("strict_omega"); break;
                 case "ineligible": module["strictEligible"] = false; break;
@@ -238,6 +256,24 @@ public sealed class LedgerAlignWriterTests
         Assert.False(result.Success);
         Assert.Contains("LEDGER_ALIGN_FAILED", result.Error, StringComparison.Ordinal);
         Assert.Empty(fixture.Image());
+    }
+
+    [Fact]
+    public void CertifiedOfficialGeneratedRowRetainsOfficialEvidence()
+    {
+        using var fixture = new AlignFixture(Module("A"), Module("B", axioms: ["propext"]));
+        var result = fixture.AlignWithMeasurement(["--add", PathFor("A"), "--add", PathFor("B")], response =>
+        {
+            var row = response[1]!["declarations"]![0]!.AsObject();
+            row.Remove("strict_omega");
+            row["officialDerivedOnly"] = true;
+        });
+        Assert.True(result.Success, result.Error);
+        Assert.NotNull(Assert.Single(fixture.Load("A").Declarations).StrictOmega);
+        var derived = Assert.Single(fixture.Load("B").Declarations);
+        Assert.Null(derived.StrictOmega);
+        Assert.Equal(["propext"], derived.Axioms!.Value.ToArray());
+        Assert.Equal(["Init", "OmegaMath"], derived.Libraries!.Value.ToArray());
     }
 
     [Fact]

@@ -78,7 +78,10 @@ internal static class FrozenDependencyMeasurement
                     throw new FormatException($"measured declaration does not match current report: {name}:{key}");
 
                 var hasStrict = row.TryGetProperty("strict_omega", out var strictElement);
-                if (hasStrict != (strictEligible && included))
+                var officialDerivedOnly = row.TryGetProperty("officialDerivedOnly", out var derived);
+                if (officialDerivedOnly && (derived.ValueKind != JsonValueKind.True || !strictEligible || !included || hasStrict))
+                    throw new FormatException($"invalid officialDerivedOnly measurement: {name}:{key}");
+                if (hasStrict != (strictEligible && included && !officialDerivedOnly))
                     throw new FormatException($"strict_omega eligibility does not match measured declaration: {name}:{key}");
                 if (!included) continue;
                 var strict = hasStrict ? StrictOmegaMeasurement.Read(strictElement) : null;
