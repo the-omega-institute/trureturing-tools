@@ -8,6 +8,7 @@ import http.client
 import math
 import os
 import re
+import ssl
 import sys
 import time
 import urllib.error
@@ -121,14 +122,8 @@ class GitHubHTTP:
         with self.request(url, method='POST', path=path) as response:
             return json.load(response)
 
-    def asset(self, asset, tag, offset=0, length=None):
-        asset_id, size = asset['id'], asset['size']
-        if type(asset_id) is not int or asset_id <= 0 or type(size) is not int or size <= 0:
-            raise ValueError('invalid Release asset identity')
-        end = size - 1 if length is None else offset + length - 1
-        if not 0 <= offset <= end < size:
-            raise ValueError('invalid Release asset range')
-        headers = {} if length is None else {'Range': f'bytes={offset}-{end}'}
+    def open_asset(self, asset, tag, headers):
+        asset_id = asset['id']
         api = f'https://api.github.com/repos/{host.REPO}/releases/assets/{asset_id}'
         public = f'https://github.com/{host.REPO}/releases/download/{tag}/{asset["name"]}'
         for attempt in range(2):
@@ -136,11 +131,11 @@ class GitHubHTTP:
                 try:
                     response = self.request(public, headers=headers, redirect=True, authenticate=False)
                 except host.GitHubCommandError as error:
-                    if not re.search(r'HTTP (401|403|404):', error.stderr):
+                    if not re.match(r'HTTP (401|403|404):', error.stderr or ''):
                         raise
                     response = self.request(api, headers=headers, accept='application/octet-stream', redirect=True)
                 if response.status != 302:
-                    break
+                    return response
                 with response:
                     location = response.headers['Location']
                     hostname = urllib.parse.urlsplit(location).hostname or ''
@@ -148,29 +143,60 @@ class GitHubHTTP:
                         raise ValueError('unexpected GitHub Release download origin')
                     self.signed[asset_id] = location
             try:
-                response = self.request(self.signed[asset_id], headers=headers, accept='application/octet-stream',
-                                        authenticate=False)
-                break
+                return self.request(self.signed[asset_id], headers=headers, accept='application/octet-stream',
+                                    authenticate=False)
             except host.GitHubCommandError as error:
-                self.signed.pop(asset_id, None)
-                if attempt or not re.search(r'HTTP (401|403|404|618):', error.stderr or ''):
+                if not re.match(r'HTTP (401|403|404|618):', error.stderr or ''):
                     raise
-        with response:
-            if length is None:
-                if response.status != 200:
-                    raise ValueError('unexpected GitHub asset response')
-            elif response.status != 206 or response.headers.get('Content-Range') != f'bytes {offset}-{end}/{size}':
-                raise ValueError(f'Release asset range mismatch (HTTP {response.status}, Content-Range {response.headers.get("Content-Range")!r})')
-            remaining = end - offset + 1
-            while remaining:
+                self.signed.pop(asset_id, None)
+                if attempt:
+                    raise
+
+    def asset(self, asset, tag, offset=0, length=None):
+        asset_id, size = asset['id'], asset['size']
+        if type(asset_id) is not int or asset_id <= 0 or type(size) is not int or size <= 0:
+            raise ValueError('invalid Release asset identity')
+        end = size - 1 if length is None else offset + length - 1
+        if not 0 <= offset <= end < size:
+            raise ValueError('invalid Release asset range')
+        cursor = offset
+        for attempt in range(5):
+            ranged = length is not None or cursor != 0
+            headers = {'Range': f'bytes={cursor}-{end}'} if ranged else {}
+            remaining = end - cursor + 1
+            try:
                 host.remaining(self.deadline)
-                block = response.read(min(1024 * 1024, remaining))
-                if not block:
-                    raise ValueError('truncated Release asset')
-                remaining -= len(block)
-                yield block
-            if response.read(1):
-                raise ValueError('Release asset exceeded requested length')
+                with self.open_asset(asset, tag, headers) as response:
+                    expected = f'bytes {cursor}-{end}/{size}' if ranged else None
+                    actual = response.headers.get('Content-Range')
+                    if response.status != (206 if ranged else 200) or actual != expected:
+                        raise ValueError(f'Release asset range mismatch (HTTP {response.status}, Content-Range {actual!r})')
+                    declared = response.headers.get('Content-Length')
+                    if declared is not None and seconds(declared) != remaining:
+                        raise ValueError('Release asset Content-Length mismatch')
+                    while remaining:
+                        host.remaining(self.deadline)
+                        block = response.read(min(1024 * 1024, remaining))
+                        if not block:
+                            raise EOFError('truncated Release asset')
+                        remaining -= len(block)
+                        if remaining < 0 or (remaining == 0 and response.read(1)):
+                            raise ValueError('Release asset exceeded requested length')
+                        cursor += len(block)
+                        yield block
+                    return
+            except (EOFError, ConnectionError, TimeoutError, ssl.SSLEOFError,
+                    http.client.HTTPException, host.GitHubCommandError) as error:
+                if isinstance(error, host.GitHubCommandError) and not (
+                        error.stderr == 'GitHub connection interrupted' or re.match(r'HTTP (502|503|504):', error.stderr or '')):
+                    raise
+                delay = 2 ** attempt
+                if attempt == 4:
+                    raise
+                if host.remaining(self.deadline) <= delay:
+                    raise TimeoutError('remaining Release budget exhausted before asset retry') from error
+                print(f'Retrying Release asset {asset_id} at byte {cursor} in {delay}s', file=sys.stderr, flush=True)
+                time.sleep(delay)
 
 
 class Objects:

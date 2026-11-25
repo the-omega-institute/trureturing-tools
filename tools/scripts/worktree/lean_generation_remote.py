@@ -25,6 +25,19 @@ class MissingCheckpoint(FileNotFoundError):
     """The advertised checkpoint body is no longer present in its object bucket."""
 
 
+def verified_index(path, digest, deadline):
+    if path.stat().st_size > MAX_INDEX or host.archive_sha(path, deadline) != digest:
+        raise InvalidIndexBody("generation index readback digest mismatch")
+    try:
+        index = read(path)
+        canonical = sha(encode(index))
+    except ValueError as error:
+        raise InvalidIndexBody("generation index body is malformed") from error
+    if canonical != digest:
+        raise InvalidIndexBody("generation index encoding differs from its canonical digest")
+    return index
+
+
 def decode_marker(commit):
     marker = json.loads(commit["message"])
     if (marker["schema"] != SCHEMA or not valid_digest(marker["index"])
@@ -115,7 +128,8 @@ class GitHub:
     def get_index(self, digest, path, transport):
         if transport == "ci":
             self.ci("get", digest, path)
-        elif transport == "checkpoint":
+            return verified_index(path, digest, self.deadline)
+        if transport == "checkpoint":
             name = "checkpoint-" + digest
             tag, asset = self.objects.locate(digest, name)
             if asset is None:
@@ -136,29 +150,20 @@ class GitHub:
             if len(assets) != 1 or not 0 < assets[0]["size"] <= MAX_INDEX:
                 raise ValueError("invalid generation index asset")
             asset = remote.checked_asset(metadata, tag, digest, assets[0]["size"])
-        if transport != 'ci':
-            with tempfile.TemporaryDirectory(dir=path.parent) as directory, (Path(directory) / 'index').open('wb') as temp:
-                try:
-                    for block in self.objects.http.asset(asset, tag):
-                        temp.write(block)
-                except host.GitHubCommandError as error:
-                    if transport == 'checkpoint' and (error.stderr or '').startswith('HTTP 404:'):
-                        raise MissingCheckpoint('checkpoint asset disappeared: ' + digest) from error
-                    raise
-                temp.close()
-                if Path(temp.name).stat().st_size != asset['size']:
-                    raise InvalidIndexBody('index body differs from its recorded length: ' + digest)
-                os.replace(temp.name, path)
-        if path.stat().st_size > MAX_INDEX or host.archive_sha(path, self.deadline) != digest:
-            raise InvalidIndexBody("generation index readback digest mismatch")
-        try:
-            index = read(path)
-            canonical = sha(encode(index))
-        except ValueError as error:
-            raise InvalidIndexBody("generation index body is malformed") from error
-        if canonical != digest:
-            raise InvalidIndexBody("generation index encoding differs from its canonical digest")
-        return index
+        with tempfile.TemporaryDirectory(dir=path.parent) as directory, (Path(directory) / 'index').open('wb') as temp:
+            try:
+                for block in self.objects.http.asset(asset, tag):
+                    temp.write(block)
+            except host.GitHubCommandError as error:
+                if transport == 'checkpoint' and (error.stderr or '').startswith('HTTP 404:'):
+                    raise MissingCheckpoint('checkpoint asset disappeared: ' + digest) from error
+                raise
+            temp.close()
+            if Path(temp.name).stat().st_size != asset['size']:
+                raise InvalidIndexBody('index body differs from its recorded length: ' + digest)
+            index = verified_index(Path(temp.name), digest, self.deadline)
+            os.replace(temp.name, path)
+            return index
 
     def advance(self, expected, marker):
         from lean_generation_checkpoints import publisher
