@@ -96,6 +96,81 @@ if __name__ == "__main__":
 
 
 class WarmGeneration(unittest.TestCase):
+    def test_exclusive_report_workers_resume_batches_and_publish_one_index(self):
+        import io
+        import tarfile
+        from contextlib import ExitStack
+        import lean_cache_generation as generation
+        import lean_generation_facets as facets
+        from test_lean_cache_generation import Store
+
+        count = 641
+        names = [f'report/D5.M{i:04d}' for i in range(count)]
+        readers = ['native/inputDiscovery', 'native/reportInspector']
+        targets = {name: {'key': sha(name.encode()), 'deps': []} for name in ['D5.A', *readers]}
+        for name in names:
+            targets[name] = {'key': sha(name.encode()), 'deps': ['D5.A']}
+        remote = Store()
+        base = {'source': 'a' * 40, 'targets': {}, 'volumes': {}}
+        for name in ['D5.A', *readers]:
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode='w:gz') as archive:
+                entry = tarfile.TarInfo(name)
+                entry.size = len(name)
+                archive.addfile(entry, io.BytesIO(name.encode()))
+            data = stream.getvalue()
+            volume = sha(data)
+            remote.volumes[volume] = data
+            base['volumes'][volume] = len(data)
+            base['targets'][name] = dict(targets[name], paths=[name], bytes=len(data), offset=0,
+                                         sha256=volume, volume=volume)
+        compiler = {'source': base['source'], 'domain': 'b' * 64, 'targets': {'D5.A': targets['D5.A']}}
+        runs, checkpoints = [], []
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as mocks:
+            root = Path(tmp)
+            receipts = root / 'receipts'
+            receipts.mkdir()
+            def build(_, batch, __):
+                if len(runs) == 32 and fail:
+                    raise RuntimeError('interrupted shard')
+                for name in batch:
+                    self.assertNotIn(name, runs)
+                    runs.append(name)
+                    for relative in facets.facet_paths(name):
+                        path = root / facets.PROJECT_BUILD / relative
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(relative.encode())
+
+            mocks.enter_context(patch.object(facets, 'all_targets', return_value=targets))
+            mocks.enter_context(patch.object(facets, 'discover', side_effect=lambda *args: iter(checkpoints)))
+            mocks.enter_context(patch.object(facets, 'save', side_effect=lambda _, __, r, ___: checkpoints.append(r)))
+            mocks.enter_context(patch.object(facets, 'restore'))
+            mocks.enter_context(patch.object(facets.subprocess, 'run'))
+            mocks.enter_context(patch.object(facets, 'build_facets', side_effect=build))
+            layout = facets.plan_facets(root, remote, compiler, base, receipts)
+            self.assertEqual(len(layout['shards']), 20)
+            self.assertEqual(sorted(n for shard in layout['shards'] for n in shard), names)
+            fail = True
+            with self.assertRaisesRegex(RuntimeError, 'interrupted shard'):
+                facets.build_shard(root, remote, layout, 0, resume=False)
+            self.assertEqual(len(checkpoints), 1)
+            fail = False
+            for shard in reversed(range(len(layout['shards']))):
+                receipt = facets.build_shard(root, remote, layout, shard, resume=shard == 0)
+                facets.write(receipts / f'report-{shard}.json', receipt)
+                if shard == 1:
+                    with self.assertRaisesRegex(ValueError, 'missing or unexpected'):
+                        facets.finish(layout, receipts, root / 'plan')
+            self.assertCountEqual(runs, names)
+            facets.finish(layout, receipts, root / 'plan')
+            indexed = facets.assemble(facets.read(root / 'plan'), None,
+                                      [facets.read(p) for p in receipts.glob('*.json')])
+            self.assertEqual(indexed['targets'].keys(), targets.keys())
+            verified = generation.restore(remote, indexed, facets.read(root / 'plan'), [names[-1]], root / 'reader')
+            self.assertEqual(verified['restored'], 2)
+            report = facets.facet_paths(names[-1])[0]
+            self.assertEqual((root / 'reader' / report).read_text(), report)
+
     def test_report_batch_prepares_its_planned_inputs_before_reading_exports(self):
         import lean_generation_facets as facets
 
