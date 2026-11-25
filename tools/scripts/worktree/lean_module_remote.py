@@ -2,6 +2,7 @@
 
 from functools import cache
 import hashlib
+from itertools import chain
 import json
 import os
 from pathlib import Path
@@ -36,7 +37,11 @@ def missing(error):
 
 
 class Remote:
-    def __init__(self, root, deadline=None):
+    def __init__(self, root, deadline=None, *, lane=None, lanes=1):
+        if lane is not None and not 0 <= lane < lanes <= 256:
+            raise ValueError('invalid module Release lane')
+        self.lane = lane
+        self.lanes = lanes
         self.root = root
         self.deadline = deadline if deadline is not None else host.operation_deadline()
         self.http = GitHubHTTP(self.deadline)
@@ -114,12 +119,11 @@ class Remote:
     def candidates(self, plan):
         # Current-version writes by sibling jobs may have happened since planning.
         tags = list(self.tags(plan['version'], plan.get('base_version')))
-        n = 2
-        while self.catalog(f'{plan["version"]}-part-{n}', refresh=True):
-            tag = f'{plan["version"]}-part-{n}'
-            if tag not in tags:
+        prefix = 'tags/' + plan['version'] + '-part-'
+        for row in self.api('git/matching-refs/' + prefix):
+            tag = row['ref'].removeprefix('refs/tags/')
+            if TAG.fullmatch(tag) and tag.startswith(plan['version'] + '-part-') and tag not in tags:
                 tags.append(tag)
-            n += 1
         for tag in tags:
             entry = self.catalog(tag, refresh=tag.startswith(plan['version']))
             if entry:
@@ -173,9 +177,14 @@ class Remote:
 
     def stage(self, version, name, path, label, digest, *, index=False):
         publisher()
-        for part in range(1, 10000):
+        # The planner owns the shared Release. Each worker alone creates its overflow parts.
+        first_overflow = 2 + (self.lane or 0)
+        for part in chain((1,), range(first_overflow, first_overflow + 9998 * self.lanes, self.lanes)):
             tag = version if part == 1 else f'{version}-part-{part}'
-            release, assets = self.catalog(tag, create=True)
+            catalog = self.catalog(tag, create=self.lane is None or part != 1)
+            if catalog is None:
+                raise ValueError('planner did not prepare module Release: ' + tag)
+            release, assets = catalog
             existing = assets.get(name)
             if not existing and not index and len(assets) >= CAPACITY:
                 continue

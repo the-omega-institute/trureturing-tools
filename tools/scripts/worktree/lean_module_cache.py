@@ -326,13 +326,14 @@ def fetch_published(root, names, deadline, *, refresh_stale, version=None):
 
 
 def run():
-    from lean_module_remote import Remote
+    from lean_module_remote import Remote, publisher
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repository', type=Path, default=Path.cwd())
     commands = parser.add_subparsers(dest='command', required=True)
     plan = commands.add_parser('plan')
     plan.add_argument('--base', type=Path)
     plan.add_argument('--legacy-checkpoints', action='store_true')
+    plan.add_argument('--prepare-release', action='store_true', help='create the shared Release before starting its workers')
     plan.add_argument('--capacity', type=int, default=DEFAULT_CAPACITY)
     plan.add_argument('--workers', type=int, default=20)
     plan.add_argument('--output', type=Path, required=True)
@@ -351,6 +352,11 @@ def run():
     get.add_argument('--destination', type=Path)
     args = parser.parse_args()
     root = args.repository.resolve()
+    if args.command == 'worker':
+        plan = json.loads(args.plan.read_bytes())
+        remote = Remote(root, lane=args.lane, lanes=len(plan['lanes']))
+        print(json.dumps(work(root, plan, args.lane, remote, args.output)))
+        return 0
     remote = Remote(root)
     if args.command == 'plan':
         modules, targets = checkout_targets(root)
@@ -364,14 +370,15 @@ def run():
                 print(f'Compiler checkpoints unavailable; continuing with Lake: {error}', file=sys.stderr)
         result = make_plan(source, resolved_mathlib(root), targets, base, remote,
                            args.capacity, args.workers, legacy=legacy)
+        if args.prepare_release and result['lanes']:
+            publisher()
+            remote.catalog(result['version'], refresh=True, create=True)
         write(args.output, result)
         if path := os.environ.get('GITHUB_OUTPUT'):
             with open(path, 'a') as output:
                 print('matrix=' + json.dumps({'lane': list(range(len(result['lanes'])))}), file=output)
                 print('has_work=' + str(bool(result['lanes'])).lower(), file=output)
         print(json.dumps({'shards': len(result['shards']), 'lanes': len(result['lanes'])}))
-    elif args.command == 'worker':
-        print(json.dumps(work(root, json.loads(args.plan.read_bytes()), args.lane, remote, args.output)))
     elif args.command == 'finish':
         plan = json.loads(args.plan.read_bytes())
         if compiler.checkout(root) != plan['source']:
