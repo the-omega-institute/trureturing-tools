@@ -86,13 +86,13 @@ def lookup_shard(name, module_to_shard, shards):
     return owner
 
 
-def verify_overlay_hashes(root, build, modules, grouped):
-    """Check all transported overlay outputs using the portable reader's Lake hasher."""
+def verify_backend_hashes(root, build, modules, grouped):
+    """Check every compiler variant of paired modules using the portable reader's Lake hasher."""
     hashes = {}
     for name, module in modules.items():
         if not module.extra_builds:
             continue
-        for variant in compiler_variants(module)[1:]:
+        for variant in compiler_variants(module):
             trace = compiler_path(name, variant, 'lib/lean', 'trace')
             outputs = json.loads((build / trace).read_bytes())['outputs']
             descriptors = dict(zip(('olean', 'olean.server', 'olean.private'), outputs['o']))
@@ -153,7 +153,7 @@ def pack_shard(root, modules, members, output, fingerprint):
     if not selected:
         raise ValueError('empty module shard')
     grouped = {}
-    overlay_files = {}
+    verified_files = {}
     for name, module in selected.items():
         paths = set()
         for path in lean_artifact_paths(name, module):
@@ -162,11 +162,11 @@ def pack_shard(root, modules, members, output, fingerprint):
                 raise ValueError('unsafe compiler artifact: ' + str(path))
             if file.is_file():
                 paths.add(path)
-                if any(path.is_relative_to(prefix) for prefix in module.extra_builds):
-                    overlay_files[path.as_posix()] = file_identity(file.stat())
+                if module.extra_builds:
+                    verified_files[path.as_posix()] = file_identity(file.stat())
         grouped[name] = paths
     check_outputs(build, selected, grouped)
-    verify_overlay_hashes(root, build, selected, grouped)
+    verify_backend_hashes(root, build, selected, grouped)
     index = {n: {'build': selected[n].build.as_posix(), 'paths': sorted(map(str, grouped[n]))}
              for n in sorted(selected)}
     for name, row in index.items():
@@ -188,9 +188,9 @@ def pack_shard(root, modules, members, output, fingerprint):
                 start = raw.tell()
                 for path in row['paths']:
                     with (build / path).open('rb') as source:
-                        # Confirm the overlay content has stayed stable through hashing and packing.
+                        # Confirm that verified content has stayed stable through hashing and packing.
                         info = os.fstat(source.fileno())
-                        verified = overlay_files.get(path)
+                        verified = verified_files.get(path)
                         if verified is not None and file_identity(info) != verified:
                             raise ValueError(f'compiler artifact changed during packing: {path}')
                         entry = tarfile.TarInfo(path)
@@ -264,7 +264,7 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
 
         selected = {n: modules[n] for n in wanted}
         check_outputs(stage, selected, grouped)
-        verify_overlay_hashes(root, stage, selected, grouped)
+        verify_backend_hashes(root, stage, selected, grouped)
         install = set()
         restored = set()
         for name, module in selected.items():

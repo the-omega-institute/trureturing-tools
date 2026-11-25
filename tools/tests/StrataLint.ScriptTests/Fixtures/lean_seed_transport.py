@@ -49,7 +49,7 @@ exit "${FAKE_BUILD_EXIT:-0}"
         for name in ("lean-cache-publish.sh", "cache_material.py", "lean_cache.py", "lean_cache_release.py", "lean_cache_release_io.py", "lean_cache_topology.py", "lean_actions.py",
                      "lean_artifact_inventory.py", "lean_release_index.py", "lean_cache_generation.py",
                      "lean_generation_index.py", "lean_generation_remote.py", "lean_generation_objects.py",
-                     "lean_generation_plan.py", "lean_generation_checkpoints.py", "lean_module_cache.py", "lean_omega_cache.py",
+                     "lean_generation_plan.py", "lean_generation_checkpoints.py", "lean_module_cache.py",
                      "lean_module_shards.py", "lean_module_remote.py",
                      "lean_release_volume_remote.py", "lean_release_volumes.py", "lean_compile_layers.py"):
             shutil.copy2(PUBLISH.with_name(name), helper_dir / name)

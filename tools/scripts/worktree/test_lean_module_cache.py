@@ -231,10 +231,11 @@ def main : IO Unit := do
                 self.assertEqual({path: (warm_build / path).read_bytes() for path in paths}, outputs)
 
         # Wrong bytes with the original trace and sidecar cannot be published or restored.
-        for crossed_path in paths[1:]:
+        for crossed_path in paths:
             with self.subTest(crossed_path=crossed_path):
                 path = build / crossed_path
-                path.write_bytes(outputs[paths[0]])
+                wrong_bytes = outputs[paths[1] if crossed_path == paths[0] else paths[0]]
+                path.write_bytes(wrong_bytes)
                 try:
                     rejected = self.root / 'unpublishable.tar.gz'
                     with self.assertRaisesRegex(ValueError, 'artifact differs from its Lake trace'):
@@ -249,7 +250,7 @@ def main : IO Unit := do
                     for entry in original:
                         data = original.extractfile(entry).read()
                         if entry.name == crossed_path:
-                            data = outputs[paths[0]]
+                            data = wrong_bytes
                         entry.size = len(data)
                         tampered.addfile(entry, io.BytesIO(data))
                 payload = crossed_archive.read_bytes()
