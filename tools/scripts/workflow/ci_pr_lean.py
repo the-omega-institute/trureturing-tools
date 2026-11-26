@@ -85,11 +85,15 @@ def build_environment(programs, targets):
     return environment
 
 
+def build_modules(modules, environment):
+    subprocess.run(["bash", "tools/scripts/worktree/lean-cache-run.sh", "lake",
+                    "-d", "tools/lean-inspector-reg", "build",
+                    *["+" + module for module in modules]], env=environment, check=True)
+
+
 def check_programs(programs, environment):
     if programs:
-        subprocess.run(["bash", "tools/scripts/worktree/lean-cache-run.sh", "lake",
-                        "-d", "tools/lean-inspector-reg", "build",
-                        *["+" + module for module in programs]], env=environment, check=True)
+        build_modules(programs, environment)
     internal = [name for name in programs if Path("src", *name.split(".")).with_suffix(".lean").is_file()]
     if internal and tomllib.loads(Path("lakefile.toml").read_text()).get("testDriver"):
         subprocess.run(["bash", "tools/scripts/worktree/lean-cache-run.sh", "lake", "test", "--", *internal],
@@ -189,6 +193,12 @@ def write_batch(root, index, selected, identity):
     if destination.exists() or destination.is_symlink():
         raise ValueError(f"batch artifact already exists: {destination.name}")
     environment = build_environment(selected["programs"], selected["targets"])
+    # Previously unpublished mathematical proofs have no reusable compilation history.
+    # Build them one at a time before Lake schedules the rest of the batch in parallel.
+    new_modules = selected.get("new_d5_modules", [])
+    serial = dict(environment, LEAN_NUM_THREADS="1")
+    for start in range(0, len(new_modules), 256):
+        build_modules(new_modules[start:start + 256], serial)
     check_programs(selected["programs"], environment)
     with tempfile.TemporaryDirectory(prefix=".batch-", dir=root) as temporary:
         scratch = Path(temporary)
