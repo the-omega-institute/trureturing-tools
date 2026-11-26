@@ -28,7 +28,7 @@ private def dependencies (info : ConstantInfo) : Array Name :=
 
 def collect (store : RawArtifacts.Store) (cache : IO.Ref CompiledAxioms.AxiomClosureState)
     (constant : Name) : IO (Array Name) :=
-  CompiledAxioms.collectClosure store.constants.find? (pure ∘ dependencies) (fun info => do
+  CompiledAxioms.collectClosure store.constants.find? dependencies (fun info => do
     let some owner := store.selectedOwner? info.name
       | throw <| IO.userError s!"frozen.dependencies.missing_owner:{info.name}"
     let root := owner.getRoot

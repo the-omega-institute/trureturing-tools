@@ -262,7 +262,7 @@ def inspectData (moduleData : ModuleData) (find : Name → Option ConstantInfo)
     (writer : MaterialWriter) (materialCounter : IO.Ref Nat)
     (utilities : Array UtilityInput)
     (generatedNames : Array Name) (informationTemplates : Json)
-    (input : ModuleInput) (direct : ConstantInfo → IO (Array Name)) : IO ModuleReport := do
+    (input : ModuleInput) : IO ModuleReport := do
   let profiling := (← IO.getEnv "STRATALINT_INSPECTOR_PROFILE") == some "1"
   let enumerationStart ← if profiling then IO.monoNanosNow else pure 0
   let allNames := moduleData.constNames ++
@@ -288,7 +288,7 @@ def inspectData (moduleData : ModuleData) (find : Name → Option ConstantInfo)
     let some info := find name
       | throw <| IO.userError s!"declaration missing: {name}"
     let sccStart ← if profiling then IO.monoNanosNow else pure 0
-    let axioms ← collectAxiomsWith direct reportConstant? cache name
+    let axioms ← collectAxiomsShared reportConstant? cache name
     let encodeStart ← if profiling then IO.monoNanosNow else pure 0
     sccNanos.modify (· + (encodeStart - sccStart))
     let materialIndex ← materialCounter.get
@@ -453,27 +453,12 @@ private def withReportWriter (reportOutput materialSpool : System.FilePath)
   RawArtifacts.checkBatchConstants base store seen
   return store
 
-/-- Cache direct edges from the immutable batch store. Keys and edges are taken from
-its original constant, whose region outlives every target. Target-specific selections
-use their own resolved term. The axiom closure is computed in each target's view. -/
-private unsafe def batchDependencies (base : RawArtifacts.Store) (excluded : Name → Bool)
-    (memo : IO.Ref (Std.HashMap Name (Array Name))) (info : ConstantInfo) : IO (Array Name) := do
-  unless excluded info.name do
-    if let some original := base.constants.find? info.name then
-      if ptrEq original info then
-        if let some edges := (← memo.get)[original.name]? then return edges
-        let edges := declarationDependencies original
-        memo.modify (·.insert original.name edges)
-        return edges
-  return declarationDependencies info
-
 -- No target store, assessment, expression cache or report row escapes this frame.
 @[noinline] private unsafe def produceTarget (base : RawArtifacts.Store)
     (state : IO.Ref RawArtifacts.Store) (statementOnly profiling : Bool)
     (input : ModuleInput) (utilities : Array UtilityInput)
     (generated : IO.Ref (Std.HashMap String String))
     (seen : IO.Ref (NameMap Name))
-    (memo : IO.Ref (Std.HashMap Name (Array Name)))
     (writer : MaterialWriter) (out : IO.FS.Handle) (counter : IO.Ref Nat) : IO Unit := do
   let store ← loadTarget base state statementOnly input utilities seen
   let target := input.moduleName.toName
@@ -510,14 +495,11 @@ private unsafe def batchDependencies (base : RawArtifacts.Store) (excluded : Nam
         ← ArtifactRegistration.targetJson target assessment, assessment.enrollmentErrors)
     else pure (store, #[], empty, #[])
   let overrides := current.reportOverrides #[target]
-  let excluded := fun n => overrides.contains n || current.selectedOwnerOverrides.contains n || generatedNames.contains n
-  let direct := if base.moduleOrder.isEmpty then pure ∘ declarationDependencies
-    else batchDependencies base excluded memo
   let row ← inspectData data (current.constants.find?)
-    (closedNegation (fun name => (current.modules.find? name.toName).map (·.toModuleData))
+    (closedNegation (fun name => current.modules.find? name.toName)
       (current.constants.find?) input)
     (fun name => (overrides.find? name).orElse fun _ => current.constants.find? name)
-    writer counter utilities generatedNames binding input direct
+    writer counter utilities generatedNames binding input
   let row := { row with
     informationRegistrationErrors := sortedUnique (row.informationRegistrationErrors ++ enrollmentErrors) }
   out.putStr (renderModule row)
@@ -568,14 +550,13 @@ private unsafe def produceCompiled (reportOutput materialSpool : System.FilePath
         unless resident.exitCode == 0 do throw <| IO.userError "raw.profile_rss_failed"
         (← IO.getStderr).putStrLn s!"LEAN_INSPECTOR_COMPATIBILITY_RELEASE module={input.moduleName} rss_kib={resident.stdout.trimAscii.toString}"
     return
-  let memo ← IO.mkRef ({} : Std.HashMap Name (Array Name))
   withReportWriter reportOutput materialSpool statementOnly fun writer out => do
     for h : index in [:inputs.size] do
       let input := inputs[index]
       let selected := utilities.filter (·.modulePath == input.sourcePath)
       if index > 0 then out.putStr ", "
       try
-        produceTarget base targetState statementOnly profiling input selected generated seen memo writer out counter
+        produceTarget base targetState statementOnly profiling input selected generated seen writer out counter
       finally
         RawArtifacts.release targetState
       if profiling then

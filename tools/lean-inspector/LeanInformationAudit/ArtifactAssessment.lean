@@ -16,7 +16,7 @@ def discover (store : RawArtifacts.Store) (target : Name) : IO Discovery.Snapsho
   let reachable := reachableModules (ArtifactRegistration.importsOf store) target
   let owners := store.moduleOrder.filter (fun owner =>
     reachable.contains owner && ((`Reg).isPrefixOf owner ||
-      (store.modules.find? owner).any (·.typedInputs.get)))
+      (store.modules.find? owner).any RawArtifacts.hasTypedInputs))
   let context := CompiledRegistration.expressionContext (store.constants.find?)
     (← IO.getNumHeartbeats) {}
   let axioms ← IO.mkRef ({ closure := store.metadata.axioms } : CompiledAxioms.AxiomClosureState)

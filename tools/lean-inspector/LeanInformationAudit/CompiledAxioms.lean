@@ -26,26 +26,25 @@ structure AxiomClosureState where
   index : NameMap Nat := {}
   low : NameMap Nat := {}
   onStack : NameSet := {}
-  stack : Array (Name × Array Name) := #[]
+  stack : Array Name := #[]
   closure : NameMap (Array Name) := {}
 
 /-- Finalize the complete transitive axiom set of each strongly connected
 component. Mutual definitions and inductives share their component's own axioms
 and every finalized external successor's closure. -/
 private partial def strongConnect (find : Name → Option ConstantInfo)
-    (dependencies : ConstantInfo → IO (Array Name))
+    (dependencies : ConstantInfo → Array Name)
     (seed : ConstantInfo → IO (Option Name))
     (state : IO.Ref AxiomClosureState) (constant : Name) : IO Unit := do
-  let some info := find constant
-    | throw <| IO.userError s!"raw.incomplete_closure:{constant}"
-  let edges ← dependencies info
   state.modify fun s => { s with
     index := s.index.insert constant s.counter
     low := s.low.insert constant s.counter
     counter := s.counter + 1
     onStack := s.onStack.insert constant
-    stack := s.stack.push (constant, edges) }
-  for dependency in edges do
+    stack := s.stack.push constant }
+  let some info := find constant
+    | throw <| IO.userError s!"raw.incomplete_closure:{constant}"
+  for dependency in dependencies info do
     let s ← state.get
     if s.closure.contains dependency then continue
     if !(s.index.contains dependency) then
@@ -60,50 +59,45 @@ private partial def strongConnect (find : Name → Option ConstantInfo)
         state.modify fun s => { s with low := s.low.insert constant indexDependency }
   let s ← state.get
   if (s.low.find? constant).getD 0 == (s.index.find? constant).getD 0 then
-    let mut members : Array (Name × Array Name) := #[]
+    let mut members : Array Name := #[]
     let mut remaining := s.stack
+    let mut popped := Name.anonymous
     repeat
-      let popped := remaining.back!
+      popped := remaining.back!
       remaining := remaining.pop
       members := members.push popped
-    until popped.1 == constant
-    let memberSet : NameSet := members.foldl (init := {}) (fun set member => set.insert member.1)
+    until popped == constant
+    let memberSet : NameSet := members.foldl (init := {}) (fun set name => set.insert name)
     let mut facts : NameSet := {}
-    for (member, edges) in members do
+    for member in members do
       let some info := find member
         | throw <| IO.userError s!"raw.incomplete_closure:{member}"
       if let some value ← seed info then
         facts := facts.insert value
-      for dependency in edges do
+      for dependency in dependencies info do
         if !(memberSet.contains dependency) then
           for entry in ((s.closure.find? dependency).getD #[]) do
             facts := facts.insert entry
     let result := facts.toArray
     state.modify fun s => { s with
-      closure := members.foldl (init := s.closure) (fun map member => map.insert member.1 result)
-      onStack := members.foldl (init := s.onStack) (fun set member => set.erase member.1)
+      closure := members.foldl (init := s.closure) (fun map name => map.insert name result)
+      onStack := members.foldl (init := s.onStack) (fun set name => set.erase name)
       stack := remaining }
 
 /-- Combine per-constant facts across the dependency graph, including cycles. Each
 interpretation of the graph uses its own cache. -/
 def collectClosure (find : Name → Option ConstantInfo)
-    (dependencies : ConstantInfo → IO (Array Name)) (seed : ConstantInfo → IO (Option Name))
+    (dependencies : ConstantInfo → Array Name) (seed : ConstantInfo → IO (Option Name))
     (state : IO.Ref AxiomClosureState) (constant : Name) : IO (Array Name) := do
   if let some cached := (← state.get).closure.find? constant then
     return cached
   strongConnect find dependencies seed state constant
   return ((← state.get).closure.find? constant).getD #[]
 
-/-- Transitive axiom closure with the direct dependency reader of this report. -/
-def collectAxiomsWith (dependencies : ConstantInfo → IO (Array Name))
-    (find : Name → Option ConstantInfo) (state : IO.Ref AxiomClosureState) (constant : Name) :
-    IO (Array Name) :=
-  collectClosure find dependencies
-    (fun info => pure (if info matches .axiomInfo _ then some info.name else none)) state constant
-
 /-- Transitive axiom closure using the report's dependency relation. -/
 def collectAxiomsShared (find : Name → Option ConstantInfo)
     (state : IO.Ref AxiomClosureState) (constant : Name) : IO (Array Name) :=
-  collectAxiomsWith (pure ∘ declarationDependencies) find state constant
+  collectClosure find declarationDependencies
+    (fun info => pure (if info matches .axiomInfo _ then some info.name else none)) state constant
 
 end LeanInformationAudit.CompiledAxioms

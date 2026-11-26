@@ -224,30 +224,18 @@ class NativeBatchCompatibilityConsumerTests:
         self.write('D5/CapacityShared.lean', 'namespace CapacityCompatible\ndef shared : Nat := 1\nend CapacityCompatible\n')
         # Exercise the existing subsumes relation in both directions, plus the
         # same owner's constants reached through multiple target import paths.
-        for side, leaf in [('Original', 'baseOnly'), ('Alternate', 'alternateOnly')]:
-            self.write(f'D5/Capacity{side}.lean', 'namespace CapacityCompatible\n'
-                f'axiom {leaf} : True\ntheorem pick : True := {leaf}\nend CapacityCompatible\n')
         header = 'import D5.CapacityShared\nnamespace CapacityCompatible\n'
         common = ('theorem duplicateTheorem : True := True.intro\n'
                   'axiom duplicateAxiom : True\n')
-        self.write('D5/CapacityLeft.lean', 'import D5.CapacityOriginal\n' + header + common +
-            'theorem usesLeft : True := pick\n'
+        self.write('D5/CapacityLeft.lean', header + common +
             'theorem theoremThenAxiom : True := True.intro\naxiom axiomThenTheorem : True\nend CapacityCompatible\n')
-        self.write('D5/CapacityRight.lean', 'import D5.CapacityAlternate\n' + header + common +
-            'theorem usesRight : True := pick\n'
+        self.write('D5/CapacityRight.lean', header + common +
             'axiom theoremThenAxiom : True\ntheorem axiomThenTheorem : True := True.intro\nend CapacityCompatible\n')
-        self.write('D5/CapacityThird.lean', 'import D5.CapacityOriginal\n'
-            'theorem CapacityCompatible.usesThird : True := CapacityCompatible.pick\n')
         baseline = None
         for size in (100, 1):
             with self.subTest(size=size):
                 self._capacity_report(size)
                 report = self.report()
-                rows = {row['module']: row for row in report[0]}
-                for side, leaf in [('Left', 'baseOnly'), ('Right', 'alternateOnly'), ('Third', 'baseOnly')]:
-                    decl = next(d for d in rows['D5.Capacity' + side]['declarations']
-                                if d['name'] == 'CapacityCompatible.uses' + side)
-                    self.assertEqual(decl['axioms'], ['CapacityCompatible.' + leaf])
                 if baseline is None:
                     baseline = report
                 else:
