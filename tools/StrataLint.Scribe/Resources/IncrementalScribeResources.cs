@@ -12,6 +12,8 @@ internal static class IncrementalScribeResources
         string root, string output, ImmutableArray<string> paths,
         string cacheDirectory, string environment, string receipt)
     {
+        // The compiled host includes the effective MSBuild script constants and allowlist implementation.
+        environment = $"{environment}/{typeof(ScribeResourceScriptPacker).Assembly.ManifestModule.ModuleVersionId}/{Environment.Version}";
         var scripts = new Dictionary<string, string>(paths.Length, StringComparer.Ordinal);
         foreach (var path in paths)
         {
@@ -61,9 +63,17 @@ internal static class IncrementalScribeResources
     private static (ScribeResourcePack?, Inputs?) ReadPrevious(string pack, string inputs, string environment)
     {
         if (!File.Exists(inputs) || !File.Exists(pack)) return (null, null);
-        var value = JsonSerializer.Deserialize<Inputs>(File.ReadAllBytes(inputs));
-        if (value?.Environment != environment) return (null, null);
-        var previous = ScribeResourcePack.Open(pack);
-        return previous.Manifest.TotalSha256 == value.Pack ? (previous, value) : (null, null);
+        try
+        {
+            var value = JsonSerializer.Deserialize<Inputs>(File.ReadAllBytes(inputs));
+            if (value?.Environment != environment || value.Scripts is null) return (null, null);
+            var previous = ScribeResourcePack.Open(pack);
+            return previous.Manifest.TotalSha256 == value.Pack ? (previous, value) : (null, null);
+        }
+        catch (Exception error) when (error is JsonException or ScribeResourcePackException or IOException)
+        {
+            Console.Error.WriteLine($"Rebuilding unreadable Scribe cache: {error.Message}");
+            return (null, null);
+        }
     }
 }

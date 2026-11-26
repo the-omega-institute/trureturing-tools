@@ -19,7 +19,7 @@ pack="$temp/scribe-resources.zip"
 if [[ -n "${TRUTH_RELEASE_SCRIBE_CACHE:-}" ]]; then
   export TRUTH_RELEASE_SCRIBE_RECEIPT="$temp/scribe-cache-result"
   TRUTH_RELEASE_SCRIBE_INPUT="$(
-    { git ls-tree HEAD -- Meta/tools-release.json Golden/Projection global.json; dotnet --version; } | git hash-object --stdin
+    { git ls-tree HEAD -- Meta/tools-release.json Golden/Projection global.json Directory.Build.props Directory.Build.targets Directory.Packages.props NuGet.Config NuGet.config; dotnet --version; } | git hash-object --stdin
   )"
   export TRUTH_RELEASE_SCRIBE_INPUT
 fi

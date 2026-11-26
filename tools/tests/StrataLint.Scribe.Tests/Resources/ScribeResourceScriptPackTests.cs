@@ -153,6 +153,9 @@ public sealed class ScribeResourceScriptPackTests
         Assert.Contains("reused=3 built=0", File.ReadAllText(receipt));
         Build("new-fixtures", "Alpha", "Beta", "New");
         Assert.Contains("reused=0 built=3", File.ReadAllText(receipt));
+        File.WriteAllText(Path.Combine(cache, "pack.zip"), "interrupted cache");
+        Build("new-fixtures", "Alpha", "Beta", "New");
+        Assert.Contains("reused=0 built=3", File.ReadAllText(receipt));
     }
 
     private static ScribeResourcePackManifest Pack(string root, string output)
