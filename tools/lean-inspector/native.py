@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from functools import lru_cache
 import io
 import os
 from pathlib import Path
+import queue
 import re
 import shutil
+import signal
 import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 
@@ -461,7 +464,8 @@ def inspect_batch_chunk(requests, *, check_constants=False, generated_index=None
     origin = public.production_origin(root, executable, inputs=template_inputs)
     if any(Path(row[0]) != root or row[4] != executable for row in requests):
         raise ValueError('mixed native batch owners')
-    with tempfile.TemporaryDirectory(prefix='.inspection.', dir=state(root)) as directory:
+    scratch = os.environ.get('STRATALINT_NATIVE_WINDOW_SCRATCH') or state(root)
+    with tempfile.TemporaryDirectory(prefix='.inspection.', dir=scratch) as directory:
         directory = Path(directory)
         spool = directory / 'spool'
         spool.mkdir()
@@ -524,7 +528,8 @@ def produce_split_batch(requests, size):
     report input. ConstantInfo comparisons remain entirely in the raw reader.
     """
     root = Path(requests[0][0])
-    with tempfile.TemporaryDirectory(prefix='.partition.', dir=state(root)) as directory:
+    scratch = os.environ.get('STRATALINT_NATIVE_WINDOW_SCRATCH') or state(root)
+    with tempfile.TemporaryDirectory(prefix='.partition.', dir=scratch) as directory:
         directory = Path(directory)
         generated_index = directory / 'generated.json'
         generated_index.write_text('[]')
@@ -577,6 +582,109 @@ def batch(request_file):
         with phase('native-produce'):
             produce_batch(produce)
 
+
+def stop_window_group(process):
+    for number in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, number)
+        except ProcessLookupError:
+            break
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+    process.wait()
+
+
+def supervise_windows(groups, worker):
+    """Stage disjoint groups privately and advance the Lake publication prefix on acknowledgement."""
+    if os.name != 'posix':
+        raise ValueError('parallel native report groups require POSIX process groups')
+    if len(groups) != 2 or any(not group for group in groups):
+        raise ValueError('expected two nonempty native report groups')
+    if any(kind != 'produce' or len(args) != 6 for group in groups for kind, args in group):
+        raise ValueError('invalid native report request')
+    targets = [Path(args[5]) for group in groups for _, args in group]
+    if len(set(targets)) != len(targets) or len({p.parent for p in targets}) != 1:
+        raise ValueError('native report groups need disjoint outputs under one directory')
+    targets[0].parent.mkdir(parents=True, exist_ok=True)
+    events = queue.SimpleQueue()
+    completed = {}
+
+    def receive():
+        # The caller owns the only write end. EOF also covers an interrupted Lake.
+        with os.fdopen(os.dup(sys.stdin.fileno()), 'rb', buffering=0) as source:
+            for line in source:
+                events.put(('reply', line))
+        events.put(('stop', 'Lake input closed'))
+
+    def join(index, process):
+        events.put(('worker', (index, process.wait())))
+
+    def await_event(index, acknowledgement=False):
+        while acknowledgement or index not in completed:
+            kind, value = events.get()
+            if kind == 'worker':
+                completed[value[0]] = value[1]
+            elif kind == 'stop':
+                raise InterruptedError(str(value))
+            elif acknowledgement and value == f'committed {index}\n'.encode():
+                return
+            else:
+                raise ValueError('invalid native report publication acknowledgement')
+        return completed[index]
+
+    def settle_worker(process, index, log):
+        if process.poll() != 0:
+            stop_window_group(process)
+        if process.returncode:
+            print(f'native report group {index} exited {process.returncode}', file=sys.stderr, flush=True)
+        with log.open('rb') as source:
+            shutil.copyfileobj(source, sys.stderr.buffer)
+
+    pending = []
+    with ExitStack() as cleanup:
+        for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            previous = signal.signal(number, lambda n, _: events.put(('stop', f'signal {n}')))
+            cleanup.callback(signal.signal, number, previous)
+        threading.Thread(target=receive, daemon=True).start()
+        private = Path(cleanup.enter_context(tempfile.TemporaryDirectory(
+            prefix='.report-windows.', dir=targets[0].parent)))
+        def discard_pending():
+            for path in pending:
+                path.unlink(missing_ok=True)
+
+        cleanup.callback(discard_pending)
+        for index, group in enumerate(groups):
+            directory = private / str(index)
+            directory.mkdir()
+            staged = [[kind, [*args[:5], str(directory / f'{n}.zip')]]
+                      for n, (kind, args) in enumerate(group)]
+            request = directory / 'request.json'
+            request.write_text(json.dumps(staged))
+            log = directory / 'worker.log'
+            with log.open('wb') as output:
+                process = subprocess.Popen([*worker, str(request)], stdin=subprocess.DEVNULL,
+                    stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
+                    env=dict(os.environ, STRATALINT_NATIVE_WINDOW_SCRATCH=str(directory)))
+            cleanup.callback(settle_worker, process, index, log)
+            threading.Thread(target=join, args=(index, process), daemon=True).start()
+        for index, group in enumerate(groups):
+            status = await_event(index)
+            if status:
+                raise ValueError(f'native report group {index} failed with exit {status}')
+            for n, (_, args) in enumerate(group):
+                target = Path(args[5])
+                (private / str(index) / f'{n}.zip').replace(target)
+                pending.append(target)
+            print(f'ready {index}', flush=True)
+            await_event(index, acknowledgement=True)
+            pending.clear()
+
+
+def windows(request_file):
+    groups = public.read_json(Path(request_file).read_bytes())
+    supervise_windows(groups, [sys.executable, '-B', str(Path(__file__).resolve()), 'batch'])
 
 
 def aggregate_module(name, artifact, report_stream, material_spool, material_offsets):
@@ -707,7 +815,7 @@ def main():
         return
     actions = {'prepare': prepare,
                'module': module,
-               'batch': batch,
+               'batch': batch, 'windows': windows,
                'regenerate': regenerate, 'prebuilt-workspace': prebuilt_workspace,
                'check-workspace-producer': check_workspace_producer}
     if len(sys.argv) < 2 or sys.argv[1] not in actions:

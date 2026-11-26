@@ -108,6 +108,7 @@ class NativeReportConsumerTests:
         worktree = HERE.parent / 'scripts/worktree'
         with patch.object(sys, 'path', [str(worktree), *sys.path]):
             from lean_artifact_inventory import Module, PROJECT_BUILD
+            from lean_generation_facets import utility_inputs
             from lean_module_shards import pack_shard, report_paths, restore_shard
         executed = ('from lean_generation_facets import materialize; '
                     'from pathlib import Path; '
@@ -128,8 +129,14 @@ class NativeReportConsumerTests:
         self.assertTrue((self.root / '.lake/build/lib/lean/External.olean').is_file())
         self.copy('src/OmegaChecks/Portable/ArtifactHashes.lean')
         build = self.root / PROJECT_BUILD
-        modules = {name: Module('trureturing', Path(*name.split('.')).with_suffix('.lean'), Path('.'),
-                                report=True) for name in ('Fixture', 'D5.Alone')}
+        names = ('Fixture', 'D5.Alone')
+        with patch.dict(os.environ, environment):
+            utilities = utility_inputs(self.root, names)
+        modules = {}
+        for name in names:
+            source = Path(*name.split('.')).with_suffix('.lean')
+            modules[name] = Module('trureturing', source, Path('.'), report=True,
+                                   report_utility=utilities.get(source.as_posix()))
         artifacts = [build / path for name in modules for path in report_paths(name)]
         archive = self.root / 'module-shard.tar.gz'
         with patch.dict(os.environ, environment):

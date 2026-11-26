@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ['0', '1', '2', '3', architecture, templates, judge, recovery, scoped, modules, remaining, frozen]
+        shard: ['0', '1', '2', '3', architecture, templates, judge, recovery, scoped, modules, remaining, frozen, frozen-synthetic]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -38,7 +38,8 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: the-omega-institute/trureturing
-          ref: 05dcd3720f108632012396475fa353ba3089d3c1
+          # The synthetic owner-collision fixture uses the single-backend consumer.
+          ref: ${{ matrix.shard == 'frozen-synthetic' && '05dcd3720f108632012396475fa353ba3089d3c1' || '065b50d6c18acfdbdfe42f5557b9f46536d0e354' }}
           path: fixture
           persist-credentials: false
       - name: Install the candidate archive in the pinned consumer

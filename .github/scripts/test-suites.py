@@ -104,6 +104,13 @@ def contract(shard):
         test_project(ARCHITECTURE_PROJECT)
     elif shard == "frozen":
         install_lean()
+        sys.path.insert(0, str(Path("src/OmegaChecks").resolve()))
+        from test_frozen_measurement import MIXED, OFFICIAL, PRIVATE_INDUCTIVE, TETRAHEDRON
+        prepare_mathlib([MIXED, OFFICIAL, PRIVATE_INDUCTIVE, TETRAHEDRON, "OmegaChecks.Audit"], False)
+        check("make", "lean-report-prepare", "LEAN_TARGETS=" + TETRAHEDRON)
+        check(sys.executable, "-B", "src/OmegaChecks/test_frozen_measurement.py")
+    elif shard == "frozen-synthetic":
+        install_lean()
         check("lake", "exe", "cache", "get", "Mathlib.Data.Nat.Prime.Basic")
         check(sys.executable, "-B", "tools/tests/StrataLint.Lean.Tests/FrozenDependencies/run.py")
     elif shard in LEAN_CLASSES or shard == "remaining":

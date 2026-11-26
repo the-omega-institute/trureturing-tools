@@ -438,6 +438,49 @@ private def runBatch (pkg : Package) (requests : Array (String × Array String))
   finally
     removeFileIfExists requestFile
 
+private def publishGroup (group : Array PreparedArtifact) : JobM Unit := do
+  for request in group do
+    let some mod := (← getWorkspace).findModule? request.args[1]!.toName
+      | error s!"registered report module is not in the Lake workspace: {request.args[1]!}"
+    discard <| commitPendingReport mod request
+
+private def nativeRequests (group : Array PreparedArtifact) : Array (String × Array String) :=
+  group.map fun request => ("produce", request.args.set! 5 (request.file.addExtension "pending").toString)
+
+private def produceGroup (pkg : Package) (group : Array PreparedArtifact) : JobM Unit := do
+  runBatch pkg (nativeRequests group)
+  publishGroup group
+
+private def producePair (pkg : Package) (first second : Array PreparedArtifact) : JobM Unit := do
+  -- If preparing the lookahead fails, preserve the earlier group's complete transaction.
+  try
+    for request in second do request.prepareProduction
+  catch err =>
+    produceGroup pkg first
+    throw err
+  let env := (← getWorkspace).augmentedEnvVars
+  IO.FS.withTempDir fun temporary => do
+    let request := temporary / "groups.json"
+    let groups := #[first, second]
+    IO.FS.writeFile request (Lean.toJson (groups.map nativeRequests)).compress
+    let command ← nativeCommand pkg #["windows", request.toString]
+    let child ← IO.Process.spawn { command with env, stdin := .piped, stdout := .piped }
+    let code ← try
+      for index in [:groups.size] do
+        let ready ← child.stdout.getLine
+        unless ready == s!"ready {index}\n" do
+          error s!"native report group {index} did not complete"
+        publishGroup groups[index]!
+        child.stdin.putStrLn s!"committed {index}"
+        child.stdin.flush
+      child.wait
+    catch err =>
+      if (← child.tryWait).isNone then
+        child.kill
+        discard child.wait
+      throw err
+    unless code == 0 do error s!"native report coordinator exited with code {code}"
+
 -- Combine already-fetched jobs in short folds and then a balanced tree.
 private def foldModuleJobs {α β : Type} (jobs : Array (Job α))
     (leaf : Array (Job α) → Job β) (join : Job β → Job β → Job β) : Job β := Id.run do
@@ -560,24 +603,25 @@ private def collectNativeReports (pkg : Package) (config : Json) (names : Array 
     try observePhase "lake-source-whitelists" "start" catch _ => pure ()
     let requests := (artifacts.filter fun request =>
       request.artifact?.isNone).qsort fun a b => a.args[1]! < b.args[1]!
-    -- Keep bounded native batches, committing each successful chunk before
-    -- starting the next. Compiler/projection preparation above is complete.
-    let mut start := 0
-    while start < requests.size do
+    let workers := (← IO.getEnv "STRATALINT_NATIVE_REPORT_WORKERS").getD "1"
+    unless workers == "1" || workers == "2" do
+      error "STRATALINT_NATIVE_REPORT_WORKERS requires 1 or 2"
+    let mut groups := #[]
+    for start in [0:requests.size:100] do
       let chunk := requests.extract start (min (start + 100) requests.size)
-      -- Native production separates raw and judged inputs within each window.
-      -- Commit each such chunk before the next native compiler process starts.
       for judged in #[false, true] do
         let group := chunk.filter fun request => request.judged == judged
-        unless group.isEmpty do
-          for request in group do request.prepareProduction
-          runBatch pkg (group.map fun request =>
-            ("produce", request.args.set! 5 (request.file.addExtension "pending").toString))
-          for request in group do
-            let some mod := (← getWorkspace).findModule? request.args[1]!.toName
-              | error s!"registered report module is not in the Lake workspace: {request.args[1]!}"
-            discard <| commitPendingReport mod request
-      start := start + chunk.size
+        unless group.isEmpty do groups := groups.push group
+    let width := if workers == "2" then 2 else 1
+    let mut index := 0
+    while index < groups.size do
+      let first := groups[index]!
+      for request in first do request.prepareProduction
+      if width == 2 && index + 1 < groups.size then
+        producePair pkg first groups[index + 1]!
+      else
+        produceGroup pkg first
+      index := index + width
     try observePhase "lake-source-whitelists" "finish" catch _ => pure ()
   let batch ← registerJob "Inspector native production batch" batch
   reportState.batch.set (some (members, batch))
