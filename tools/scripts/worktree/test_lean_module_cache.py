@@ -3,6 +3,7 @@
 from dataclasses import replace
 import hashlib
 import io
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import json
@@ -188,7 +189,7 @@ class ModuleReleases(unittest.TestCase):
         self.assertNotEqual(first['shards']['D5']['sha256'], second['shards']['D5']['sha256'])
         self.assertEqual(self.workers(self.plan(second)), [])
 
-    def test_omega_backends_share_module_identity_and_restore_together(self):
+    def omega_fixture(self):
         for name in ('OmegaInit', 'OmegaMathlib', 'OmegaChecks'):
             with self.cfg.open('a') as config:
                 config.write(f'[[lean_lib]]\nname = "{name}"\nsrcDir = "src"\n')
@@ -217,6 +218,8 @@ def main : IO Unit := do
 
         def layout(strict_backend, with_reg, common_dir=None):
             self.assertFalse(with_reg)
+            if not strict_backend and common_dir is None:
+                return ['lake'], {'': self.root / PROJECT_BUILD / 'lib/lean'}
             label = 'omega-common' if common_dir else 'omega-strict'
             source = common_dir or 'strict'
             text = self.cfg.read_text()
@@ -236,16 +239,22 @@ def main : IO Unit := do
         strict_api = SimpleNamespace(ROOT=self.root.resolve(), COMMON_SRC=common, lake_layout=layout)
         portable_api = SimpleNamespace(ROOT=self.root.resolve(), derived_facades=derived_facades,
                                        output=lambda *args: self.lake(*args[1:]).stdout)
-        with patch.object(cache.importlib, 'import_module', side_effect=lambda name: {
-            'strict_lake': strict_api, 'portable': portable_api}[name]):
-            plan = self.plan()
-            modules, _ = cache.checkout_targets(self.root)
-            self.assertEqual(modules['OmegaMathlib'].extra_builds, (Path('omega-strict'), Path('omega-common')))
-            self.assertEqual(modules['D5.A'].extra_builds, (Path('omega-strict'),))
-            self.assertEqual(modules['D5.B'].extra_builds, ())
-            self.assertTrue({'OmegaInit', 'OmegaMathlib', 'OmegaChecks.Portable.Client'} <= plan['targets'].keys())
-            self.workers(plan)
-            index = cache.finish(plan, self.remote)
+        self.enterContext(patch.object(cache.importlib, 'import_module', side_effect=lambda name: {
+            'strict_lake': strict_api, 'portable': portable_api}[name]))
+        return portable_api
+
+    def test_omega_backends_share_module_identity_and_restore_together(self):
+        self.omega_fixture()
+        strict = self.root / 'strict'
+        checks = self.root / 'src/OmegaChecks'
+        plan = self.plan()
+        modules, _ = cache.checkout_targets(self.root)
+        self.assertEqual(modules['OmegaMathlib'].extra_builds, (Path('omega-strict'), Path('omega-common')))
+        self.assertEqual(modules['D5.A'].extra_builds, (Path('omega-strict'),))
+        self.assertEqual(modules['D5.B'].extra_builds, ())
+        self.assertTrue({'OmegaInit', 'OmegaMathlib', 'OmegaChecks.Portable.Client'} <= plan['targets'].keys())
+        self.workers(plan)
+        index = cache.finish(plan, self.remote)
         self.assertFalse(self.plan(index)['lanes'])
         build = self.root / PROJECT_BUILD
         paths = ['lib/lean/OmegaInit.olean', 'omega-strict/lib/lean/OmegaInit.olean',
@@ -356,6 +365,75 @@ def main : IO Unit := do
         self.assertNotIn('D5.B', changed())
         (checks / 'strict_lake.py').write_text('# changed strict configuration\n')
         self.assertTrue({'OmegaInit', 'OmegaMathlib', 'D5.A', 'D5.C'} <= changed())
+
+    def test_compiled_backend_selection_survives_scoped_cache_and_marker_removal(self):
+        api = self.omega_fixture()
+        with self.cfg.open('a') as config:
+            config.write('[[lean_lib]]\nname = "OmegaBuild"\nsrcDir = "src"\n')
+        name = 'OmegaBuild.Commands'
+        source = Path('src/OmegaBuild/Commands.lean')
+        self.modules[name] = Module('trureturing', source, Path('.'))
+        (self.root / source).parent.mkdir(parents=True)
+        (self.root / source).write_text('def commandProvider := true\n')
+        for reader_name, code in [('OmegaBuild.Plan', 'import OmegaBuild.Parts'),
+                                  ('OmegaBuild.Parts', 'def planSetting := 1')]:
+            source = Path('src', *reader_name.split('.')).with_suffix('.lean')
+            self.modules[reader_name] = Module('trureturing', source, Path('.'))
+            (self.root / source).write_text(code + '\n')
+        marked = self.root / 'D5/A.lean'
+        marked.write_text('import OmegaBuild.Commands\nimport OmegaMathlib\ndef valueA := omegaValue\n')
+        (self.root / 'D5/B.lean').write_text('import OmegaBuild.Commands\ndef valueB := commandProvider\n')
+        (self.root / 'src/OmegaChecks/Portable/Client.lean').write_text('import D5.A\ndef portable := valueA\n')
+        reasons = {'D5.A': ['D5.A'], 'D5.C': ['D5.C', 'D5.A'],
+                   'OmegaChecks.Portable.Client': ['OmegaChecks.Portable.Client', 'D5.A']}
+        read = set()
+
+        def backend_plan(search_path, names):
+            for module in names:
+                artifact = Path(*module.split('.')).with_suffix('.olean')
+                self.assertTrue(any((Path(d) / artifact).is_file() for d in search_path.split(os.pathsep)))
+            read.update(names)
+            return {'mathlibOnly': {n: reasons[n] for n in names if n in reasons}}
+
+        api.backend_plan = backend_plan
+        plan = self.plan()
+        self.assertFalse(read)
+        self.workers(plan)
+        index = cache.finish(plan, self.remote)
+        self.assertEqual(read, set(reasons) | {'D5.B'})
+        build = self.root / PROJECT_BUILD
+        shutil.rmtree(build)
+        read.clear()
+        result = cache.restore(self.root, index, ['D5.C', 'D5.B', 'OmegaChecks.Portable.Client'],
+                               self.remote, build)
+        self.assertGreater(result['restored'], 0)
+        self.assertFalse(read)
+        for n in reasons:
+            base = Path('lib/lean', *n.split('.')).with_suffix('.olean')
+            self.assertTrue((build / base).is_file())
+            self.assertFalse((build / 'omega-strict' / base).exists())
+            self.assertFalse((build / 'omega-common' / base).exists())
+        self.assertTrue((build / 'omega-strict/lib/lean/D5/B.olean').is_file())
+        for filename in ('src/OmegaBuild/Plan.lean', 'src/OmegaBuild/Parts.lean', 'src/OmegaChecks/portable.py'):
+            reader_file = self.root / filename
+            original = reader_file.read_bytes()
+            reader_file.write_bytes(original + b'\n')
+            changed = self.plan(index)
+            for name in set(reasons) | {'D5.B'}:
+                self.assertNotEqual(changed['targets'][name]['key'], plan['targets'][name]['key'])
+            stale = self.root / ('stale-' + reader_file.name)
+            cache.restore(self.root, index, ['D5.C'], self.remote, stale)
+            self.assertFalse((stale / 'lib/lean/D5/C.olean').exists())
+            reader_file.write_bytes(original)
+        self.source = 'b' * 40
+        marked.write_text(marked.read_text().replace('def valueA', '-- removed marker\ndef valueA'))
+        reasons.clear()
+        next_plan = self.plan(index)
+        self.assertNotEqual(plan['targets']['D5.C']['key'], next_plan['targets']['D5.C']['key'])
+        self.workers(next_plan)
+        for n in ('D5.A', 'D5.C', 'OmegaChecks.Portable.Client'):
+            self.assertTrue((build / 'omega-strict/lib/lean' / Path(*n.split('.')).with_suffix('.olean')).exists())
+        self.assertTrue((build / 'omega-common/lib/lean/OmegaChecks/Portable/Client.olean').exists())
 
     def test_new_names_use_the_mathlib_release_and_inherit_original_addresses(self):
         manifest = self.root / 'lake-manifest.json'

@@ -9,13 +9,14 @@ namespace StrataLint.Cli;
 
 internal static class FrozenDependencyMeasurement
 {
-    internal delegate void Measure(string root, IReadOnlyDictionary<RepoPath, LeanFileReport> reports,
+    internal delegate IReadOnlySet<RepoPath> Measure(string root, IReadOnlyDictionary<RepoPath, LeanFileReport> reports,
         IDictionary<RepoPath, FrozenStateRecord> records);
 
-    internal static void Attach(string root, IReadOnlyDictionary<RepoPath, LeanFileReport> reports,
+    internal static IReadOnlySet<RepoPath> Attach(string root, IReadOnlyDictionary<RepoPath, LeanFileReport> reports,
         IDictionary<RepoPath, FrozenStateRecord> records)
     {
-        if (reports.Count == 0) return;
+        var mathlibOnly = new HashSet<RepoPath>();
+        if (reports.Count == 0) return mathlibOnly;
         var temporary = Directory.CreateTempSubdirectory("frozen-dependencies-");
         var updated = new Dictionary<RepoPath, FrozenStateRecord>();
         try
@@ -35,10 +36,11 @@ internal static class FrozenDependencyMeasurement
                         + Encoding.UTF8.GetString(result.StandardError) + Encoding.UTF8.GetString(result.StandardOutput));
 
                 using var document = JsonDocument.Parse(File.ReadAllBytes(output));
-                foreach (var (path, record) in ReadResponse(document.RootElement, expected, reports, records))
+                foreach (var (path, record) in ReadResponse(document.RootElement, expected, reports, records, mathlibOnly))
                     updated.Add(path, record);
             }
             foreach (var (path, record) in updated) records[path] = record;
+            return mathlibOnly;
         }
         finally
         {
@@ -48,7 +50,7 @@ internal static class FrozenDependencyMeasurement
 
     private static Dictionary<RepoPath, FrozenStateRecord> ReadResponse(JsonElement response,
         Dictionary<string, RepoPath> expected, IReadOnlyDictionary<RepoPath, LeanFileReport> reports,
-        IDictionary<RepoPath, FrozenStateRecord> records)
+        IDictionary<RepoPath, FrozenStateRecord> records, HashSet<RepoPath> mathlibOnly)
     {
         var updated = new Dictionary<RepoPath, FrozenStateRecord>();
         foreach (var module in response.EnumerateArray())
@@ -61,6 +63,12 @@ internal static class FrozenDependencyMeasurement
                 || eligibility.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
                 throw new FormatException($"compiled declaration measurement requires strictEligible: {name}");
             var strictEligible = eligibility.GetBoolean();
+            if (module.TryGetProperty("mathlibOnly", out var reason))
+            {
+                if (strictEligible || !ValidSelectionPath(reason, name, reports[path].Imports))
+                    throw new FormatException($"invalid compiled mathlibOnly path for {name}");
+                mathlibOnly.Add(path);
+            }
             var declarations = reports[path].Declarations
                 .ToDictionary(static declaration => (declaration.NameKey, declaration.Kind));
             var measured = new Dictionary<(string, string), FrozenDeclaration>();
@@ -101,6 +109,21 @@ internal static class FrozenDependencyMeasurement
         if (expected.Count != 0)
             throw new FormatException("compiled declaration measurement is missing modules: " + string.Join(", ", expected.Keys));
         return updated;
+    }
+
+    private static bool ValidSelectionPath(JsonElement reason, string module, ImmutableArray<string> imports)
+    {
+        if (reason.ValueKind != JsonValueKind.Array || reason.GetArrayLength() == 0
+            || reason[0].ValueKind != JsonValueKind.String || reason[0].GetString() != module)
+            return false;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in reason.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.String || item.GetString() is not { } name
+                || name.Split('.').Any(string.IsNullOrWhiteSpace) || name.Any(char.IsControl) || !seen.Add(name))
+                return false;
+        }
+        return reason.GetArrayLength() == 1 || imports.Contains(reason[1].GetString()!, StringComparer.Ordinal);
     }
 
     private static void RequireUniqueProperties(JsonElement element)
