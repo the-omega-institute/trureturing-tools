@@ -181,8 +181,10 @@ class ParallelComputeTests(unittest.TestCase):
         import ci_parallel_compute as parallel
         active = [self.job(0, None, (50, 75)), self.job(1, None, (70, None), active=True)]
         self.assertEqual(65, parallel.allowance(active, 2, 100, 10, 85))
-        self.assertEqual(25, parallel.allowance(active[:1], 2, 100, 10, 85))
-        self.assertEqual(0, parallel.allowance(active[:1], 2, 30, 10, 85))
+        self.assertEqual(74, parallel.allowance(active[:1], 2, 100, 10, 85))
+        self.assertEqual(0, parallel.allowance(active[:1], 2, 20, 10, 85))
+        queued = dict(name="current / Lean report batch 2", status="queued", started_at=None)
+        self.assertEqual(65, parallel.allowance([*active, queued], 3, 100, 10, 85))
 
     def test_join_rejects_missing_duplicate_failed_and_incomplete_batches(self):
         import ci_parallel_compute as parallel

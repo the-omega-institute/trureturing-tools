@@ -37,29 +37,26 @@ def union_seconds(intervals):
     return elapsed
 
 
-def intervals(job, epoch, now, final):
-    """Bound unfinished work from its last confirmed preparation or compute step."""
+def intervals(job, now, final):
+    """Read the charged steps from the service's snapshot of this batch."""
     if job is None or not job.get("started_at"):
         if final:
             raise ValueError("missing Lean batch")
-        return [(epoch, now)]
+        return []
     if final and job.get("conclusion") != "success":
         raise ValueError("Lean batch did not succeed: " + job["name"])
-    # A previous successful attempt can legitimately predate a freshly running sibling.
-    frontier = timestamp(job["started_at"])
-    if frontier > now:
-        raise ValueError("job starts in the future")
     billed = []
     finished = set()
+    seen = set()
     for step in job.get("steps", []):
         name = step["name"]
-        if name in (JUDGE, CHECK) and name in finished:
+        if name not in (JUDGE, CHECK):
+            continue
+        if name in seen:
             raise ValueError("duplicate batch computation step")
-        if step.get("status") != "completed":
-            if name in (JUDGE, CHECK) and step.get("started_at"):
-                frontier = timestamp(step["started_at"])
-            break
-        if name in (JUDGE, CHECK):
+        seen.add(name)
+        status = step["status"]
+        if status == "completed":
             result = step.get("conclusion")
             if result == "success" or (not final and result not in ("skipped", None)):
                 # The service reports integer UTC seconds. Round completion outward.
@@ -67,12 +64,12 @@ def intervals(job, epoch, now, final):
             elif result != "skipped" or name != JUDGE:
                 raise ValueError("missing or unsuccessful batch computation: " + name)
             finished.add(name)
-        if step.get("completed_at"):
-            frontier = max(frontier, timestamp(step["completed_at"]))
-    if finished != {JUDGE, CHECK}:
-        if final:
-            raise ValueError("incomplete Lean batch compute evidence")
-        billed.append((min(frontier, now), now))
+        elif status == "in_progress":
+            billed.append((timestamp(step["started_at"]), now))
+        elif status not in ("queued", "pending", "waiting"):
+            raise ValueError("unrecognized batch step status: " + status)
+    if final and finished != {JUDGE, CHECK}:
+        raise ValueError("incomplete Lean batch compute evidence")
     return billed
 
 
@@ -90,7 +87,7 @@ def allowance(jobs, count, remaining, epoch, now, final=False):
         rows[batch] = job
     billed = []
     for i in range(count):
-        billed.extend(intervals(rows.get(i), epoch, now, final))
+        billed.extend(intervals(rows.get(i), now, final))
     return max(0, ci_compute.current_remainder(remaining) - union_seconds(billed))
 
 
