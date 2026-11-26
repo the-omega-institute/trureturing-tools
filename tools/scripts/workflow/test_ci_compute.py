@@ -150,5 +150,56 @@ class ComputeBudgetTests(unittest.TestCase):
                 self.assertIn("--no-restore", args)
 
 
+class ParallelComputeTests(unittest.TestCase):
+    @staticmethod
+    def job(batch, judge, check, active=False):
+        from datetime import datetime, timezone
+
+        def point(second):
+            return datetime.fromtimestamp(second, timezone.utc).isoformat() if second is not None else None
+
+        def step(name, bounds):
+            if not bounds:
+                return dict(name=name, status="completed", conclusion="skipped", started_at=None, completed_at=None)
+            start, end = bounds
+            return dict(name=name, status="completed" if end is not None else "in_progress",
+                        conclusion="success" if end is not None else None,
+                        started_at=point(start), completed_at=point(end))
+
+        return dict(name=f"current / Lean report batch {batch}", started_at=point(10),
+                    conclusion=None if active else "success",
+                    steps=[step("Build the batch judge", judge), step("Check the Lean batch", check)])
+
+    def test_shared_parallel_clock_bills_compute_union_and_excludes_preparation(self):
+        import ci_parallel_compute as parallel
+        jobs = [self.job(0, (20, 23), (50, 59)), self.job(1, None, (55, 80))]
+        self.assertEqual(65, parallel.allowance(jobs, 2, 100, 10, 110, final=True))
+        self.assertEqual(64, parallel.allowance([jobs[0], self.job(1, None, (70, 91))],
+                                                2, 100, 10, 110, final=True))
+
+    def test_active_workers_subtract_previous_batches_and_are_bounded_together(self):
+        import ci_parallel_compute as parallel
+        active = [self.job(0, None, (50, 75)), self.job(1, None, (70, None), active=True)]
+        self.assertEqual(65, parallel.allowance(active, 2, 100, 10, 85))
+        self.assertEqual(74, parallel.allowance(active[:1], 2, 100, 10, 85))
+        self.assertEqual(0, parallel.allowance(active[:1], 2, 20, 10, 85))
+        queued = dict(name="current / Lean report batch 2", status="queued", started_at=None)
+        self.assertEqual(65, parallel.allowance([*active, queued], 3, 100, 10, 85))
+
+    def test_join_rejects_missing_duplicate_failed_and_incomplete_batches(self):
+        import ci_parallel_compute as parallel
+        job = self.job(0, None, (30, 45))
+        incomplete = dict(job, steps=job["steps"][:1])
+        for jobs in ([], [job, job], [dict(job, conclusion="failure")], [incomplete]):
+            with self.subTest(jobs=jobs), self.assertRaises(ValueError):
+                parallel.allowance(jobs, 1, 100, 5, 90, final=True)
+
+    def test_prior_completed_attempt_is_charged_without_inter_attempt_idle_time(self):
+        import ci_parallel_compute as parallel
+        older = self.job(0, None, (20, 39))
+        later = self.job(1, None, (86000, 86009))
+        self.assertEqual(70, parallel.allowance([later, older], 2, 100, 85990, 86100, final=True))
+
+
 if __name__ == "__main__":
     unittest.main()
