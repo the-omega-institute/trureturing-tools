@@ -463,6 +463,24 @@ class CheckTests(unittest.TestCase):
 
 
 class ScopedReportTests(unittest.TestCase):
+    def test_new_mathematical_modules_compile_serially_before_the_batch(self):
+        import ci_pr_lean as lean
+
+        selection = {"new_d5_modules": ["D5.Left", "D5.Right"],
+                     "programs": ["Reg.Spec"], "targets": ["Reg.Spec"], "paths": []}
+        environment = {"LEAN_NUM_THREADS": "2"}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(lean, "build_environment", return_value=environment), \
+                patch.object(lean, "build_modules") as build, \
+                patch.object(lean, "check_batch", side_effect=RuntimeError("report failed")):
+            with self.assertRaisesRegex(RuntimeError, "report failed"):
+                lean.write_batch(Path(directory), 0, selection, {})
+            self.assertFalse((Path(directory) / "batch-0").exists())
+        self.assertEqual([entry.args for entry in build.call_args_list], [
+            (["D5.Left", "D5.Right"], {"LEAN_NUM_THREADS": "1"}),
+            (["Reg.Spec"], {"LEAN_NUM_THREADS": "2"}),
+        ])
+
     def test_cached_scope_uses_the_planned_report_and_program_roots(self):
         import ci_pr_lean as lean
 
