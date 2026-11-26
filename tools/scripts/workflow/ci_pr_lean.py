@@ -1,6 +1,7 @@
 """Build scoped Lean evidence and check the candidate and its selected delta."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -73,6 +74,60 @@ def report_cache_inputs(roots):
         yield from json.loads(output)
 
 
+def build_environment(programs, targets):
+    environment = dict(os.environ, FULL_BUILD="0")
+    # Hosted current restores the judge for this source key or builds it on a fresh runner.
+    if ((programs or targets) and environment.get("GITHUB_EVENT_NAME") in ("pull_request", "push")
+            and not environment.get("STRATALINT_LEAN_PRODUCER_DLL")):
+        producer = subprocess.run(["bash", "tools/scripts/workflow/judge-lean-producer.sh",
+                                   str(Path(CLI).parent)], stdout=subprocess.PIPE, text=True, check=True)
+        environment["STRATALINT_LEAN_PRODUCER_DLL"] = producer.stdout.strip()
+    return environment
+
+
+def check_programs(programs, environment):
+    if programs:
+        subprocess.run(["bash", "tools/scripts/worktree/lean-cache-run.sh", "lake",
+                        "-d", "tools/lean-inspector-reg", "build",
+                        *["+" + module for module in programs]], env=environment, check=True)
+    internal = [name for name in programs if Path("src", *name.split(".")).with_suffix(".lean").is_file()]
+    if internal and tomllib.loads(Path("lakefile.toml").read_text()).get("testDriver"):
+        subprocess.run(["bash", "tools/scripts/worktree/lean-cache-run.sh", "lake", "test", "--", *internal],
+                       env=environment, check=True)
+
+
+def check_batch(batch, scratch, targets, selected_paths, environment):
+    report = batch / "scoped-lean-report.json"
+    pinned_targets = "LEAN_TARGETS=" + " ".join(targets)
+    subprocess.run(["make", "lean-report-prepare", pinned_targets], env=environment, check=True)
+    subprocess.run(["make", "lean-report-scoped", pinned_targets],
+                   env=dict(environment, LEAN_REPORT=str(report), LEAN_NUM_THREADS="1"), check=True)
+    roots = scratch / "roots"
+    documents = scratch / "documents"
+    write_paths(roots, [name.replace(".", "/") + ".lean" for name in targets])
+    write_paths(documents, selected_paths)
+    scribe_environment = os.environ.copy()
+    if ("DOTNET_GCConserveMemory" not in scribe_environment
+            and "COMPlus_GCConserveMemory" not in scribe_environment):
+        scribe_environment["DOTNET_GCConserveMemory"] = "9"
+    subprocess.run([*SCRIBE, "content-check", "--scoped", "--report", str(report),
+                    "--targets-from", str(roots), "--paths-from", str(documents)],
+                   env=scribe_environment, check=True)
+    return report
+
+
+def check_admission(directory, manifest, changed, base, protected_base, reports):
+    report_list = directory / "reports"
+    write_paths(report_list, [str(report) for report in reports])
+    arguments = ["--changed-paths-from", str(manifest), "--scoped-reports-from", str(report_list)]
+    current = subprocess.run(["dotnet", CLI, "check-current", *arguments,
+                              *(["--scope-base", base] if base and "Meta/tools-release.json" in changed else [])])
+    if protected_base is None:
+        return current.returncode
+    delta = subprocess.run(["dotnet", CLI, "check-delta", "--protected-base", protected_base, *arguments])
+    return current.returncode or (0 if delta.returncode == 3 else delta.returncode)
+
+
 def check(manifest, protected_base=None, scope_file=None, base=None):
     base = base or protected_base
     changed = read_changed(manifest)
@@ -84,52 +139,112 @@ def check(manifest, protected_base=None, scope_file=None, base=None):
         programs, targets = scope["programs"], scope["targets"]
         scope_modules(scope)
         print(f"CI_PR_LEAN report_targets={len(targets)} program_targets={len(programs)}", flush=True)
-        environment = dict(os.environ, FULL_BUILD="0")
-        # Hosted current restores the judge for this source key or builds it on a fresh runner.
-        if ((programs or targets) and environment.get("GITHUB_EVENT_NAME") in ("pull_request", "push")
-                and not environment.get("STRATALINT_LEAN_PRODUCER_DLL")):
-            producer = subprocess.run(["bash", "tools/scripts/workflow/judge-lean-producer.sh",
-                                       str(Path(CLI).parent)], stdout=subprocess.PIPE, text=True, check=True)
-            environment["STRATALINT_LEAN_PRODUCER_DLL"] = producer.stdout.strip()
-        if programs:
-            subprocess.run(["bash", "tools/scripts/worktree/lean-cache-run.sh", "lake",
-                            "-d", "tools/lean-inspector-reg", "build",
-                            *["+" + module for module in programs]], env=environment, check=True)
-        internal = [name for name in programs if Path("src", *name.split(".")).with_suffix(".lean").is_file()]
-        if internal and tomllib.loads(Path("lakefile.toml").read_text()).get("testDriver"):
-            subprocess.run(["bash", "tools/scripts/worktree/lean-cache-run.sh", "lake", "test", "--", *internal],
-                           env=environment, check=True)
+        environment = build_environment(programs, targets)
+        check_programs(programs, environment)
         reports = []
         for index, (targets, selected_paths) in enumerate(report_batches(scope)):
             batch = directory / str(index)
             batch.mkdir()
-            report = batch / "scoped-lean-report.json"
-            pinned_targets = "LEAN_TARGETS=" + " ".join(targets)
-            subprocess.run(["make", "lean-report-prepare", pinned_targets], env=environment, check=True)
-            subprocess.run(["make", "lean-report-scoped", pinned_targets],
-                           env=dict(environment, LEAN_REPORT=str(report), LEAN_NUM_THREADS="1"), check=True)
-            reports.append(str(report))
-            roots = batch / "roots"
-            documents = batch / "documents"
-            write_paths(roots, [name.replace(".", "/") + ".lean" for name in targets])
-            write_paths(documents, selected_paths)
-            scribe_environment = os.environ.copy()
-            if ("DOTNET_GCConserveMemory" not in scribe_environment
-                    and "COMPlus_GCConserveMemory" not in scribe_environment):
-                scribe_environment["DOTNET_GCConserveMemory"] = "9"
-            subprocess.run([*SCRIBE, "content-check", "--scoped", "--report", str(report),
-                            "--targets-from", str(roots), "--paths-from", str(documents)],
-                           env=scribe_environment, check=True)
+            reports.append(check_batch(batch, batch, targets, selected_paths, environment))
+        return check_admission(directory, manifest, changed, base, protected_base, reports)
 
-        report_list = directory / "reports"
-        write_paths(report_list, reports)
-        arguments = ["--changed-paths-from", str(manifest), "--scoped-reports-from", str(report_list)]
-        current = subprocess.run(["dotnet", CLI, "check-current", *arguments,
-                                  *(["--scope-base", base] if base and "Meta/tools-release.json" in changed else [])])
-        if protected_base is None:
-            return current.returncode
-        delta = subprocess.run(["dotnet", CLI, "check-delta", "--protected-base", protected_base, *arguments])
-        return current.returncode or (0 if delta.returncode == 3 else delta.returncode)
+
+def file_hash(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def distributed_plan(scope):
+    scope_modules(scope)
+    batches = list(report_batches(scope))
+    if not scope["targets"]:
+        return batches
+    if {name for targets, _ in batches for name in targets} != set(scope["targets"]):
+        raise ValueError("report batches do not cover the planned modules")
+    documents = [name for _, paths in batches for name in paths]
+    if sorted(documents) != sorted(scope["paths"]):
+        raise ValueError("report batches do not cover the planned Scribe paths")
+    return batches
+
+
+def batch_scope(scope, batches, index):
+    if not 0 <= index < len(batches):
+        raise ValueError(f"report batch {index} is outside the plan")
+    targets, paths = batches[index]
+    return dict(scope, targets=targets, paths=paths, programs=scope["programs"] if index == 0 else [],
+                definitions={p: scope["definitions"][p] for p in paths if p in scope["definitions"]})
+
+
+def batch_receipt(directory, plan_identity, index):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lean-inspector"))
+    from publication import SUFFIXES
+
+    names = ["scoped-lean-report.json" + suffix for suffix in SUFFIXES]
+    return dict(schema=1, **plan_identity, batch=index, files={name: file_hash(directory / name) for name in names})
+
+
+def write_batch(root, index, selected, identity):
+    destination = root / f"batch-{index}"
+    root.mkdir(parents=True, exist_ok=True)
+    if destination.exists() or destination.is_symlink():
+        raise ValueError(f"batch artifact already exists: {destination.name}")
+    environment = build_environment(selected["programs"], selected["targets"])
+    check_programs(selected["programs"], environment)
+    with tempfile.TemporaryDirectory(prefix=".batch-", dir=root) as temporary:
+        scratch = Path(temporary)
+        check_batch(scratch, scratch, selected["targets"], selected["paths"], environment)
+        receipt = batch_receipt(scratch, identity, index)
+        staged = scratch / "bundle"
+        staged.mkdir()
+        for name in receipt["files"]:
+            (scratch / name).rename(staged / name)
+        (staged / "receipt.json").write_text(json.dumps(receipt))
+        staged.rename(destination)
+
+
+
+def read_batches(root, count, identity):
+    if {entry.name for entry in root.iterdir()} != {f"batch-{i}" for i in range(count)}:
+        raise ValueError("incomplete or unexpected report batch artifacts")
+    reports = []
+    for index in range(count):
+        directory = root / f"batch-{index}"
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError(f"invalid directory for report batch {index}")
+        if any(path.is_symlink() or not path.is_file() for path in directory.iterdir()):
+            raise ValueError(f"invalid file in report batch {index}")
+        expected = batch_receipt(directory, identity, index)
+        if {path.name for path in directory.iterdir()} != {"receipt.json", *expected["files"]}:
+            raise ValueError(f"unexpected files in report batch {index}")
+        if json.loads((directory / "receipt.json").read_text()) != expected:
+            raise ValueError(f"report batch {index} does not match this plan and checkout")
+        reports.append(directory / "scoped-lean-report.json")
+    return reports
+
+
+def distributed(args, scope):
+    batches = distributed_plan(scope)
+    if args.batch_matrix:
+        print(json.dumps({"include": [{"batch": i} for i in range(len(batches))]}))
+        return 0
+    changed = read_changed(args.manifest)
+    if changed is None:
+        raise ValueError("missing changed-path manifest")
+    if not batches:
+        raise ValueError("no reports in the supplied batch plan")
+    head = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD"], text=True).strip()
+    identity = dict(head=head, run=os.environ.get("GITHUB_RUN_ID", ""), plan=file_hash(args.read_plan),
+                    manifest=file_hash(args.manifest))
+    root = args.artifacts.absolute()
+    if root.is_symlink():
+        raise ValueError("batch artifact root is a symlink")
+    if args.batch is not None:
+        write_batch(root, args.batch, batch_scope(scope, batches, args.batch), identity)
+        return 0
+    reports = read_batches(root, len(batches), identity)
+    with tempfile.TemporaryDirectory(prefix="ci-pr-lean-") as temporary:
+        return check_admission(Path(temporary), args.manifest, changed, args.base or args.protected_base,
+                               args.protected_base, reports)
 
 
 if __name__ == "__main__":
@@ -141,13 +256,30 @@ if __name__ == "__main__":
     modes.add_argument("--write-plan", type=Path)
     modes.add_argument("--read-plan", type=Path)
     parser.add_argument("--cache-targets", action="store_true")
+    batches = parser.add_mutually_exclusive_group()
+    batches.add_argument("--batch-matrix", action="store_true")
+    batches.add_argument("--batch", type=int)
+    batches.add_argument("--finalize", action="store_true")
+    parser.add_argument("--artifacts", type=Path)
     args = parser.parse_args()
     try:
+        batch_mode = args.batch_matrix or args.batch is not None or args.finalize
+        if batch_mode and not args.read_plan:
+            parser.error("distributed reports require --read-plan")
+        if args.cache_targets and (args.batch_matrix or args.finalize):
+            parser.error("--cache-targets accepts only a batch index")
+        needs_artifacts = args.finalize or (args.batch is not None and not args.cache_targets)
+        if bool(args.artifacts) != needs_artifacts:
+            parser.error("--artifacts is required only for writing or finalizing report batches")
+        if batch_mode and not args.cache_targets:
+            sys.exit(distributed(args, json.loads(args.read_plan.read_text())))
         if args.cache_targets:
             if args.write_plan:
                 parser.error("--cache-targets cannot write a build plan")
             scope = (json.loads(args.read_plan.read_text()) if args.read_plan
                      else plan_scope(args.manifest, args.base or args.protected_base))
+            if args.batch is not None:
+                scope = batch_scope(scope, distributed_plan(scope), args.batch)
             modules = scope_modules(scope)
             if "cache_suites" in scope and (modules or scope["cache_suites"]):
                 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worktree"))

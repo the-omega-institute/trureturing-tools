@@ -90,6 +90,88 @@ class CheckTests(unittest.TestCase):
                                                       "--changed-paths-from", "changed"])
             self.assertTrue(execute.call_args.kwargs["delta"])
 
+    def test_report_workers_publish_only_after_scribe_and_finalize_in_plan_order(self):
+        import ci_pr_lean as lean
+        from types import SimpleNamespace
+        from contextlib import ExitStack
+
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            root = Path(temporary)
+            manifest = root / "changed"
+            contract.write_paths(manifest, ["some-file"])
+            plan = root / "plan"
+            scope = {"targets": ["D5.A", "D5.B"], "paths": ["A.scribe.cs"],
+                     "definitions": {"A.scribe.cs": ["D5.A"]}, "programs": ["Reg.Program"]}
+            plan.write_text(json.dumps(scope))
+            args = SimpleNamespace(batch_matrix=False, manifest=manifest, read_plan=plan, artifacts=root / "artifacts",
+                                   batch=None, base="b" * 40, protected_base="b" * 40)
+            stack.enter_context(patch.object(lean, "report_batches", return_value=[
+                (["D5.A"], ["A.scribe.cs"]), (["D5.B"], [])]))
+            stack.enter_context(patch.object(lean, "build_environment", return_value={}))
+            programs = stack.enter_context(patch.object(lean, "check_programs"))
+            history = []
+            current_exit, reject_scribe = 0, True
+
+            def execute(command, **options):
+                if command[:2] == ["make", "lean-report-scoped"]:
+                    output = Path(options["env"]["LEAN_REPORT"])
+                    (output.parent / (output.name + ".logs")).mkdir()
+                    for suffix in ("", ".sha256", ".materials.zip", ".input.attestation", ".provenance.json"):
+                        (output.parent / (output.name + suffix)).write_text(command[2])
+                if len(command) > 2 and command[2] == "content-check":
+                    paths = lambda flag: Path(command[command.index(flag) + 1]).read_bytes()
+                    history.append((paths("--targets-from"), paths("--paths-from")))
+                    if reject_scribe:
+                        raise subprocess.CalledProcessError(7, command)
+                if len(command) > 2 and command[2] in ("check-current", "check-delta"):
+                    listing = Path(command[command.index("--scoped-reports-from") + 1]).read_bytes()
+                    history.append((command[2], [Path(os.fsdecode(p)).parent.name for p in listing.split(b"\0") if p]))
+                    return subprocess.CompletedProcess(command, current_exit if command[2] == "check-current" else 3)
+                return subprocess.CompletedProcess(command, 0)
+            stack.enter_context(patch.object(lean.subprocess, "check_output", return_value="c" * 40))
+            stack.enter_context(patch.object(lean.subprocess, "run", side_effect=execute))
+
+            args.batch = 1
+            with self.assertRaises(subprocess.CalledProcessError):
+                lean.distributed(args, scope)
+            self.assertEqual(list(args.artifacts.iterdir()), [])
+            reject_scribe = False
+            lean.distributed(args, scope)
+            args.batch = None
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                lean.distributed(args, scope)
+            args.batch = 0
+            lean.distributed(args, scope)
+            args.batch = None
+            self.assertEqual(lean.distributed(args, scope), 0)
+            self.assertEqual([call.args[0] for call in programs.call_args_list], [[], [], ["Reg.Program"]])
+            self.assertEqual(history[:3], [(b"D5/B.lean\0", b""), (b"D5/B.lean\0", b""),
+                                          (b"D5/A.lean\0", b"A.scribe.cs\0")])
+            self.assertEqual(history[3:], [(name, ["batch-0", "batch-1"]) for name in ("check-current", "check-delta")])
+            current_exit = 1
+            self.assertEqual(lean.distributed(args, scope), 1)
+
+            batch = args.artifacts / "batch-1"
+            extra = batch / "extra"
+            extra.touch()
+            with self.assertRaisesRegex(ValueError, "unexpected files"):
+                lean.distributed(args, scope)
+            extra.unlink()
+            extra = args.artifacts / "batch-9"
+            extra.mkdir()
+            with self.assertRaisesRegex(ValueError, "unexpected report batch"):
+                lean.distributed(args, scope)
+            extra.rmdir()
+            with patch.dict(os.environ, GITHUB_RUN_ID="another-run"), self.assertRaisesRegex(ValueError, "does not match"):
+                lean.distributed(args, scope)
+            material = batch / "scoped-lean-report.json.materials.zip"
+            material.write_bytes(b"wrong")
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                lean.distributed(args, scope)
+            material.unlink()
+            with self.assertRaises(FileNotFoundError):
+                lean.distributed(args, scope)
+
     def test_admission_reuses_all_batches_and_runs_without_reports_for_source_changes(self):
         import ci_pr_lean
         cases = [([], [], "push", "", "", 0, 3, 0),
