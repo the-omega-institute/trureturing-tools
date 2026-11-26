@@ -197,9 +197,12 @@ module_facet report (mod : Module) : System.FilePath := withCurrPackage mod.pkg 
                         expected[path] = ('previous local ' + path.name).encode()
                         (dest / path).write_bytes(expected[path])
                 modules = dict(self.modules)
-                modules['Demo.A'] = replace(modules['Demo.A'], report=report_eligible)
+                modules['Demo.A'] = replace(modules['Demo.A'], report=report_eligible,
+                                            conditional_backends=True, extra_builds=(Path('omega-strict'),))
                 installed = restore_shard(self.archive, descriptor, names, modules, dest, root=self.root,
                                           compiler_only=['Demo.A'])
+                self.assertEqual(modules['Demo.A'].extra_builds, ())
+                self.assertEqual(modules['Demo.A'].report, report_eligible)
                 self.assertEqual(installed, set(names))
                 for name in names:
                     self.assertTrue((dest / f'lib/lean/Demo/{name[-1]}.olean').is_file())

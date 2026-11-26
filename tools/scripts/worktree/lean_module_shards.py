@@ -170,7 +170,7 @@ def verify_backend_hashes(root, build, modules, grouped, *, destination=None):
                 live = destination / trace
                 if not live.is_symlink() and live.is_file():
                     local_traces.append(live)
-        if not module.extra_builds:
+        if not (module.extra_builds or module.conditional_backends):
             continue
         for variant in compiler_variants(module):
             trace = compiler_path(name, variant, 'lib/lean', 'trace')
@@ -249,7 +249,7 @@ def pack_shard(root, modules, members, output, fingerprint):
                 raise ValueError('unsafe compiler artifact: ' + str(path))
             if file.is_file():
                 paths.add(path)
-                if module.extra_builds or path in reports:
+                if module.extra_builds or module.conditional_backends or path in reports:
                     verified_files[path.as_posix()] = file_identity(file.stat())
         grouped[name] = paths
     check_outputs(build, selected, grouped)
@@ -324,6 +324,7 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
                 raise ValueError('shard manifest differs from the version index')
             owners = {}
             grouped = {}
+            selected = {}
             for name, row in manifest.items():
                 if not NAME.fullmatch(name):
                     raise ValueError('invalid archived module name')
@@ -334,8 +335,15 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
                 module = Module('', Path(), Path(row['build']), extra_builds)
                 if len(set((module.build, *extra_builds))) != 1 + len(extra_builds):
                     raise ValueError('duplicate compiler build path: ' + name)
-                if name in wanted and (module.build, extra_builds) != (modules[name].build, modules[name].extra_builds):
-                    raise ValueError('module build path differs from the checkout: ' + name)
+                if name in wanted:
+                    expected = modules[name]
+                    # Identical checkout inputs may yield just the official variant when
+                    # the producer read a Mathlib-only marker from the compiled closure.
+                    if expected.conditional_backends and not extra_builds:
+                        expected = replace(expected, extra_builds=())
+                    if (module.build, extra_builds) != (expected.build, expected.extra_builds):
+                        raise ValueError('module build path differs from the checkout: ' + name)
+                    selected[name] = replace(expected, report=False) if name in seeds else expected
                 paths = {safe_path(p) for p in row['paths']}
                 reports = set(report_paths(name)) if has_report else set()
                 if (not paths or len(paths) != len(row['paths']) or not reports <= paths
@@ -359,7 +367,6 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
             if owners:
                 raise ValueError('shard omits indexed compiler artifacts')
 
-        selected = {n: replace(modules[n], report=False) if n in seeds else modules[n] for n in wanted}
         check_outputs(stage, selected, grouped)
         invalid_local = verify_backend_hashes(root, stage, selected, grouped, destination=destination)
         install = set()
@@ -377,7 +384,7 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
                     missing.add(path)
                 elif not live.is_file():
                     conflicts.add(path)
-                elif (module.extra_builds or module.report) and path.suffix == '.trace':
+                elif (module.extra_builds or module.conditional_backends or module.report) and path.suffix == '.trace':
                     if live in invalid_local or not traces_match(live, stage / path):
                         conflicts.add(path)
                 elif archive_sha(live, None) != archive_sha(stage / path, None):
@@ -389,6 +396,10 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
                 install.update(missing - reports)
                 partial.add(name)
         install_scoped(destination, stage, install, None)
+        # A compiler-only seed can omit the report this checkout still needs.
+        # Retain that obligation while adopting the authenticated backend layout.
+        for name in restored | partial:
+            modules[name] = replace(modules[name], extra_builds=selected[name].extra_builds)
         if compiler_hits is not None:
             compiler_hits.update(partial)
     return restored

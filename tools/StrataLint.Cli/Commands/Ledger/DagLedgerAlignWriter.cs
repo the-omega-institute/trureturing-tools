@@ -87,12 +87,12 @@ internal static class DagLedgerAlignWriter
                     if (LeanSourceCatalog.ParseFileImports(file).Contains(LeanImportClosure.ModuleName(retired)))
                         throw new InvalidOperationException($"module {file.Path.Value} still imports retired registration {retired.Value}");
             }
-            (measure ?? FrozenDependencyMeasurement.Attach)(root, measurementReports, planned);
+            var mathlibOnly = (measure ?? FrozenDependencyMeasurement.Attach)(root, measurementReports, planned);
             foreach (var (path, record) in planned)
             {
                 FrozenStateRecord.ValidateDeclarations(record.Declarations);
                 record.ValidatePairedStatements(truth!.Report.Files[path]);
-                if (previousPairs.TryGetValue(path, out var pairs) && record.Declarations.Any(declaration =>
+                if (!mathlibOnly.Contains(path) && previousPairs.TryGetValue(path, out var pairs) && record.Declarations.Any(declaration =>
                         pairs.Contains(declaration.Identity) && declaration.StrictOmega is null))
                     throw new FormatException($"selector {path.Value} update would discard strict_omega measurement");
             }

@@ -214,6 +214,7 @@ public sealed class LedgerAlignWriterTests
     [InlineData("official-derived-false")]
     [InlineData("official-derived-string")]
     [InlineData("eligibility")]
+    [InlineData("eligible-mathlib-only")]
     [InlineData("missing")]
     [InlineData("ineligible")]
     [InlineData("identity")]
@@ -244,6 +245,7 @@ public sealed class LedgerAlignWriterTests
                     row.Remove("strict_omega");
                     row["officialDerivedOnly"] = "true";
                     break;
+                case "eligible-mathlib-only": module["mathlibOnly"] = new JsonArray(module["module"]!.GetValue<string>()); break;
                 case "eligibility": module.Remove("strictEligible"); break;
                 case "missing": row.Remove("strict_omega"); break;
                 case "ineligible": module["strictEligible"] = false; break;
@@ -290,6 +292,54 @@ public sealed class LedgerAlignWriterTests
         });
         Assert.False(refresh.Success);
         Assert.Contains("discard strict_omega measurement", refresh.Error, StringComparison.Ordinal);
+        Assert.Equal(before, fixture.Image());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RefreshCanClearPairedRowsForCompiledMathlibOnlyPath(bool inherited)
+    {
+        var owner = inherited ? Module("A", source: "import D5.S0.Carrier.B\ntheorem a : True := by trivial\n", imports: ["B"]) : Module("A");
+        using var fixture = new AlignFixture(owner, Module("B"));
+        Assert.True(fixture.AlignWithMeasurement(["--add", PathFor("A")]).Success);
+        var old = fixture.Load("A");
+        var refresh = fixture.AlignWithMeasurement(["--refresh-annotations", "--selector", PathFor("A")], response =>
+        {
+            var module = response[0]!;
+            var name = module["module"]!.GetValue<string>();
+            module["strictEligible"] = false;
+            module["mathlibOnly"] = inherited ? new JsonArray(name, "D5.S0.Carrier.B") : new JsonArray(name);
+            module["declarations"]![0]!.AsObject().Remove("strict_omega");
+        });
+        Assert.True(refresh.Success, refresh.Error);
+        var current = fixture.Load("A");
+        Assert.Equal(old.StatementId, current.StatementId);
+        Assert.Null(Assert.Single(current.Declarations).StrictOmega);
+        Assert.DoesNotContain("mathlibOnly", File.ReadAllText(fixture.StateFile("A")), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("[17]")]
+    [InlineData("""["D5.Other"]""")]
+    [InlineData("""["D5.S0.Carrier.A", "D5.Unrelated"]""")]
+    [InlineData("""["D5.S0.Carrier.A", "D5.S0.Carrier.A"]""")]
+    [InlineData("""["D5.S0.Carrier.A", "D5..Child"]""")]
+    [InlineData("false")]
+    public void RefreshRejectsInvalidCompiledMathlibOnlyPath(string reason)
+    {
+        using var fixture = new AlignFixture(Module("A"));
+        Assert.True(fixture.AlignWithMeasurement(["--add", PathFor("A")]).Success);
+        var before = fixture.Image();
+        var refresh = fixture.AlignWithMeasurement(["--refresh-annotations", "--selector", PathFor("A")], response =>
+        {
+            response[0]!["strictEligible"] = false;
+            response[0]!["mathlibOnly"] = JsonNode.Parse(reason);
+            response[0]!["declarations"]![0]!.AsObject().Remove("strict_omega");
+        });
+        Assert.False(refresh.Success);
+        Assert.Contains("invalid compiled mathlibOnly path", refresh.Error, StringComparison.Ordinal);
         Assert.Equal(before, fixture.Image());
     }
 
@@ -457,6 +507,7 @@ public sealed class LedgerAlignWriterTests
                         }).ToImmutableArray(),
                     };
                 }
+                return ImmutableHashSet<RepoPath>.Empty;
             });
         internal CommandResult Align(params string[] options) =>
             Invoke(options.Any(static option => option is "--selector" or "--add")
