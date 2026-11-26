@@ -25,6 +25,7 @@ from lean_module_shards import DEFAULT_CAPACITY, lookup_shard, pack_shard, plan_
 SCHEMA = 'lean-module-shards-v1'
 VERSION_PREFIX = 'lean-modules-'
 DEFAULT_MODULE_BYTES = 712650
+MAX_COLD_REPORTS_PER_SHARD = 250
 
 
 OMEGA_BASIS = {'OmegaInit', 'OmegaMathlib'}
@@ -324,6 +325,31 @@ def expanded(plan, splits):
     return dict(plan, targets=targets, shards=groups)
 
 
+def split_cold_reports(plan, existing, base, remote):
+    """Checkpoint bounded groups of reports that workers must produce before uploading a shard."""
+    previous = base['targets'] if base else {}
+    targets = plan['targets']
+    splits = {}
+    for name, shard in plan['shards'].items():
+        members = shard['members']
+        if name in existing or len(members) <= MAX_COLD_REPORTS_PER_SHARD:
+            continue
+        cold = {n for n in members if 'report_inputs' in targets[n]
+                and targets[n]['key'] != previous.get(n, {}).get('key')}
+        if len(cold) > MAX_COLD_REPORTS_PER_SHARD:
+            weights = {n: int(n in cold) for n in members}
+            splits[name] = plan_shards(weights, MAX_COLD_REPORTS_PER_SHARD, previous={name: members})
+    if not splits:
+        return plan
+
+    plan = expanded(plan, splits)
+    # A child may itself have a measured byte split from an interrupted attempt.
+    children = {child: plan['shards'][child] for layout in splits.values() for child in layout}
+    plan = expanded(plan, remote.splits(dict(plan, shards=children)))
+    recover_partials(plan, existing, remote)
+    return plan
+
+
 def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version, legacy=None):
     if workers < 1 or workers > 256:
         raise ValueError('worker count must be within the Actions matrix limit')
@@ -351,9 +377,10 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
             'shards': planned, 'mathlib_version': mathlib_version, 'version': VERSION_PREFIX + source, 'capacity': capacity}
     plan['base_version'] = base['version'] if base else None
     plan = expanded(plan, remote.splits(plan)) if planned.keys() - matching(plan, previous).keys() else plan
-    planned = plan['shards']
     existing = remote.confirmed(matching(plan, previous))
     recover_partials(plan, existing, remote)
+    plan = split_cold_reports(plan, existing, base, remote)
+    planned = plan['shards']
     plan['inherited'] = existing
     missing = sorted(planned.keys() - existing.keys(), key=lambda s: (-sum(sizes[n] for n in planned[s]['members']), s))
     lanes = [[] for _ in range(min(len(missing), workers))]
