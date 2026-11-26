@@ -168,7 +168,7 @@ def refine_batches(batches, definitions, cold, weights, limit=60_000):
     families = []
     counts = [Counter() for _ in batches]
     sizes = [sum(len(name) + 1 for name in roots) for roots in assigned]
-    if max(sizes) > limit:
+    if limit is not None and max(sizes) > limit:
         return batches
     for lane, roots in enumerate(assigned):
         # One reference per group lets a move charge only its marginal closure on each runner.
@@ -206,7 +206,7 @@ def refine_batches(batches, definitions, cold, weights, limit=60_000):
             reduced = tuple(a - b for a, b in zip(loads[src], removed))
             best, move = previous, None
             for dest in range(len(batches)):
-                if dest == src or sizes[dest] + size > limit:
+                if dest == src or (limit is not None and sizes[dest] + size > limit):
                     continue
                 added = work(missing - counts[dest].keys())
                 enlarged = tuple(a + b for a, b in zip(loads[dest], added))
@@ -234,6 +234,41 @@ def refine_batches(batches, definitions, cold, weights, limit=60_000):
             return [(sorted(roots), paths) for roots, (_, paths) in zip(assigned, batches)]
 
 
+def lane_parts(scope, roots, paths):
+    selection = dict(targets=sorted(roots), paths=sorted(paths),
+                     definitions={p: scope["definitions"][p] for p in paths})
+    return [dict(targets=names, paths=docs) for names, docs in report_batches(selection)]
+
+
+def isolate_new_roots(scope, batches, fresh, cold, weights, maximum_lanes):
+    isolated = {name for name, modules in fresh.items() if modules}
+    definitions = scope["definitions"]
+    # Documents sharing an anchor may connect additional roots to the new mathematics.
+    while isolated:
+        expanded = isolated.union(*(roots for roots in definitions.values() if isolated.intersection(roots)))
+        if expanded == isolated:
+            break
+        isolated = expanded
+    ordinary = set(scope["targets"]) - isolated
+    if not (isolated and ordinary) or sum(len(n) + 1 for n in isolated) > 60_000:
+        return None
+    new_docs = sorted(path for path, refs in definitions.items() if isolated.intersection(refs))
+    other_docs = sorted(set(scope["paths"]) - set(new_docs))
+    pieces = lane_parts(scope, ordinary, other_docs)
+    count = min(maximum_lanes, len(batches), len(pieces) + 1) - 1
+    lanes = [(set(), []) for _ in range(count)]
+    costs = [0] * count
+    for part in pieces:
+        lane = min(range(count), key=costs.__getitem__)
+        roots, paths = lanes[lane]
+        roots.update(part["targets"])
+        paths.extend(part["paths"])
+        costs[lane] += sum(len(n) + 1 for n in part["targets"])
+    initial = [(sorted(roots), sorted(paths)) for roots, paths in lanes]
+    balanced = refine_batches(initial, {p: definitions[p] for p in other_docs}, cold, weights, limit=None)
+    return [(sorted(isolated), new_docs), *balanced]
+
+
 def balance_plan(scope, index, root):
     # Read the same compiler graph and input keys as the published cache reader.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'worktree'))
@@ -242,6 +277,7 @@ def balance_plan(scope, index, root):
     from scoped import runtime_targets
     from lean_module_cache import checkout_targets
 
+    scope = {k: v for k, v in scope.items() if k != "report_batches"}
     batches = distributed_plan(scope)
     if (not 2 <= len(batches) <= 256 or not index["targets"]
             or any(sum(len(n) + 1 for n in names) > 60_000 for names, _ in batches)):
@@ -271,7 +307,8 @@ def balance_plan(scope, index, root):
         cold[name] = visited & weights.keys()
         runtime = {item.removeprefix('+') for item in runtime_targets(visited)}
         fresh[name] = (visited | import_closure(graph, runtime)) & new_d5
-    refined = refine_batches(batches, scope['definitions'], cold, weights)
+    isolated = isolate_new_roots(scope, batches, fresh, cold, weights, maximum_lanes=6)
+    refined = isolated or refine_batches(batches, scope['definitions'], cold, weights)
     common = import_closure(graph, executables) & new_d5
     programs = import_closure(graph, scope["programs"]) & new_d5
     rows = []
@@ -279,7 +316,10 @@ def balance_plan(scope, index, root):
         new = common.union(*(fresh[name] for name in names))
         if lane == 0:
             new.update(programs)
-        rows.append(dict(targets=names, paths=paths, new_d5_modules=sorted(new)))
+        row = dict(targets=names, paths=paths, new_d5_modules=sorted(new))
+        if isolated is not None:
+            row["parts"] = lane_parts(scope, names, paths)
+        rows.append(row)
     result = dict(scope, report_batches=rows)
     distributed_plan(result)
     return result
@@ -291,7 +331,9 @@ def distributed_plan(scope):
     batches = list(report_batches(scope))
     stored = scope.get("report_batches")
     if stored is not None:
-        if len(stored) != len(batches):
+        partitioned = any("parts" in entry for entry in stored)
+        if (partitioned and not 2 <= len(stored) <= min(6, len(batches))
+                or not partitioned and len(stored) != len(batches)):
             raise ValueError("incorrect number of report batches")
         batches = [(entry["targets"], entry["paths"]) for entry in stored]
         for entry, (targets, paths) in zip(stored, batches):
@@ -299,8 +341,11 @@ def distributed_plan(scope):
             if (not isinstance(new, list) or new != sorted(set(new))
                     or any(not name.startswith("D5.") or not MODULE.fullmatch(name) for name in new)):
                 raise ValueError("invalid new D5 module in stored report batch")
+            parts = entry.get("parts", [dict(targets=targets, paths=paths)])
+            if partitioned and entry.get("parts") != lane_parts(scope, targets, paths):
+                raise ValueError("incomplete or unexpected report sub-batches")
             if (not targets or len(targets) != len(set(targets))
-                    or sum(len(name) + 1 for name in targets) > 60_000
+                    or any(sum(len(n) + 1 for n in part["targets"]) > 60_000 for part in parts)
                     or any(not set(scope["definitions"][path]) <= set(targets) for path in paths)):
                 raise ValueError("invalid stored report batch")
     if not scope["targets"]:
@@ -319,17 +364,21 @@ def batch_scope(scope, batches, index):
     targets, paths = batches[index]
     stored = scope.get("report_batches")
     new_d5 = stored[index]["new_d5_modules"] if stored is not None else []
-    return dict(scope, targets=targets, paths=paths, new_d5_modules=new_d5,
+    parts = stored[index].get("parts") if stored is not None else None
+    return dict(scope, targets=targets, paths=paths, new_d5_modules=new_d5, parts=parts,
                 programs=scope["programs"] if index == 0 else [],
                 definitions={p: scope["definitions"][p] for p in paths if p in scope["definitions"]})
 
 
-def batch_receipt(directory, plan_identity, index):
+def batch_receipt(directory, plan_identity, index, part):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lean-inspector"))
     from publication import SUFFIXES
 
     names = ["scoped-lean-report.json" + suffix for suffix in SUFFIXES]
-    return dict(schema=1, **plan_identity, batch=index, files={name: file_hash(directory / name) for name in names})
+    receipt = dict(schema=1, **plan_identity, batch=index, files={name: file_hash(directory / name) for name in names})
+    if part is not None:
+        receipt["part"] = part
+    return receipt
 
 
 def write_batch(root, index, selected, identity):
@@ -347,33 +396,45 @@ def write_batch(root, index, selected, identity):
     check_programs(selected["programs"], environment)
     with tempfile.TemporaryDirectory(prefix=".batch-", dir=root) as temporary:
         scratch = Path(temporary)
-        check_batch(scratch, scratch, selected["targets"], selected["paths"], environment)
-        receipt = batch_receipt(scratch, identity, index)
         staged = scratch / "bundle"
         staged.mkdir()
-        for name in receipt["files"]:
-            (scratch / name).rename(staged / name)
-        (staged / "receipt.json").write_text(json.dumps(receipt))
+        parts = selected.get("parts") or [selected]
+        for i, part in enumerate(parts):
+            bundle = staged if len(parts) == 1 else staged / f"part-{i}"
+            bundle.mkdir(exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=scratch) as working:
+                work = Path(working)
+                check_batch(work, work, part["targets"], part["paths"], environment)
+                receipt = batch_receipt(work, identity, index, i if len(parts) > 1 else None)
+                for name in receipt["files"]:
+                    (work / name).rename(bundle / name)
+                (bundle / "receipt.json").write_text(json.dumps(receipt))
         staged.rename(destination)
 
 
 
-def read_batches(root, count, identity):
-    if {entry.name for entry in root.iterdir()} != {f"batch-{i}" for i in range(count)}:
+def read_batches(root, part_counts, identity):
+    if {entry.name for entry in root.iterdir()} != {f"batch-{i}" for i in range(len(part_counts))}:
         raise ValueError("incomplete or unexpected report batch artifacts")
     reports = []
-    for index in range(count):
+    for index, count in enumerate(part_counts):
         directory = root / f"batch-{index}"
         if directory.is_symlink() or not directory.is_dir():
             raise ValueError(f"invalid directory for report batch {index}")
-        if any(path.is_symlink() or not path.is_file() for path in directory.iterdir()):
-            raise ValueError(f"invalid file in report batch {index}")
-        expected = batch_receipt(directory, identity, index)
-        if {path.name for path in directory.iterdir()} != {"receipt.json", *expected["files"]}:
-            raise ValueError(f"unexpected files in report batch {index}")
-        if json.loads((directory / "receipt.json").read_text()) != expected:
-            raise ValueError(f"report batch {index} does not match this plan and checkout")
-        reports.append(directory / "scoped-lean-report.json")
+        if count > 1 and {path.name for path in directory.iterdir()} != {f"part-{i}" for i in range(count)}:
+            raise ValueError(f"incomplete or unexpected report sub-batches in batch {index}")
+        for i in range(count):
+            bundle = directory if count == 1 else directory / f"part-{i}"
+            if bundle.is_symlink() or not bundle.is_dir():
+                raise ValueError(f"invalid report bundle in batch {index}")
+            if any(path.is_symlink() or not path.is_file() for path in bundle.iterdir()):
+                raise ValueError(f"invalid file in report batch {index}")
+            expected = batch_receipt(bundle, identity, index, i if count > 1 else None)
+            if {path.name for path in bundle.iterdir()} != {"receipt.json", *expected["files"]}:
+                raise ValueError(f"unexpected files in report batch {index}")
+            if json.loads((bundle / "receipt.json").read_text()) != expected:
+                raise ValueError(f"report batch {index} does not match this plan and checkout")
+            reports.append(bundle / "scoped-lean-report.json")
     return reports
 
 
@@ -396,7 +457,9 @@ def distributed(args, scope):
     if args.batch is not None:
         write_batch(root, args.batch, batch_scope(scope, batches, args.batch), identity)
         return 0
-    reports = read_batches(root, len(batches), identity)
+    part_counts = [len(row["parts"]) if "parts" in row else 1
+                   for row in scope.get("report_batches", [{}] * len(batches))]
+    reports = read_batches(root, part_counts, identity)
     with tempfile.TemporaryDirectory(prefix="ci-pr-lean-") as temporary:
         return check_admission(Path(temporary), args.manifest, changed, args.base or args.protected_base,
                                args.protected_base, reports)
