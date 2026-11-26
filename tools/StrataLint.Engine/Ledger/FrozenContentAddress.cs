@@ -31,29 +31,11 @@ public static class FrozenContentAddress
         try
         {
             var (openCases, tailRegistrations) = ValidateStateEvidence(snapshot, lean, states);
-            var materialByPath = new Dictionary<RepoPath, FrozenNodeMaterial>();
-            foreach (var path in LeanImportAdjacency.DependenciesFirst(
-                states.Where(static item => item.Value is TruthState.Closed).Select(static item => item.Key),
-                adjacency).Where(path => states.TryGetValue(path, out var state)
-                    && state is TruthState.Closed))
-            {
-                materialByPath.Add(
-                    path,
-                    BuildNodeMaterial(
-                        lean,
-                        adjacency,
-                        path,
-                        dependencyPath => materialByPath.TryGetValue(dependencyPath, out var dependency)
-                            ? dependency.FrozenNodeId
-                            : throw new FormatException(
-                                $"Closed module {path.Value} depends on non-frozen {dependencyPath.Value}.")));
-            }
-
+            var material = ImmutableArray.CreateBuilder<FrozenNodeMaterial>();
+            VisitClosed(lean, states, adjacency, null, material.Add);
             return new FrozenMaterialOutcome.Accepted(FrozenMaterialCatalog.Create(
                 states.ToImmutableDictionary(),
-                materialByPath.Values
-                    .OrderBy(static node => node.RepoPath.Value, StringComparer.Ordinal)
-                    .ToImmutableArray(),
+                material.OrderBy(static node => node.RepoPath.Value, StringComparer.Ordinal).ToImmutableArray(),
                 openCases,
                 tailRegistrations,
                 adjacency));
@@ -64,11 +46,37 @@ public static class FrozenContentAddress
         }
     }
 
+    internal static void VisitClosed(
+        AcceptedLeanClosure lean,
+        ImmutableDictionary<RepoPath, TruthState> states,
+        ImmutableDictionary<RepoPath, ImmutableArray<RepoPath>> adjacency,
+        Func<RepoPath, ImmutableArray<FrozenNodeId>, FrozenNodeId?>? reuse,
+        Action<FrozenNodeMaterial> accept)
+    {
+        var ids = new Dictionary<RepoPath, FrozenNodeId>();
+        var closed = states.Where(static item => item.Value is TruthState.Closed).Select(static item => item.Key);
+        foreach (var path in LeanImportAdjacency.DependenciesFirst(closed, adjacency))
+        {
+            if (!states.TryGetValue(path, out var state) || state is not TruthState.Closed) continue;
+            var prerequisites = adjacency[path].Select(dependency => ids.TryGetValue(dependency, out var id)
+                    ? id : throw new FormatException($"Closed module {path.Value} depends on non-frozen {dependency.Value}."))
+                .OrderBy(static id => id.Value, StringComparer.Ordinal).ToImmutableArray();
+            var prior = reuse?.Invoke(path, prerequisites);
+            if (prior is not null)
+                ids.Add(path, prior);
+            else
+            {
+                var material = BuildNodeMaterial(lean, path, prerequisites);
+                ids.Add(path, material.FrozenNodeId);
+                accept(material);
+            }
+        }
+    }
+
     private static FrozenNodeMaterial BuildNodeMaterial(
         AcceptedLeanClosure lean,
-        IReadOnlyDictionary<RepoPath, ImmutableArray<RepoPath>> adjacency,
         RepoPath path,
-        Func<RepoPath, FrozenNodeId> resolveDependency)
+        ImmutableArray<FrozenNodeId> prerequisites)
     {
         if (!lean.Report.Files.TryGetValue(path, out var report))
         {
@@ -83,10 +91,6 @@ public static class FrozenContentAddress
             .SelectMany(static declaration => declaration.Axioms)
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
-            .ToImmutableArray();
-        var prerequisites = adjacency[path]
-            .Select(resolveDependency)
-            .OrderBy(static id => id.Value, StringComparer.Ordinal)
             .ToImmutableArray();
         var frozen = ComputeFrozenNodeId(path, statement, prerequisites);
         return new FrozenNodeMaterial(
@@ -116,7 +120,7 @@ public static class FrozenContentAddress
             FrozenHashDomains.Statement,
             CanonicalStatementWriter.WriteModule(path, declarations).AsSpan()));
 
-    private static (
+    internal static (
         ImmutableDictionary<RepoPath, ImmutableArray<CaseId>> OpenCases,
         ImmutableDictionary<RepoPath, ImmutableArray<string>> TailRegistrations) ValidateStateEvidence(
         RepositorySnapshot snapshot,
