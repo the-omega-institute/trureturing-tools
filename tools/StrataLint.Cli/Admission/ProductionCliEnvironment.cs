@@ -77,6 +77,8 @@ internal interface IRepositoryGateway
     RawRepositorySnapshot ReadRevision(string revision, IReadOnlyList<string> paths) =>
         throw new InvalidOperationException("scoped revision reads are not supported by this gateway");
 
+    IReadOnlySet<string>? ChangedPathsBetween(string fromCommit, string toCommit) => null;
+
     RawChangeSet ReadCurrentChanges();
 
     /// Reads the working-tree delta against an explicit revision, in the caller-supplied

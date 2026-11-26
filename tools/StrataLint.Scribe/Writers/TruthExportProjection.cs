@@ -28,29 +28,29 @@ public static class TruthExportProjection
         ImmutableDictionary<RepoPath, FrozenStateRecord>? frozenRecords,
         LeanAxiomReport? report)
     {
-        var nodes = closedNodes
-            .Select(node =>
-            {
-                var record = frozenRecords?.GetValueOrDefault(node.RepoPath);
-                var annotations = record is not null && record.StatementId == node.StatementId
-                    ? record.Declarations.ToDictionary(static declaration => declaration.Identity)
-                    : null;
-                if (annotations is not null && report?.Files.GetValueOrDefault(node.RepoPath) is { } official)
-                    record!.ValidatePairedStatements(official);
-                return new TruthExportNode(
-                    node.RepoPath.Value,
-                    node.FrozenNodeId.Value,
-                    node.AxiomClosure,
-                    node.DeclarationStatementIds
-                        .Select(declaration => ProjectDeclaration(declaration, annotations?.GetValueOrDefault(
-                            (declaration.DeclarationNameKey, declaration.Kind))))
-                        .ToImmutableArray(),
-                    node.PrerequisiteFrozenNodeIds.Select(static id => id.Value).ToImmutableArray(),
-                    isFrozen(node.RepoPath) ? "frozen" : "proven-not-yet-frozen");
-            })
-            .ToImmutableArray();
-
+        var nodes = closedNodes.Select(node => ProjectNode(node, isFrozen(node.RepoPath),
+            frozenRecords?.GetValueOrDefault(node.RepoPath), report)).ToImmutableArray();
         return TruthExportModel.Create(nodes, sourceCommit, sourceTree);
+    }
+
+    internal static TruthExportNode ProjectNode(FrozenNodeMaterial node, bool isFrozen,
+        FrozenStateRecord? record, LeanAxiomReport? report)
+    {
+        var annotations = record is not null && record.StatementId == node.StatementId
+            ? record.Declarations.ToDictionary(static declaration => declaration.Identity)
+            : null;
+        if (annotations is not null && report?.Files.GetValueOrDefault(node.RepoPath) is { } official)
+            record!.ValidatePairedStatements(official);
+        return new TruthExportNode(
+            node.RepoPath.Value,
+            node.FrozenNodeId.Value,
+            node.AxiomClosure,
+            node.DeclarationStatementIds
+                .Select(declaration => ProjectDeclaration(declaration, annotations?.GetValueOrDefault(
+                    (declaration.DeclarationNameKey, declaration.Kind))))
+                .ToImmutableArray(),
+            node.PrerequisiteFrozenNodeIds.Select(static id => id.Value).ToImmutableArray(),
+            isFrozen ? "frozen" : "proven-not-yet-frozen");
     }
 
     private static TruthExportDeclaration ProjectDeclaration(FrozenDeclarationStatement declaration,

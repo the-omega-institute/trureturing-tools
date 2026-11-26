@@ -33,24 +33,19 @@ internal static class TruthReleaseCommand
                     (path, hash) => contentHashes.Add(path, hash))));
             var report = RawLeanReportArtifact.ReadFile(
                 options.CandidateLeanReport, snapshot, out var rawLeanReportBytes, validateMaterials: false);
-            var prepared = PrepareFrozenTruth(snapshot, report);
-
-            var truth = prepared.Truth;
+            var prior = TruthReleaseBase.Open(options.BaseRelease, options.ProducerPackageCommit, identity.Revision, repository);
+            var truth = new TruthContext(snapshot, DagLedgerCommandPreparation.ValidateLean(snapshot, report), report);
+            var states = LeanTruthStates.Resolve(snapshot, truth.Lean);
             var sourceTree = Bare(identity.TreeOid);
-            var truthExport = TruthExportProjection.Project(
-                prepared.Catalog.ClosedNodes,
-                prepared.Frozen,
-                report,
-                identity.Revision,
-                sourceTree);
+            var truthExport = ProjectClosedTruth(truth, states, prior, identity.Revision, sourceTree);
             var truthExportBytes = TruthExportJsonWriter.Write(truthExport);
-            var projection = TruthDagProjectionAssembler.Build(truth.Snapshot, truth.Lean, prepared.States);
+            var projection = TruthDagProjectionAssembler.Build(truth.Snapshot, truth.Lean, states);
             var truthGraph = AssembleTruthGraph(
                 contentHashes, truth, projection, rawLeanReportBytes, suppliedDefinitions, out var unresolvedReferences);
-            truthGraph = TruthGraphModelBuilder.WithDeclarationMarkers(truthGraph, truthExport);
+            truthGraph = TruthGraphModelBuilder.WithDeclarationMarkers(truthGraph, truthExport, prior?.ReusedGraphNodes);
             var truthGraphBytes = TruthGraphJsonWriter.Write(truthGraph);
             var dagMarkdownBytes = CanonicalDagWriter.Write(projection, truthGraph.Truth);
-            var blueprintIndexBytes = BlueprintIndexAssembler.Assemble(snapshot);
+            var blueprintIndexBytes = BlueprintIndexAssembler.Assemble(snapshot, prior);
             var sourceSnapshot = SourceSnapshotAssembler.Assemble(
                 snapshot,
                 identity,
@@ -86,7 +81,7 @@ internal static class TruthReleaseCommand
             return new ExplicitCommandResult(
                 0,
                 $"TRUTH_RELEASE release_digest={digest} source_commit={identity.Revision} "
-                    + $"unresolved_references={unresolvedReferences} out={Path.GetFullPath(options.OutDirectory)}\n",
+                    + $"reused_export_nodes={prior?.ReusedGraphNodes.Count ?? 0} unresolved_references={unresolvedReferences} out={Path.GetFullPath(options.OutDirectory)}\n",
                 string.Empty);
         }
         catch (Exception exception) when (
@@ -105,26 +100,29 @@ internal static class TruthReleaseCommand
         }
     }
 
-    private static FrozenTruth PrepareFrozenTruth(RepositorySnapshot snapshot, LeanAxiomReport report)
+    private static TruthExportModel ProjectClosedTruth(TruthContext truth, ImmutableDictionary<RepoPath, TruthState> states,
+        TruthReleaseBase? prior, string revision, string sourceTree)
     {
-        var truth = new TruthContext(snapshot, DagLedgerCommandPreparation.ValidateLean(snapshot, report), report);
-        var states = LeanTruthStates.Resolve(snapshot, truth.Lean);
-        var frozen = FrozenStateCatalog.Load(snapshot);
-        var catalog = FrozenContentAddress.Build(snapshot, truth.Lean, states,
-            LeanImportAdjacency.BuildFromSources(snapshot)) switch
+        var frozen = FrozenStateCatalog.Load(truth.Snapshot, prior?.Changes);
+        var adjacency = LeanImportAdjacency.BuildFromSources(truth.Snapshot);
+        FrozenContentAddress.ValidateStateEvidence(truth.Snapshot, truth.Lean, states);
+        var nodes = ImmutableArray.CreateBuilder<TruthExportNode>();
+        FrozenNodeId? Reuse(RepoPath path, ImmutableArray<FrozenNodeId> prerequisites)
         {
-            FrozenMaterialOutcome.Accepted accepted => accepted.Capability,
-            FrozenMaterialOutcome.Rejected rejected => throw new FormatException(rejected.Message),
-            _ => throw new InvalidOperationException("unknown frozen material outcome"),
-        };
-        return new FrozenTruth(truth, states, frozen, catalog);
+            if (prior?.Reuse(path, prerequisites) is not { } previous) return null;
+            nodes.Add(previous);
+            return FrozenNodeId.Create(previous.FrozenNodeId);
+        }
+        FrozenContentAddress.VisitClosed(truth.Lean, states, adjacency, prior is null ? null : Reuse, material =>
+        {
+            var record = frozen.Records.GetValueOrDefault(material.RepoPath);
+            if (record is null && prior is not null && FrozenStatePath.TryFromModulePath(material.RepoPath, out var statePath)
+                && truth.Snapshot.Files.TryGetValue(statePath, out var stateFile))
+                record = FrozenStateRecordLoader.Load(stateFile);
+            nodes.Add(TruthExportProjection.ProjectNode(material, record is not null, record, truth.Report));
+        });
+        return TruthExportModel.Create(nodes.ToImmutable(), revision, sourceTree);
     }
-
-    private sealed record FrozenTruth(
-        TruthContext Truth,
-        ImmutableDictionary<RepoPath, TruthState> States,
-        FrozenStateCatalog Frozen,
-        FrozenMaterialCatalog Catalog);
 
     private static TruthGraphExportModel AssembleTruthGraph(
         IReadOnlyDictionary<string, ReadOnlyMemory<byte>> contentHashes,
@@ -178,6 +176,7 @@ internal static class TruthReleaseCommand
 
         string? outDirectory = null;
         string? dagOutput = null;
+        string? baseRelease = null;
         string? candidateLeanReport = null;
         string? producerPackageCommit = null;
         string? producedAt = null;
@@ -195,6 +194,9 @@ internal static class TruthReleaseCommand
 
             switch (arguments[index])
             {
+                case "--base-release" when baseRelease is null:
+                    baseRelease = value;
+                    break;
                 case "--dag-output" when dagOutput is null:
                     dagOutput = value;
                     break;
@@ -250,6 +252,7 @@ internal static class TruthReleaseCommand
 
         options = new TruthReleaseArguments(
             outDirectory,
+            baseRelease,
             dagOutput,
             candidateLeanReport,
             producerPackageCommit,
@@ -283,7 +286,7 @@ internal static class TruthReleaseCommand
     private static ExplicitCommandResult Usage() => new(
         1,
         string.Empty,
-        "USAGE: StrataLint truth-release --out DIR [--dag-output FILE] --candidate-lean-report FILE "
+        "USAGE: StrataLint truth-release --out DIR [--base-release DIR] [--dag-output FILE] --candidate-lean-report FILE "
             + "--producer-package-commit COMMIT --produced-at TIMESTAMP "
             + "--commit-on-protected-dev true|false "
             + "[--required-check NAME=CONCLUSION] "
@@ -297,6 +300,7 @@ internal static class TruthReleaseCommand
 
     private readonly record struct TruthReleaseArguments(
         string OutDirectory,
+        string? BaseRelease,
         string? DagOutput,
         string CandidateLeanReport,
         string ProducerPackageCommit,

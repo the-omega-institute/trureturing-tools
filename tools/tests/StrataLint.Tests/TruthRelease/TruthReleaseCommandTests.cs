@@ -23,6 +23,7 @@ public sealed partial class TruthReleaseCommandTests
     public void CommandProducesAndVerifiesAllFiveArtifactsEndToEnd()
     {
         using var fixture = CreateFixture();
+        File.Delete(fixture.ReportPath + ".materials.zip");
         using var output = new TemporaryDirectory();
         using var dagDirectory = new TemporaryDirectory();
         var dagPath = Path.Combine(dagDirectory.Path, "DAG.md");
@@ -684,7 +685,7 @@ public sealed partial class TruthReleaseCommandTests
 
         internal FakeLeanReportSource MutableLeanReportSource { get; } = mutableLeanReportSource;
 
-        internal string ReportPath { get; } = reportPath;
+        internal string ReportPath { get; set; } = reportPath;
 
         internal ImmutableArray<byte> ReportBytes { get; } = reportBytes;
 

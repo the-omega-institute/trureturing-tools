@@ -17,7 +17,17 @@ public static class ScribeResourceScriptPacker
         var paths = Directory.EnumerateFiles(Path.Combine(root, "Blueprint"), "*.scribe.cs", SearchOption.AllDirectories)
             .Select(path => Path.GetRelativePath(root, path).Replace('\\', '/'))
             .Order(StringComparer.Ordinal).ToImmutableArray();
-        return StatementProjectionFixtureLoader.WithFreshRepositoryRoot(root, () =>
+        var cache = Environment.GetEnvironmentVariable("TRUTH_RELEASE_SCRIBE_CACHE");
+        var environment = Environment.GetEnvironmentVariable("TRUTH_RELEASE_SCRIBE_INPUT");
+        var receipt = Environment.GetEnvironmentVariable("TRUTH_RELEASE_SCRIBE_RECEIPT");
+        if (!string.IsNullOrEmpty(cache) && !string.IsNullOrEmpty(environment) && !string.IsNullOrEmpty(receipt))
+            return IncrementalScribeResources.Write(root, outputPath, paths, cache, environment, receipt);
+        return Execute(root, paths, definitions => ScribeResourcePack.Write(outputPath, definitions));
+    }
+
+    internal static ScribeResourceScriptPackResult Execute(string root, ImmutableArray<string> paths,
+        Func<IEnumerable<DocumentDefinition>, ScribeResourcePackManifest> write) =>
+        StatementProjectionFixtureLoader.WithFreshRepositoryRoot(root, () =>
         {
             var results = ScribeScriptHost.ExecuteBatch(root, paths);
             var failures = results.Where(result => !result.IsSuccess).Select(result =>
@@ -32,8 +42,7 @@ public static class ScribeResourceScriptPacker
             {
                 return new ScribeResourceScriptPackResult(null, failures);
             }
-            var manifest = ScribeResourcePack.Write(outputPath, results.Select(result => result.Definition!));
+            var manifest = write(results.Select(result => result.Definition!));
             return new ScribeResourceScriptPackResult(manifest, failures);
         });
-    }
 }
