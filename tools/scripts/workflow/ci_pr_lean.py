@@ -237,7 +237,7 @@ def refine_batches(batches, definitions, cold, weights, limit=60_000):
 def balance_plan(scope, index, root):
     # Read the same compiler graph and input keys as the published cache reader.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'worktree'))
-    from lean_artifact_inventory import INSPECTOR, import_closure
+    from lean_artifact_inventory import INSPECTOR, import_closure, project_imports
     from lean_ci_cache_scope import REPORT_PROGRAMS, inspector_program_root
     from scoped import runtime_targets
     from lean_module_cache import checkout_targets
@@ -249,11 +249,13 @@ def balance_plan(scope, index, root):
     references = {}
     modules, targets = checkout_targets(root, scope_inputs=references)
     graph = {name: target['deps'] for name, target in targets.items()}
+    # The published compiler inventory omits inspector programs and some runtime support.
+    graph.update(project_imports(root, modules, sources=sorted(modules.keys() - graph.keys())))
     saved = index['targets']
     weights = {name: max(1, isqrt((root / modules[name].source).stat().st_size))
                for name, row in targets.items()
                if modules[name].report and row['key'] != saved.get(name, {}).get('key')}
-    new_d5 = {name for name in targets if name.startswith("D5.") and name not in saved}
+    new_d5 = {name for name in modules if name.startswith("D5.") and name not in saved}
     cold, fresh = {}, {}
     inspector = (root / INSPECTOR / 'lakefile.lean').read_text()
     executables = {inspector_program_root(inspector, prog.split('/')[1]) for prog in REPORT_PROGRAMS}
