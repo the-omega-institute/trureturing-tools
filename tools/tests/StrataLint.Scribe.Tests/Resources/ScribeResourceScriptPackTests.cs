@@ -123,6 +123,41 @@ public sealed class ScribeResourceScriptPackTests
         }
     }
 
+    [Fact]
+    public void IncrementalPackMatchesColdPackAfterAdditionChangeAndDeletion()
+    {
+        using var root = Prepare();
+        var cache = root.Resolve("cache");
+        var output = root.Resolve("warm.zip");
+        var receipt = root.Resolve("reuse.txt");
+        void Build(string identity, params string[] names)
+        {
+            var result = IncrementalScribeResources.Write(root.Path, output,
+                [.. names.Select(PathFor)], cache, identity, receipt);
+            Assert.Empty(result.Failures);
+            Assert.NotNull(result.Manifest);
+            var cold = Pack(root.Path, "cold.zip");
+            Assert.Equal(cold.TotalSha256, result.Manifest.TotalSha256);
+            Assert.Equal(File.ReadAllBytes(root.Resolve("cold.zip")), File.ReadAllBytes(output));
+        }
+        Definition(root.Path, "Alpha");
+        Definition(root.Path, "Beta");
+        Definition(root.Path, "Old");
+        Build("first", "Alpha", "Beta", "Old");
+        File.Delete(root.Resolve(PathFor("Old")));
+        Definition(root.Path, "Beta", "changed");
+        Definition(root.Path, "New");
+        Build("first", "Alpha", "Beta", "New");
+        Assert.Contains("reused=1 built=2", File.ReadAllText(receipt));
+        Build("first", "Alpha", "Beta", "New");
+        Assert.Contains("reused=3 built=0", File.ReadAllText(receipt));
+        Build("new-fixtures", "Alpha", "Beta", "New");
+        Assert.Contains("reused=0 built=3", File.ReadAllText(receipt));
+        File.WriteAllText(Path.Combine(cache, "pack.zip"), "interrupted cache");
+        Build("new-fixtures", "Alpha", "Beta", "New");
+        Assert.Contains("reused=0 built=3", File.ReadAllText(receipt));
+    }
+
     private static ScribeResourcePackManifest Pack(string root, string output)
     {
         var result = ScribeResourceScriptPacker.Write(root, Path.Combine(root, output));

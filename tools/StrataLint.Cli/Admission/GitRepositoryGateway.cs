@@ -141,6 +141,13 @@ internal sealed partial class GitRepositoryGateway : IRepositoryGateway
             RawChangeSet.CreateWithKinds(ReadRawChanges(revision)));
     }
 
+    public IReadOnlySet<string>? ChangedPathsBetween(string fromCommit, string toCommit)
+    {
+        var diff = GitRaw(["diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", fromCommit, toCommit, "--"],
+            allowNonzero: true);
+        return diff.ExitCode == 0 ? ParseNulStrings(diff.StandardOutput).ToHashSet(StringComparer.Ordinal) : null;
+    }
+
     public RawChangeSet ReadCurrentChanges()
     {
         var head = GitText("rev-parse", "HEAD").Trim();

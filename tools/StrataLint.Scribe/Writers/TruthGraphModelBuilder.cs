@@ -77,11 +77,18 @@ public static class TruthGraphModelBuilder
             ["digestion"]);
     }
 
-    internal static TruthGraphExportModel WithDeclarationMarkers(TruthGraphExportModel graph, TruthExportModel export)
+    internal static TruthGraphExportModel WithDeclarationMarkers(TruthGraphExportModel graph, TruthExportModel export,
+        IReadOnlyDictionary<string, TruthGraphNode>? reused = null)
     {
         var byPath = export.Nodes.ToDictionary(static node => node.RepoPath, StringComparer.Ordinal);
         var nodes = graph.Truth.Nodes.Select(node =>
         {
+            if (reused is not null && reused.TryGetValue(node.RepoPath, out var previous))
+                return node with
+                {
+                    OmegaOnlyAxiomFreeDeclarations = previous.OmegaOnlyAxiomFreeDeclarations,
+                    StrictOmegaDeclarations = previous.StrictOmegaDeclarations,
+                };
             if (!byPath.TryGetValue(node.RepoPath, out var exported)) return node;
             var markers = exported.Declarations.Where(static declaration => declaration.OmegaOnlyAxiomFree is true)
                 .Select(static declaration => new TruthGraphDeclaration(

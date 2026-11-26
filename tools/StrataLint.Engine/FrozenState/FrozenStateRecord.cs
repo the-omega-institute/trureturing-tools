@@ -204,13 +204,13 @@ internal sealed class FrozenStateCatalog
         .OrderBy(static path => path.Value, StringComparer.Ordinal)
         .ToImmutableArray();
 
-    internal static FrozenStateCatalog Load(RepositorySnapshot snapshot)
+    internal static FrozenStateCatalog Load(RepositorySnapshot snapshot, IReadOnlySet<string>? changedPaths = null)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         Loading.Value?.Invoke();
         var records = ImmutableDictionary.CreateBuilder<RepoPath, FrozenStateRecord>();
         foreach (var file in snapshot.Files.Values
-            .Where(static file => FrozenStatePath.IsUnderRoot(file.Path.Value))
+            .Where(file => FrozenStatePath.IsUnderRoot(file.Path.Value) && (changedPaths is null || changedPaths.Contains(file.Path.Value)))
             .OrderBy(static file => file.Path.Value, StringComparer.Ordinal))
         {
             if (!FrozenStatePath.TryToModulePath(file.Path.Value, out var modulePath))

@@ -12,9 +12,18 @@ internal static class BlueprintIndexAssembler
     private const string SourceSuffix = ".scribe.cs";
     private const string ProjectionSuffix = ".md";
 
-    internal static ImmutableArray<byte> Assemble(RepositorySnapshot snapshot)
+    internal static ImmutableArray<byte> Assemble(RepositorySnapshot snapshot, TruthReleaseBase? prior = null)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
+        Dictionary<string, JsonElement>? reusable = null;
+        if (prior is not null && !prior.Changes.Any(FileMapDocuments.IsPolicyPath))
+        {
+            var bytes = File.ReadAllBytes(Path.Combine(prior.DirectoryPath, TruthReleaseBundleWriter.BlueprintIndexFileName));
+            if (!prior.Changes.Any(IsBlueprintInput)) return ImmutableArray.Create(bytes);
+            using var index = JsonDocument.Parse(bytes);
+            reusable = index.RootElement.GetProperty("entries").EnumerateArray()
+                .ToDictionary(entry => entry.GetProperty("gid").GetString()!, entry => entry.Clone(), StringComparer.Ordinal);
+        }
         var fileMap = FileMapLoader.LoadSnapshot(snapshot);
         var sources = snapshot.Files.Values
             .Where(static file => file.Path.Value.StartsWith(SourcePrefix, StringComparison.Ordinal)
@@ -51,8 +60,11 @@ internal static class BlueprintIndexAssembler
                 throw new FormatException($"Blueprint source has invalid or duplicate gid: {gid}");
             }
 
+            if (reusable is not null && !prior!.Changes.Contains(sourcePath) && !prior.Changes.Contains(projectionPath)
+                && reusable.TryGetValue(gid, out var previous))
+                return previous;
             var projection = RequiredFile(snapshot, projectionPath);
-            return new
+            return JsonSerializer.SerializeToElement(new
             {
                 gid,
                 source = Artifact(source),
@@ -62,8 +74,8 @@ internal static class BlueprintIndexAssembler
                     source = Metadata(UniqueMatch(fileMap, sourcePath)),
                     projection = Metadata(UniqueMatch(fileMap, projectionPath)),
                 },
-            };
-        }).OrderBy(static entry => entry.gid, StringComparer.Ordinal).ToArray();
+            });
+        }).OrderBy(static entry => entry.GetProperty("gid").GetString(), StringComparer.Ordinal).ToArray();
 
         var element = JsonSerializer.SerializeToElement(new
         {
@@ -72,6 +84,10 @@ internal static class BlueprintIndexAssembler
         });
         return StructuredCanonicalWriter.WriteJson(element);
     }
+
+    private static bool IsBlueprintInput(string path) =>
+        path.StartsWith(SourcePrefix, StringComparison.Ordinal)
+        && (path.EndsWith(SourceSuffix, StringComparison.Ordinal) || path.EndsWith(ProjectionSuffix, StringComparison.Ordinal));
 
     private static object Artifact(RepositoryFile file) => new
     {
