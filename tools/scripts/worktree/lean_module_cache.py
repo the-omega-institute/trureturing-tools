@@ -190,7 +190,7 @@ def compile_omega_outputs(root, modules, names, common_prepared):
     return common_prepared
 
 
-def checkout_targets(root, *, requested=None, restore_only=False, scope_roots=None):
+def checkout_targets(root, *, requested=None, restore_only=False, scope_roots=None, scope_inputs=None):
     modules = inventory.workspace_modules(root)
     roots = inventory.release_roots(modules) | omega_roots(root, modules)
     graph = compiler.scoped_imports(root, modules, roots)
@@ -210,11 +210,12 @@ def checkout_targets(root, *, requested=None, restore_only=False, scope_roots=No
         if selected:
             # The CLI accepts an explicit scope. Large selections use one snapshot parse.
             roots = set(requested or ()) & selected.keys()
-            scope_inputs = {} if roots and scope_roots is not None else None
+            if roots and scope_roots is not None and scope_inputs is None:
+                scope_inputs = {}
             subset = sorted(selected) if requested is not None and sum(len(n) + 1 for n in selected) < 64000 else None
             try:
                 utilities = utility_inputs(root, subset, scope_inputs=scope_inputs)
-                if scope_inputs is not None:
+                if scope_inputs is not None and scope_roots is not None:
                     # Match the scoped inspector's utility references on explicitly requested roots.
                     for name in roots:
                         scope_roots.update(scope_inputs.get(reported[name], ()))
@@ -621,6 +622,8 @@ def run():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repository', type=Path, default=Path.cwd())
     commands = parser.add_subparsers(dest='command', required=True)
+    index = commands.add_parser('index')
+    index.add_argument('--output', type=Path, required=True)
     plan = commands.add_parser('plan')
     plan.add_argument('--base', type=Path)
     plan.add_argument('--legacy-checkpoints', action='store_true')
@@ -649,6 +652,12 @@ def run():
         print(json.dumps(work(root, plan, args.lane, remote, args.output)))
         return 0
     remote = Remote(root)
+    if args.command == 'index':
+        args.output.unlink(missing_ok=True)
+        current = remote.latest()
+        if current is not None:
+            write(args.output, current)
+        return 0
     if args.command == 'plan':
         modules, targets = checkout_targets(root)
         base = json.loads(args.base.read_bytes()) if args.base else remote.latest()

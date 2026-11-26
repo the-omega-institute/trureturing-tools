@@ -1,6 +1,9 @@
 """Build scoped Lean evidence and check the candidate and its selected delta."""
 
 import argparse
+from collections import Counter
+from itertools import groupby
+from math import isqrt
 import hashlib
 import json
 import os
@@ -158,9 +161,146 @@ def file_hash(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def refine_batches(batches, definitions, cold, weights, limit=60_000):
+    """Keep documents on their selected runners. Move families of independent roots together."""
+    assigned = [set(roots) for roots, _ in batches]
+    pinned = {root for names in definitions.values() for root in names}
+    families = []
+    counts = [Counter() for _ in batches]
+    sizes = [sum(len(name) + 1 for name in roots) for roots in assigned]
+    if max(sizes) > limit:
+        return batches
+    for lane, roots in enumerate(assigned):
+        # One reference per group lets a move charge only its marginal closure on each runner.
+        counts[lane].update(set().union(*(cold[n] for n in roots & pinned)))
+        for _, members in groupby(sorted(roots - pinned), key=lambda name: name.rpartition('.')[0]):
+            names = tuple(members)
+            missing = set().union(*(cold[name] for name in names))
+            counts[lane].update(missing)
+            families.append((lane, names, missing, sum(len(name) + 1 for name in names)))
+
+    def work(names):
+        return len(names), sum(weights[name] for name in names)
+
+    loads = [work(c) for c in counts]
+    total_count, total_weight = map(sum, zip(*loads))
+    if not total_count or not total_weight:
+        return batches
+
+    def score(trial):
+        # Normalize the row-count and source-size coordinates to their respective initial loads.
+        scaled = [value for count, weight in trial for value in (count * total_weight, weight * total_count)]
+        return (max(0, sum(count for count, _ in trial) - total_count),
+                max(scaled), sum(value * value for value in scaled))
+
+    previous = score(loads)
+    # Each pass visits every movable family once. Strict improvement precludes oscillation.
+    while True:
+        improved = False
+        for pos, (src, names, missing, size) in enumerate(families):
+            if len(assigned[src]) == len(names):
+                continue
+            removed = work({name for name in missing if counts[src][name] == 1})
+            if not removed[0]:
+                continue
+            reduced = tuple(a - b for a, b in zip(loads[src], removed))
+            best, move = previous, None
+            for dest in range(len(batches)):
+                if dest == src or sizes[dest] + size > limit:
+                    continue
+                added = work(missing - counts[dest].keys())
+                enlarged = tuple(a + b for a, b in zip(loads[dest], added))
+                trial = loads.copy()
+                trial[src], trial[dest] = reduced, enlarged
+                value = score(trial)
+                if value < best:
+                    best, move = value, (dest, enlarged)
+            if move is None:
+                continue
+            dest, enlarged = move
+            assigned[src].difference_update(names)
+            assigned[dest].update(names)
+            sizes[src] -= size
+            sizes[dest] += size
+            counts[src].subtract(missing)
+            for name in missing:
+                if not counts[src][name]:
+                    del counts[src][name]
+            counts[dest].update(missing)
+            loads[src], loads[dest] = reduced, enlarged
+            families[pos] = (dest, names, missing, size)
+            previous, improved = best, True
+        if not improved:
+            return [(sorted(roots), paths) for roots, (_, paths) in zip(assigned, batches)]
+
+
+def balance_plan(scope, index, root):
+    # Read the same compiler graph and input keys as the published cache reader.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'worktree'))
+    from lean_artifact_inventory import INSPECTOR, import_closure
+    from lean_ci_cache_scope import REPORT_PROGRAMS, inspector_program_root
+    from scoped import runtime_targets
+    from lean_module_cache import checkout_targets
+
+    batches = distributed_plan(scope)
+    if (not 2 <= len(batches) <= 256 or not index["targets"]
+            or any(sum(len(n) + 1 for n in names) > 60_000 for names, _ in batches)):
+        return scope
+    references = {}
+    modules, targets = checkout_targets(root, scope_inputs=references)
+    graph = {name: target['deps'] for name, target in targets.items()}
+    saved = index['targets']
+    weights = {name: max(1, isqrt((root / modules[name].source).stat().st_size))
+               for name, row in targets.items()
+               if modules[name].report and row['key'] != saved.get(name, {}).get('key')}
+    new_d5 = {name for name in targets if name.startswith("D5.") and name not in saved}
+    cold, fresh = {}, {}
+    inspector = (root / INSPECTOR / 'lakefile.lean').read_text()
+    executables = {inspector_program_root(inspector, prog.split('/')[1]) for prog in REPORT_PROGRAMS}
+    for name in scope['targets']:
+        pending = [name, *references.get(str(modules[name].source), [])]
+        visited = set()
+        while pending:
+            selected = import_closure(graph, pending) - visited
+            visited.update(selected)
+            # The inspector follows utility claims throughout the import closure.
+            pending = {utility['claimModule'] for module in selected
+                       if (utility := modules[module].report_utility)} - visited
+        cold[name] = visited & weights.keys()
+        runtime = {item.removeprefix('+') for item in runtime_targets(visited)}
+        fresh[name] = (visited | import_closure(graph, runtime)) & new_d5
+    refined = refine_batches(batches, scope['definitions'], cold, weights)
+    common = import_closure(graph, executables) & new_d5
+    programs = import_closure(graph, scope["programs"]) & new_d5
+    rows = []
+    for lane, (names, paths) in enumerate(refined):
+        new = common.union(*(fresh[name] for name in names))
+        if lane == 0:
+            new.update(programs)
+        rows.append(dict(targets=names, paths=paths, new_d5_modules=sorted(new)))
+    result = dict(scope, report_batches=rows)
+    distributed_plan(result)
+    return result
+
+
+
 def distributed_plan(scope):
     scope_modules(scope)
     batches = list(report_batches(scope))
+    stored = scope.get("report_batches")
+    if stored is not None:
+        if len(stored) != len(batches):
+            raise ValueError("incorrect number of report batches")
+        batches = [(entry["targets"], entry["paths"]) for entry in stored]
+        for entry, (targets, paths) in zip(stored, batches):
+            new = entry["new_d5_modules"]
+            if (not isinstance(new, list) or new != sorted(set(new))
+                    or any(not name.startswith("D5.") or not MODULE.fullmatch(name) for name in new)):
+                raise ValueError("invalid new D5 module in stored report batch")
+            if (not targets or len(targets) != len(set(targets))
+                    or sum(len(name) + 1 for name in targets) > 60_000
+                    or any(not set(scope["definitions"][path]) <= set(targets) for path in paths)):
+                raise ValueError("invalid stored report batch")
     if not scope["targets"]:
         return batches
     if {name for targets, _ in batches for name in targets} != set(scope["targets"]):
@@ -175,7 +315,10 @@ def batch_scope(scope, batches, index):
     if not 0 <= index < len(batches):
         raise ValueError(f"report batch {index} is outside the plan")
     targets, paths = batches[index]
-    return dict(scope, targets=targets, paths=paths, programs=scope["programs"] if index == 0 else [],
+    stored = scope.get("report_batches")
+    new_d5 = stored[index]["new_d5_modules"] if stored is not None else []
+    return dict(scope, targets=targets, paths=paths, new_d5_modules=new_d5,
+                programs=scope["programs"] if index == 0 else [],
                 definitions={p: scope["definitions"][p] for p in paths if p in scope["definitions"]})
 
 
@@ -267,12 +410,22 @@ if __name__ == "__main__":
     modes.add_argument("--read-plan", type=Path)
     parser.add_argument("--cache-targets", action="store_true")
     batches = parser.add_mutually_exclusive_group()
+    batches.add_argument("--balance-plan", type=Path, metavar="INDEX")
     batches.add_argument("--batch-matrix", action="store_true")
     batches.add_argument("--batch", type=int)
     batches.add_argument("--finalize", action="store_true")
     parser.add_argument("--artifacts", type=Path)
     args = parser.parse_args()
     try:
+        if args.balance_plan is not None:
+            if not args.read_plan or args.cache_targets or args.artifacts:
+                parser.error("--balance-plan requires --read-plan")
+            scope = json.loads(args.read_plan.read_bytes())
+            result = balance_plan(scope, json.loads(args.balance_plan.read_bytes()), Path.cwd())
+            with tempfile.NamedTemporaryFile(mode="w", dir=args.read_plan.parent, delete=False) as output:
+                json.dump(result, output)
+            os.replace(output.name, args.read_plan)
+            sys.exit(0)
         batch_mode = args.batch_matrix or args.batch is not None or args.finalize
         if batch_mode and not args.read_plan:
             parser.error("distributed reports require --read-plan")

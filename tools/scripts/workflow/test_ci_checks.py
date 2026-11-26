@@ -19,6 +19,44 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class CheckTests(unittest.TestCase):
+    def test_balancing_moves_cold_closures_and_preserves_document_and_argument_limits(self):
+        import ci_pr_lean as lean
+        batches = [(["A.Doc", "B.Free", "C.Free", "D.Free"], ["A.scribe.cs"]), (["E.Free"], [])]
+        definitions = {"A.scribe.cs": ["A.Doc"]}
+        cold = {name: {name} for roots, _ in batches for name in roots}
+        cold["B.Free"].add("Shared")
+        cold["E.Free"].add("Shared")
+        weights = {name: 1 for group in cold.values() for name in group}
+        result = lean.refine_batches(batches, definitions, cold, weights, limit=28)
+        self.assertEqual(result[0][1], ["A.scribe.cs"])
+        self.assertIn("A.Doc", result[0][0])
+        self.assertEqual({n for roots, _ in result for n in roots}, set(cold))
+        self.assertTrue(all(sum(len(n) + 1 for n in roots) <= 28 for roots, _ in result))
+        self.assertLess(max(len(set.union(*(cold[n] for n in roots))) for roots, _ in result), 5)
+
+    def test_distributed_workers_require_the_stored_assignment_and_share_new_program_inputs(self):
+        import ci_pr_lean as lean
+        scope = dict(targets=["D5.A", "D5.B"], paths=["doc"], programs=["Program"],
+                     definitions={"doc": ["D5.B"]},
+                     report_batches=[dict(targets=["D5.B"], paths=["doc"], new_d5_modules=["D5.New"]),
+                                     dict(targets=["D5.A"], paths=[], new_d5_modules=[])])
+        baseline = [(["D5.A"], []), (["D5.B"], ["doc"])]
+        with patch.object(lean, "report_batches", return_value=baseline):
+            batches = lean.distributed_plan(scope)
+            selected = lean.batch_scope(scope, batches, 0)
+            self.assertEqual((selected["targets"], selected["programs"], selected["new_d5_modules"]),
+                             (["D5.B"], ["Program"], ["D5.New"]))
+            scope["report_batches"][0]["new_d5_modules"] = ["../escape"]
+            with self.assertRaisesRegex(ValueError, "new D5"):
+                lean.distributed_plan(scope)
+            scope["report_batches"][0]["new_d5_modules"] = []
+            scope["report_batches"][0]["targets"] = ["D5.A"]
+            with self.assertRaisesRegex(ValueError, "stored report batch"):
+                lean.distributed_plan(scope)
+            del scope["report_batches"]
+            self.assertEqual(lean.batch_scope(scope, lean.distributed_plan(scope), 1)["new_d5_modules"], [])
+
+
     def test_missing_executable_is_observable_infrastructure_failure(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()) as output:
             code = checks.with_budget(Path(directory) / "budget", lambda: checks.execute(
