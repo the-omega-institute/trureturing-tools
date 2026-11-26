@@ -332,12 +332,13 @@ private def prepareNativeModuleReport (mod : Module) : FetchM (Job PreparedArtif
     observePhase "lake-module-inputs" "finish"
     let ownInputs ← IO.ofExcept (inputs.getObjValAs? (Array Json) "inputs")
     let mut deps := deps
+    let mut tracedExports := exports
     unless ownInputs.isEmpty do
       let some registry := (← getWorkspace).findModule? `LeanInformationAudit.TemplateEnrollment
         | error "IE-C050 reason=incomplete_closure rule=dtr.report_producer"
       let enrollment ← reportState.graphFetch.atomically fun _ =>
         JobM.runFetchM (prebuilt registry.exportInfo.fetch)
-      deps := deps.add enrollment
+      tracedExports := tracedExports.push enrollment
     deps := deps.mix (← inputBinFile mod.leanFile)
     deps := deps.mix (← inputBinFile utility)
     -- Await without mixing: the compiled tool must be current, but its implementation
@@ -348,13 +349,13 @@ private def prepareNativeModuleReport (mod : Module) : FetchM (Job PreparedArtif
     -- Schedule the format input before the callback. Waiting on a freshly
     -- created job inside every callback makes the runtime spawn spare workers.
     let format ← inputBinFile (root / ".lake/build/lean-inspector" / "report-format")
-    (deps.add (Job.mixArray exports) |>.add projection |>.add inspector |>.add format).mapM fun _ => do
+    (deps.add (Job.mixArray tracedExports) |>.add projection |>.add inspector |>.add format).mapM fun _ => do
       observePhase "lake-report-programs-callback" "start"
       -- The compiler reader consumes transitive private values, also
       -- through public imports. Lake's legacy trace follows that same closure;
       -- allTransTrace follows each import's visibility and can omit those values.
-      -- Apply this to the module and every external utility claim.
-      for exportJob in exports do
+      -- Trace the module, its external utility claims, and the registry used for typed inputs.
+      for exportJob in tracedExports do
         let info ← exportJob.await
         addTrace (info.allArtsTrace.mix info.legacyTransTrace)
       addTrace format.getTrace
@@ -506,7 +507,7 @@ script frozenDependencies args do
     cwd := some root
   } >>= (·.wait)
 
-private def collectNativeReports (pkg : Package) (config : Json) :
+private def collectNativeReports (pkg : Package) (config : Json) (names : Array String) :
     FetchM (Job (Array ReportArtifact)) := do
   let reportState ← (← fetch <| pkg.facet `reportBatch).await
   -- Shared native dependency jobs compose continuations; no per-miss promise
@@ -520,7 +521,7 @@ private def collectNativeReports (pkg : Package) (config : Json) :
   let mut modules := #[]
   let mut roots := #[]
   let mut seen : Lean.NameSet := {}
-  for name in ← strings config "modules" do
+  for name in names do
     let some mod := (← getWorkspace).findModule? name.toName
       | error s!"registered report module is not in the Lake workspace: {name}"
     modules := modules.push mod
@@ -587,4 +588,24 @@ private def collectNativeReports (pkg : Package) (config : Json) :
 package_facet moduleReports (owner : Package) : Array FilePath := withCurrPackage owner do
   let pkg := (← getWorkspace).root
   let config ← (← fetch <| pkg.facet `reportInputData).await
-  return (← collectNativeReports pkg config).map (·.map (·.path))
+  return (← collectNativeReports pkg config (← strings config "modules")).map (·.map (·.path))
+
+/-- Prepare shard compiler inputs before opening the prebuilt report facets.
+Collect selected members in native batches with the full registered source whitelist. -/
+script shardModuleReports args do
+  let [path] := args | throw <| IO.userError "shardModuleReports requires a request file"
+  let request ← readJson path
+  let names ← strings request "reports"
+  let inputs ← strings request "inputs"
+  let ws ← getWorkspace
+  let modules ← inputs.mapM fun name => do
+    let some mod := ws.findModule? name.toName
+      | throw <| IO.userError s!"unknown report compiler input {name}"
+    return mod
+  runBuild (cfg := {outLv := .error}) do
+    let compiled := mixModuleJobs (← modules.mapM (·.leanArts.fetch))
+    return (compiled.add (← reportInspector.fetch) |>.add (← inputDiscovery.fetch))
+  let _ ← runBuild (cfg := {outLv := .error}) do
+    let config ← (← fetch <| ws.root.facet `reportInputData).await
+    collectNativeReports ws.root config names
+  return 0
