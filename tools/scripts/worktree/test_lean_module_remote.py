@@ -385,6 +385,40 @@ class VersionedShards(unittest.TestCase):
         self.assertEqual(transport.json_body(result), index_bytes)
         self.assertEqual(result['shards']['D5'], base['shards']['D5'])
 
+    def test_older_finish_resumes_the_index_staged_by_a_later_plan(self):
+        self.remote.tags = lambda current, base: [current]
+        def plan(source, inputs, base=None):
+            return cache.make_plan(source * 40, 'abcd', inputs, base, self.remote,
+                                   cache.DEFAULT_CAPACITY, 2, mathlib_version='v1')
+        def save(plan, name):
+            return self.save(dict(plan, shards={name: plan['shards'][name]}), name.encode())
+        stable = {'D5.X': {'key': 'x', 'deps': []}}
+        inputs = stable | {'Other.Y': {'key': 'y', 'deps': []}}
+        early = plan('c', inputs)
+        save(early, 'D5')
+        save(early, 'Other')
+        older_base = plan('a', stable)
+        save(older_base, 'D5')
+        base = cache.finish(older_base, self.remote)
+        later = plan('c', inputs, base)
+        self.assertEqual(later['inherited']['D5']['version'], base['version'])
+        with patch.object(self.remote, 'present', side_effect=InterruptedError('promotion')):
+            with self.assertRaisesRegex(InterruptedError, 'promotion'):
+                cache.finish(later, self.remote)
+        stored = self.service.files[later['version'], transport.INDEX]
+        staged = json.loads(stored)
+        for changed in (dict(staged, source='d' * 40),
+                        dict(staged, targets={**staged['targets'], 'D5.X': dict(staged['targets']['D5.X'], key='other')}),
+                        dict(staged, shards={})):
+            with patch.object(self.remote, 'staged_index', return_value=changed):
+                with self.assertRaisesRegex(ValueError, 'staged module'):
+                    cache.finish(early, self.remote)
+        self.assertEqual(self.service.ref, older_base['source'])
+        result = cache.finish(early, self.remote)
+        self.assertEqual(transport.json_body(result), stored)
+        self.assertEqual(self.remote.latest(), result)
+        self.assertEqual(self.service.ref, early['source'])
+
     def test_retry_keeps_the_original_address_of_an_unpublished_sibling_shard(self):
         inputs = {'D5.X': {'key': 'x', 'deps': []}}
         def plan(source, base=None, prepare=False):

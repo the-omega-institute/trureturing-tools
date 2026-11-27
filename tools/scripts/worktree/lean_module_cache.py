@@ -614,6 +614,26 @@ def work(root, plan, lane, remote, output):
 
 
 def finish(plan, remote):
+    staged = remote.staged_index(plan['version'])
+    if staged is not None:
+        # An earlier plan may have picked different physical shards for the same inputs.
+        targets = staged['targets']
+        if (any(staged[k] != plan[k] for k in ('schema', 'source', 'version', 'mathlib'))
+                or targets.keys() != plan['targets'].keys()):
+            raise ValueError('staged module index differs from publication plan')
+        members = defaultdict(list)
+        for name, row in targets.items():
+            planned = plan['targets'][name]
+            if dict(row, shard=planned['shard']) != planned:
+                raise ValueError('staged module inputs differ from publication plan: ' + name)
+            members[row['shard']].append(name)
+        if (members.keys() != staged['shards'].keys()
+                or any(row['members'] != sorted(members[group])
+                       or row['fingerprint'] != shard_fingerprint(plan['mathlib'], targets, members[group])
+                       for group, row in staged['shards'].items())):
+            raise ValueError('staged module shards differ from indexed targets')
+        remote.publish(staged)
+        return staged
     if plan['shards'].keys() - plan['inherited'].keys():
         plan = expanded(plan, remote.splits(plan))
     rows = recover_partials(plan, matching(plan, plan['inherited']), remote)
