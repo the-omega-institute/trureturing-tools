@@ -72,7 +72,7 @@ class Service:
             ref = body['ref'].removeprefix('refs/')
             if ref in self.claims:
                 raise transport.host.GitHubCommandError(1, ['gh'], stderr='HTTP 422: exists')
-            self.claims[ref] = dict(ref=body['ref'], object={'sha': body['sha']})
+            self.claims[ref] = dict(ref=body['ref'], node_id='REF_' + ref, object={'sha': body['sha']})
             return self.claims[ref]
         if path.startswith('git/matching-refs/tags/'):
             prefix = path.removeprefix('git/matching-refs/tags/')
@@ -85,20 +85,18 @@ class Service:
         raise ValueError(path)
 
     def request(self, url, *, method='GET', path=None, headers=None, accept=None, authenticate=True, redirect=False, payload=None):
-        if url == 'https://api.github.com/repos/' + transport.host.REPO:
-            return io.BytesIO(b'{"node_id":"repository-id"}')
         if url == 'https://api.github.com/graphql':
-            body = json.loads(payload)
-            changes = body['variables']['input']
-            assert method == 'POST' and changes['repositoryId'] == 'repository-id'
-            updates = changes['refUpdates']
-            assert len(updates) <= 50
-            for update in updates:
-                ref = update['name'].removeprefix('refs/')
-                assert self.claims[ref]['object']['sha'] == update['beforeOid'] and update['afterOid'] == '0'*40
-            for update in updates:
-                del self.claims[update['name'].removeprefix('refs/')]
-            return io.BytesIO(b'{"data":{"updateRefs":{"clientMutationId":null}}}')
+            mutation = json.loads(payload)
+            variables = mutation['variables']
+            assert method == 'POST' and 0 < len(variables) <= 50
+            refs = {entry['node_id']: ref for ref, entry in self.claims.items()}
+            data = {}
+            for alias, inputs in variables.items():
+                assert f'${alias}:DeleteRefInput!' in mutation['query']
+                assert f'{alias}:deleteRef(input:${alias}){{clientMutationId}}' in mutation['query']
+                del self.claims[refs[inputs['refId']]]
+                data[alias] = {'clientMutationId': inputs['clientMutationId']}
+            return io.BytesIO(json.dumps({'data': data}).encode())
         if method == 'HEAD' and '/releases/download/' in url:
             assert not authenticate and redirect
             tag, name = urlsplit(url).path.split('/')[-2:]
@@ -277,7 +275,9 @@ class VersionedShards(unittest.TestCase):
         for key in units:
             for tail, owner in [('unit/' + key, 'b'*40), (f'done/{key}/{sha}-42', plan['source'])]:
                 ref = prefix + tail
-                self.service.claims[ref.removeprefix('refs/')] = dict(ref=ref, object={'sha': owner})
+                kind = 'tag' if tail.startswith('unit/') else 'commit'
+                self.service.claims[ref.removeprefix('refs/')] = dict(
+                    ref=ref, node_id='REF_' + ref, object={'sha': owner, 'type': kind})
         with patch.object(self.service, 'api', wraps=self.service.api) as listed:
             done = self.remote.compiler_progress(plan, set(units))
             self.assertEqual(len(done), len(units))
@@ -287,6 +287,38 @@ class VersionedShards(unittest.TestCase):
             self.assertEqual(sum(call.args[0] == 'https://api.github.com/graphql'
                                  for call in deletes.call_args_list), 64)
             self.assertEqual(self.service.claims, {})
+
+    def test_partial_claim_deletion_relists_remaining_refs_before_retry(self):
+        plan = self.plan('a'*40)
+        key = 'b'*64
+        row = dict(version=transport.ACTIONS_CACHE, sha256='c'*64, bytes=42)
+        self.remote.claim_compiler_unit(plan, 0, [key])
+        self.remote.complete_compiler_unit(plan, 0, key, row)
+        first, remaining = self.service.claims
+        delete = self.service.request
+        def partial(url, **kwargs):
+            if first in self.service.claims:
+                del self.service.claims[first]
+                return io.BytesIO(b'{"data":{"r0":{"clientMutationId":"r0"}}}')
+            variables = json.loads(kwargs['payload'])['variables']
+            self.assertEqual(variables, {'r0': {'refId': 'REF_' + remaining, 'clientMutationId': 'r0'}})
+            return delete(url, **kwargs)
+        with patch.object(self.service, 'request', side_effect=partial), \
+             patch.object(self.service, 'api', wraps=self.service.api) as listings:
+            self.remote.clear_compiler_claims(plan['source'])
+            self.assertEqual(listings.call_count, 2)
+            self.assertFalse(self.service.claims)
+
+    def test_persistent_graphql_error_or_wrong_acknowledgment_fails_cleanup(self):
+        plan = self.plan('a'*40)
+        self.remote.claim_compiler_unit(plan, 0, ['b'*64])
+        for result in ({'errors': [{'message': 'denied'}], 'data': {'r0': {'clientMutationId': 'r0'}}},
+                       {'data': {'r0': {'clientMutationId': 'wrong'}}}):
+            with self.subTest(result=result), patch.object(self.service, 'request',
+                    side_effect=lambda *args, **kwargs: io.BytesIO(json.dumps(result).encode())):
+                with self.assertRaisesRegex(ValueError, 'confirm deletion'):
+                    self.remote.clear_compiler_claims(plan['source'])
+        self.assertEqual(len(self.service.claims), 1)
 
     def test_failed_attempt_releases_waiters_for_a_fresh_retry(self):
         with patch.object(self.remote, 'api', return_value={'jobs': [{'conclusion': 'failure'}]}):
