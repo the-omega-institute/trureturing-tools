@@ -17,7 +17,7 @@ import zlib
 import lean_compile_layers as compiler
 from lean_artifact_inventory import import_closure
 from lean_generation_plan import digest
-from lean_release_index import valid_digest
+from lean_release_index import safe_path, valid_digest
 
 UNIT_LIMIT = 32
 BASIS = {'OmegaInit', 'OmegaMathlib'}
@@ -277,6 +277,7 @@ def prepare(plan, base, remote, workers, prepare_release, modules, root):
 
 def compile_units(root, plan, lane, remote, modules, output):
     import lean_module_cache as cache
+    from lean_cache_release import has_unsafe_parent
     from lean_module_remote import CompilerCacheMiss
     from lean_module_shards import checked_shard_files, pack_shard, restore_shard
     dag = plan['compiler_dag']
@@ -326,8 +327,16 @@ def compile_units(root, plan, lane, remote, modules, output):
                     if header[:4] != b'\x1f\x8b\x08\x08' or header[10:] != row['fingerprint'].encode() + b'\0':
                         raise ValueError('compiler checkpoint differs from requested inputs')
                 restored = restore_shard(path, row, wanted, modules, destination, root=root, kind='compiler')
-                if wanted != restored:
-                    raise ValueError('compiler dependency could not be installed: ' + min(wanted - restored))
+                # A previous Lake job may have built a dependency in this checkout.
+                # Its trace and sidecars alone cannot establish that the live bytes are intact.
+                for name in wanted - restored:
+                    for relative in cache.inventory.lean_artifact_paths(name, modules[name]):
+                        live = destination / safe_path(relative.as_posix())
+                        if (has_unsafe_parent(destination, relative) or live.is_symlink()
+                                or (live.exists() and not live.is_file())):
+                            raise ValueError('unsafe local compiler artifact: ' + str(relative))
+                        live.unlink(missing_ok=True)
+                    rebuild.add(name)
                 cache.materialize_shared(destination, modules, restored)
                 installed.update(restored)
         if rebuild:

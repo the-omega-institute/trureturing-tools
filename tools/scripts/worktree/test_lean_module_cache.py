@@ -408,6 +408,41 @@ class ModuleReleases(unittest.TestCase):
         self.assertEqual(result['compiled_modules'], 3)
         self.assertEqual(set(cache.finish(retry, self.remote)['targets']), set(retry['targets']))
 
+    def test_partial_historical_shard_rebuilds_only_conflicting_lake_outputs(self):
+        first = self.plan()
+        self.workers(first)
+        previous = cache.finish(first, self.remote)
+        self.source = 'b' * 40
+        (self.root / 'D5/C.lean').write_text('import D5.A\ndef valueC := valueA + 1\n')
+        plan = self.dag_plan(workers=1, base=previous)
+        seeds = plan['compiler_dag']['seeds']['owners']
+        self.assertEqual(set(seeds), {'D5.A', 'D5.B'})
+        self.assertEqual(seeds['D5.A'], seeds['D5.B'])
+
+        build = self.root / PROJECT_BUILD
+        shutil.rmtree(build)
+        self.lake('build', '+D5.C:leanArts')  # Lake builds A as a transitive prerequisite.
+        artifact = build / 'lib/lean/D5/A.olean'
+        good = artifact.read_bytes()
+        artifact.write_bytes(good + b'corrupt')
+        self.lake('build', '+D5.A:leanArts')
+        self.assertEqual(artifact.read_bytes(), good + b'corrupt')
+        sibling = build / 'lib/lean/D5/B.olean'
+        self.assertFalse(sibling.exists())
+        self.compiled.clear()
+        with patch.object(self.remote, 'download', side_effect=lambda row, path: path.write_bytes(b'corrupt archive')):
+            with self.assertRaisesRegex(ValueError, 'shard length or checksum mismatch'):
+                self.workers(plan)
+        self.assertFalse(sibling.exists())
+        self.assertEqual(artifact.read_bytes(), good + b'corrupt')
+        self.assertEqual(self.compiled, [])
+        result = self.workers(plan)
+        self.assertEqual(sum(r['compiled_modules'] for r in result), 2)
+        self.assertEqual(self.compiled, [['D5.A'], ['D5.C']])
+        self.assertEqual(artifact.read_bytes(), good)
+        self.assertTrue(sibling.is_file())
+        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(plan['targets']))
+
     def test_evicted_claimed_queue_cannot_stall_publication(self):
         import lean_module_dag as dag
         plan = self.dag_plan()
