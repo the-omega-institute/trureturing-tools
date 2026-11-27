@@ -39,7 +39,7 @@ jobs:
         with:
           repository: the-omega-institute/trureturing
           # The synthetic owner-collision fixture uses the single-backend consumer.
-          ref: ${{ matrix.shard == 'frozen-synthetic' && '4b5d9040081f1c82347ce8b500179957c832af50' || '02cf78fe654f0af04b98d27b52ff74d153d7ca09' }}
+          ref: ${{ matrix.shard == 'frozen-synthetic' && '4b5d9040081f1c82347ce8b500179957c832af50' || '8a141ea4d06fca248567a63d6369420876e13656' }}
           path: fixture
           persist-credentials: false
       - name: Install the candidate archive in the pinned consumer

@@ -193,7 +193,7 @@ def compile_omega_outputs(root, modules, names, common_prepared):
     return common_prepared
 
 
-def checkout_targets(root, *, kind='compiler', requested=None, restore_only=False, scope_roots=None):
+def checkout_targets(root, *, kind='compiler', requested=None, restore_only=False, scope_roots=None, scope_inputs=None):
     modules = inventory.workspace_modules(root)
     roots = inventory.release_roots(modules) | omega_roots(root, modules)
     registry = 'LeanInformationAudit.TemplateEnrollment'
@@ -216,11 +216,12 @@ def checkout_targets(root, *, kind='compiler', requested=None, restore_only=Fals
         if selected:
             # The CLI accepts an explicit scope. Large selections use one snapshot parse.
             roots = set(requested or ()) & selected.keys()
-            scope_inputs = {} if roots and scope_roots is not None else None
+            if roots and scope_roots is not None and scope_inputs is None:
+                scope_inputs = {}
             subset = sorted(selected) if requested is not None and sum(len(n) + 1 for n in selected) < 64000 else None
             try:
                 utilities = utility_inputs(root, subset, scope_inputs=scope_inputs)
-                if scope_inputs is not None:
+                if scope_inputs is not None and scope_roots is not None:
                     # Match the scoped inspector's utility references on explicitly requested roots.
                     for name in roots:
                         scope_roots.update(scope_inputs.get(reported[name], ()))
@@ -759,27 +760,31 @@ def validate_report_pair(index, compiler_index):
             raise ValueError('report shard differs from paired compiler shard: ' + name)
 
 
+def published_reports(root, index, remote, *, exact=False, report_remote=None, report_index=None):
+    from lean_module_remote import Remote
+    reader, reports = report_remote, report_index
+    if reader is None:
+        reader = Remote(root, remote.deadline, kind='report')
+        reports = reader.published(index['version'] + '-report') if exact else reader.latest()
+        if reports is None and not exact and index.get('combined_report_version'):
+            mixed = remote.published(index['combined_report_version'])
+            if mixed is not None:
+                if mixed.get('kind') is not None or mixed['mathlib'] != index['mathlib']:
+                    raise ValueError('ineligible historical combined report publication')
+                return mixed, remote
+    if reports is not None:
+        version = reports['compiler_version']
+        paired = index if version == index['version'] else remote.published(version)
+        if paired is None:
+            raise ValueError('published compiler prerequisite for the selected report index is unavailable')
+        validate_report_pair(reports, paired)
+    return reports, reader
+
+
 def restore_published(root, index, names, remote, destination, kind=None, *, exact=False,
                       report_remote=None, report_index=None):
-    from lean_module_remote import Remote
     def load_reports():
-        reader, reports = report_remote, report_index
-        if reader is None:
-            reader = Remote(root, remote.deadline, kind='report')
-            reports = reader.published(index['version'] + '-report') if exact else reader.latest()
-            if reports is None and not exact and index.get('combined_report_version'):
-                mixed = remote.published(index['combined_report_version'])
-                if mixed is not None:
-                    if mixed.get('kind') is not None or mixed['mathlib'] != index['mathlib']:
-                        raise ValueError('ineligible historical combined report publication')
-                    return mixed, remote
-        if reports is not None:
-            version = reports['compiler_version']
-            paired = index if version == index['version'] else remote.published(version)
-            if paired is None:
-                raise ValueError('published compiler prerequisite for the selected report index is unavailable')
-            validate_report_pair(reports, paired)
-        return reports, reader
+        return published_reports(root, index, remote, exact=exact, report_remote=report_remote, report_index=report_index)
 
     return restore(root, index, names, remote, destination, kind=kind, load_reports=load_reports)
 
@@ -841,6 +846,8 @@ def run():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repository', type=Path, default=Path.cwd())
     commands = parser.add_subparsers(dest='command', required=True)
+    index = commands.add_parser('index', help='write published report and compiler keys for CI balancing')
+    index.add_argument('--output', type=Path, required=True)
     plan = commands.add_parser('plan')
     plan.add_argument('--base', type=Path)
     plan.add_argument('--kind', choices=('compiler', 'report'), default='compiler')
@@ -869,6 +876,21 @@ def run():
     get.add_argument('--destination', type=Path)
     args = parser.parse_args()
     root = args.repository.resolve()
+    if args.command == 'index':
+        remote = Remote(root)
+        compiler_index = remote.latest()
+        reports = {}
+        compilers = []
+        if compiler_index:
+            compilers = sorted(compiler_index['targets'])
+            report_index, _ = published_reports(root, compiler_index, remote)
+            reports = {name: row['key'] for name, row in (report_index or {}).get('targets', {}).items()}
+            if compiler_index.get('kind') is None:
+                for name, row in compiler_index['targets'].items():
+                    if 'report_inputs' in row:
+                        reports.setdefault(name, row['key'])
+        write(args.output, {'reports': reports, 'compilers': compilers})
+        return 0
     if args.command == 'worker':
         plan = json.loads(args.plan.read_bytes())
         kind = plan['kind']
