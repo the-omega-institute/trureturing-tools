@@ -335,8 +335,21 @@ class ModuleReleases(unittest.TestCase):
             self.assertEqual((exact['compiler_restored'], exact['reports_restored']), (3, 0))
             bad = {**reports_a, 'compiler_version': compiler_b['version']}
             report_remote.latest = lambda: bad
+            fallback = cache.restore_published(self.root, compiler_b, None, self.remote, self.root / 'mispaired')
+            self.assertEqual((fallback['compiler_restored'], fallback['reports_restored']), (3, 0))
+            self.assertIn('report publication differs', fallback['report_error'])
             with self.assertRaisesRegex(ValueError, 'report publication differs'):
-                cache.restore_published(self.root, compiler_b, None, self.remote, self.root / 'mispaired')
+                cache.restore_published(self.root, compiler_b, None, self.remote, self.root / 'strict', kind='report')
+            missing = self.root / 'report-index-unavailable'
+            def unavailable():
+                self.assertTrue((missing / 'lib/lean/D5/B.olean').is_file())
+                raise OSError('report metadata unavailable')
+            report_remote.latest = unavailable
+            with patch.object(cache.sys, 'stderr', new_callable=io.StringIO) as diagnostic:
+                fallback = cache.restore_published(self.root, compiler_b, None, self.remote, missing)
+            self.assertEqual((fallback['compiler_restored'], fallback['reports_restored']), (3, 0))
+            self.assertEqual(fallback['report_error'], 'report metadata unavailable')
+            self.assertIn('report metadata unavailable', diagnostic.getvalue())
 
     def test_report_cli_reads_the_explicit_report_and_paired_compiler_tags(self):
         import lean_module_remote

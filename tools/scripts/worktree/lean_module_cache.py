@@ -12,6 +12,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tarfile
 import shutil
 import tomllib
 
@@ -26,6 +27,7 @@ SCHEMA = 'lean-module-shards-v1'
 VERSION_PREFIX = 'lean-modules-'
 DEFAULT_MODULE_BYTES = 712650
 MAX_COLD_REPORTS_PER_SHARD = 250
+REPORT_READ_ERRORS = (OSError, EOFError, KeyError, TypeError, ValueError, ImportError, subprocess.SubprocessError, tarfile.TarError)
 
 
 OMEGA_BASIS = {'OmegaInit', 'OmegaMathlib'}
@@ -502,9 +504,11 @@ def restore_legacy(remote, index, names, destination):
     return set(rows) if report['restored'] == len(rows) else set()
 
 
-def restore_artifacts(root, modules, targets, index, names, remote, destination, kind):
+def restore_artifacts(root, modules, targets, index, names, remote, destination, kind, *, restored=None):
+    if restored is None:
+        restored = set()
     if not index:
-        return set()
+        return restored
     if index['schema'] != SCHEMA or index.get('kind') not in (None, kind):
         raise ValueError('unexpected ' + kind + ' publication schema')
     selected = defaultdict(list)
@@ -520,7 +524,6 @@ def restore_artifacts(root, modules, targets, index, names, remote, destination,
         if previous_key == current_key:
             shard = row['shard']
             selected[shard].append(name)
-    restored = set()
     if selected:
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
@@ -696,10 +699,19 @@ def finish(plan, remote):
     return index
 
 
-def restore(root, index, requested, remote, destination, *, kind=None, report_index=None, report_remote=None):
+def restore(root, index, requested, remote, destination, *, kind=None, report_index=None, report_remote=None,
+            load_reports=None):
     roots = set(requested or ())
-    modules, targets = checkout_targets(root, kind='compiler' if kind == 'compiler' else 'report',
-                                        requested=requested, restore_only=True, scope_roots=roots)
+    report_error = None
+    try:
+        modules, targets = checkout_targets(root, kind='compiler' if kind == 'compiler' else 'report',
+                                            requested=requested, restore_only=True, scope_roots=roots)
+    except REPORT_READ_ERRORS as error:
+        if kind is not None:
+            raise
+        roots = set(requested or ())
+        modules, targets = checkout_targets(root, kind='compiler', requested=requested)
+        report_error = str(error)
     graph = {n: row['deps'] for n, row in targets.items()}
     wanted = inventory.import_closure(graph, roots & targets.keys()) if requested is not None else set(targets)
     reports = {n for n in wanted if modules[n].report}
@@ -710,9 +722,18 @@ def restore(root, index, requested, remote, destination, *, kind=None, report_in
         compiled = restore_artifacts(root, modules, targets, index, wanted | supporting, remote, destination, 'compiler')
     restored = set()
     if kind != 'compiler' and reports:
-        restored = restore_artifacts(root, modules, targets, report_index, reports, report_remote, destination, 'report')
-        if index.get('kind') is None:
-            restored.update(restore_artifacts(root, modules, targets, index, reports - restored, remote, destination, 'report'))
+        try:
+            if load_reports is not None:
+                report_index, report_remote = load_reports()
+            restore_artifacts(root, modules, targets, report_index, reports, report_remote, destination, 'report',
+                              restored=restored)
+            if index.get('kind') is None:
+                restore_artifacts(root, modules, targets, index, reports - restored, remote, destination, 'report',
+                                  restored=restored)
+        except REPORT_READ_ERRORS as error:
+            if kind == 'report':
+                raise
+            report_error = str(error)
     if kind == 'report':
         return {'requested': len(reports), 'restored': len(restored), 'reports_requested': len(reports),
                 'reports_restored': len(restored), 'source': index['source']}
@@ -726,6 +747,9 @@ def restore(root, index, requested, remote, destination, *, kind=None, report_in
         result.update(compiler_restored=len(wanted & compiled))
     if reports:
         result.update(reports_requested=len(reports), reports_restored=len(restored))
+    if report_error is not None:
+        result.update(compiler_restored=len(wanted & compiled), report_error=report_error)
+        print('Module report restore failed: ' + report_error, file=sys.stderr)
     return result
 
 
@@ -755,15 +779,20 @@ def validate_report_pair(index, compiler_index):
 def restore_published(root, index, names, remote, destination, kind=None, *, exact=False,
                       report_remote=None, report_index=None):
     from lean_module_remote import Remote
-    if report_remote is None and kind != 'compiler' and (root / 'lean-report-inputs.json').is_file():
-        report_remote = Remote(root, remote.deadline, kind='report')
-        report_index = report_remote.published(index['version'] + '-report') if exact else report_remote.latest()
-    if report_index is not None:
-        paired = index if report_index['compiler_version'] == index['version'] else remote.published(report_index['compiler_version'])
-        if paired is None:
-            raise ValueError('published compiler prerequisite for the selected report index is unavailable')
-        validate_report_pair(report_index, paired)
-    return restore(root, index, names, remote, destination, kind=kind, report_index=report_index, report_remote=report_remote)
+    def load_reports():
+        reader, reports = report_remote, report_index
+        if reader is None:
+            reader = Remote(root, remote.deadline, kind='report')
+            reports = reader.published(index['version'] + '-report') if exact else reader.latest()
+        if reports is not None:
+            version = reports['compiler_version']
+            paired = index if version == index['version'] else remote.published(version)
+            if paired is None:
+                raise ValueError('published compiler prerequisite for the selected report index is unavailable')
+            validate_report_pair(reports, paired)
+        return reports, reader
+
+    return restore(root, index, names, remote, destination, kind=kind, load_reports=load_reports)
 
 
 def fetch_published(root, names, deadline, *, refresh_stale, version=None):
