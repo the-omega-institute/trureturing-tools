@@ -357,7 +357,9 @@ def split_cold_reports(plan, existing, base, remote):
 
 
 def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version, legacy=None,
-              prepare_release=False, kind=None, compiler_index=None):
+              prepare_release=False, kind=None, compiler_index=None, compiler_dag=False, facade_consumers=()):
+    if compiler_dag and kind != 'compiler':
+        raise ValueError('dependency scheduling requires a compiler publication')
     if workers < 1 or workers > 256:
         raise ValueError('worker count must be within the Actions matrix limit')
     version = VERSION_PREFIX + source + ('-report' if kind == 'report' else '')
@@ -476,6 +478,9 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
         lanes[lane].append(name)
         loads[lane] += sum(sizes[n] for n in planned[name]['members'])
     plan['lanes'] = lanes
+    if compiler_dag and missing:
+        from lean_module_dag import prepare
+        prepare(plan, base, remote, workers, prepare_release, set(facade_consumers))
     if legacy and lanes:
         plan['legacy'] = legacy
     return plan
@@ -568,7 +573,7 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
         raise ValueError('worker checkout or lane differs from its plan')
     original = plan
     kind = plan.get('kind', 'compiler')
-    splits = {} if kind == 'report' else remote.splits(original)
+    splits = {} if kind == 'report' or 'compiler_dag' in original else remote.splits(original)
     plan = expanded(original, splits)
     modules, checkout = checkout_targets(root, kind=kind)
     current = {n: r for n, r in checkout.items() if 'report_inputs' in r} if kind == 'report' else checkout
@@ -595,7 +600,15 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
             except REPORT_READ_ERRORS as error:
                 print(f'Historical reports unavailable: {error}', file=sys.stderr)
                 combined = None
-    complete = recover_partials(plan, matching(plan, plan['inherited']), remote)
+    if 'compiler_dag' in original:
+        assigned_rows = {n: plan['shards'][n] for n in original['lanes'][lane]}
+        assigned_plan = dict(plan, shards=assigned_rows)
+        splits = remote.splits(assigned_plan) if assigned_rows else {}
+        plan = expanded(plan, splits)
+        assigned_plan = expanded(assigned_plan, splits)
+        complete = recover_partials(assigned_plan, matching(assigned_plan, plan['inherited']), remote)
+    else:
+        complete = recover_partials(plan, matching(plan, plan['inherited']), remote)
     installed = set()
     restored_reports = set()
     produced_reports = 0
@@ -605,6 +618,10 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
     if legacy:
         from lean_generation_checkpoints import remote_for
         old_remote = remote_for(root)
+    dag_install = None
+    if 'compiler_dag' in plan:
+        from lean_module_dag import compile_units
+        dag_install, installed, compiled = compile_units(root, plan, lane, remote, modules, graph, output)
     assigned = [child for name in original['lanes'][lane] for child in splits.get(name, {name: None})]
     for name in assigned:
         if name in complete:
@@ -632,6 +649,8 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
                 materialize(root, sorted(pending), inputs, prebuilt=True)
                 produced_reports += len(pending)
             restored_reports.update(members)
+        elif dag_install:
+            dag_install(members)
         else:
             scope = inventory.import_closure(graph, members)
             for index in (partial_index(plan, complete), base):
@@ -883,6 +902,7 @@ def run():
     plan = commands.add_parser('plan')
     plan.add_argument('--base', type=Path)
     plan.add_argument('--kind', choices=('compiler', 'report'), default='compiler')
+    plan.add_argument('--compiler-dag', action='store_true', help='schedule cold compiler units by dependency')
     plan.add_argument('--legacy-checkpoints', action='store_true')
     plan.add_argument('--prepare-release', action='store_true', help='create the shared Release before starting its workers')
     plan.add_argument('--capacity', type=int, default=DEFAULT_CAPACITY)
@@ -918,6 +938,8 @@ def run():
         return 0
     if args.command == 'plan':
         remote = Remote(root, kind=args.kind)
+        if args.compiler_dag and args.prepare_release and args.kind == 'compiler':
+            remote.clear_compiler_claims()
         modules, targets = checkout_targets(root, kind=args.kind)
         base = json.loads(args.base.read_bytes()) if args.base else remote.latest()
         source = compiler.checkout(root)
@@ -936,7 +958,8 @@ def run():
         mathlib, mathlib_version = publication_mathlib(root)
         result = make_plan(source, mathlib, targets, base, remote, args.capacity, args.workers,
                            mathlib_version=mathlib_version, legacy=legacy, prepare_release=args.prepare_release,
-                           kind=args.kind, compiler_index=compiler_index)
+                           kind=args.kind, compiler_index=compiler_index, compiler_dag=args.compiler_dag,
+                           facade_consumers={n for n in targets if len(modules[n].extra_builds) == 2})
         if args.prepare_release and result['lanes']:
             publisher(args.kind)
         write(args.output, result)
@@ -949,7 +972,10 @@ def run():
         plan = json.loads(args.plan.read_bytes())
         if compiler.checkout(root) != plan['source']:
             raise ValueError('publisher checkout differs from plan')
-        write(args.output, finish(plan, Remote(root, kind=plan['kind']), stage_only=args.stage_only))
+        remote = Remote(root, kind=plan['kind'])
+        write(args.output, finish(plan, remote, stage_only=args.stage_only))
+        if 'compiler_dag' in plan:
+            remote.clear_compiler_claims(plan['source'])
     elif args.command == 'promote':
         status = Remote(root, kind=args.kind).promote(args.version)
         print(json.dumps({'version': args.version, 'status': status}))

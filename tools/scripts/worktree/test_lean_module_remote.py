@@ -23,6 +23,7 @@ class Service:
         self.creates = Counter()
         self.files = {}
         self.ref = None
+        self.claims = {}
         self.patches = []
         self.uploads = 0
         self.reads = []
@@ -59,6 +60,19 @@ class Service:
             assets = next(r['assets'] for r in self.releases.values() if r['id'] == rid)
             page = int(parse_qs(urlsplit(path).query)['page'][0])
             return assets[(page-1)*100:page*100]
+        if path == 'git/tags':
+            return {'sha': hashlib.sha1(body['tag'].encode()).hexdigest()}
+        if path.startswith('git/matching-refs/tags/lean-unit-claims/'):
+            prefix = path.removeprefix('git/matching-refs/')
+            return [row for ref, row in self.claims.items() if ref.startswith(prefix)]
+        if path.startswith('git/ref/tags/lean-unit-claims/'):
+            return self.claims[path.removeprefix('git/ref/')]
+        if path == 'git/refs' and body['ref'].startswith('refs/tags/lean-unit-claims/'):
+            ref = body['ref'].removeprefix('refs/')
+            if ref in self.claims:
+                raise transport.host.GitHubCommandError(1, ['gh'], stderr='HTTP 422: exists')
+            self.claims[ref] = dict(ref=body['ref'], object={'sha': body['sha']})
+            return self.claims[ref]
         if path.startswith('git/matching-refs/tags/'):
             prefix = path.removeprefix('git/matching-refs/tags/')
             return [{'ref': 'refs/tags/' + tag} for tag in self.releases if tag.startswith(prefix)]
@@ -70,6 +84,9 @@ class Service:
         raise ValueError(path)
 
     def request(self, url, *, method, path=None):
+        if method == 'DELETE' and '/git/refs/tags/' in url:
+            del self.claims[url.split('/git/refs/')[1]]
+            return io.BytesIO(b'')
         if method == 'DELETE':
             asset_id = int(urlsplit(url).path.split('/')[-1])
             for tag, release in self.releases.items():
@@ -146,6 +163,53 @@ class VersionedShards(unittest.TestCase):
             self.service.releases[saved['version']]['assets'][-1]['label'] = row['fingerprint']
             self.remote.inventory.clear()
         return saved
+
+    def test_compiler_queue_claims_recover_on_retry_and_cleanup(self):
+        plan = self.plan('a' * 40)
+        other = transport.Remote(self.root)
+        other.http = self.service
+        with patch.object(transport, 'publisher', return_value=dict(run='9', attempt='1')):
+            self.assertTrue(self.remote.claim_compiler_queue(plan, 1, 0))
+            self.assertFalse(other.claim_compiler_queue(plan, 1, 7))
+            self.assertTrue(other.claim_compiler_queue(plan, 2, 7))
+            self.remote.clear_compiler_claims()
+            self.assertEqual(len(self.service.claims), 2)
+        retry = transport.Remote(self.root)
+        retry.http = self.service
+        with patch.object(transport, 'publisher', return_value=dict(run='9', attempt='2')):
+            self.assertTrue(retry.claim_compiler_queue(plan, 1, 7))
+            retry.clear_compiler_claims()
+            self.assertEqual(len(self.service.claims), 1)
+            retry.clear_compiler_claims(plan['source'])
+            self.assertEqual(self.service.claims, {})
+
+    def test_compiler_unit_subsets_overflow_discovery_and_interrupted_upload(self):
+        from lean_module_dag import unit_key, unit_row
+        plan = self.plan('a' * 40)
+        inputs = {'Small': 'compiler1', 'Other': 'compiler2'}
+        key = unit_key(plan['mathlib'], inputs)
+        part = transport.UNIT_PART_START
+        row = dict(unit_row(key, inputs), part=part)
+        plan.update(shards={key: row}, lanes=[[]], targets={'Small': {'key': 'compiler1'}})
+        self.remote.save_compiler_catalog(plan['version'], dict(mathlib=plan['mathlib'], units={key: inputs}))
+        # An interrupted GitHub upload reserves its filename with a starter asset.
+        tag = f'{plan["version"]}-part-{part}'
+        self.remote.catalog(tag, create=True)
+        self.service.releases[tag]['assets'].append(dict(name=row['asset'], state='starter', size=0))
+        self.remote.inventory.clear()
+        path = self.root / 'unit.tar.gz'
+        with path.open('wb') as raw, gzip.GzipFile(fileobj=raw, filename=key, mode='wb', mtime=0) as archive:
+            archive.write(b'checkpoint')
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        done = self.remote.save(plan, key, path, dict(row, sha256=sha, bytes=path.stat().st_size))
+        self.assertTrue(done['version'].endswith(str(part+1)))
+        self.assertEqual(self.remote.compiler_progress(plan, {key})[key]['sha256'], sha)
+        later = dict(plan, version=transport.PREFIX+'b'*40)
+        recovered = self.remote.compiler_seeds(later)
+        self.assertEqual(set(recovered['targets']), {'Small'})
+        self.assertEqual(recovered['shards'][key]['members'], ['Other', 'Small'])
+        self.assertFalse(any(part in t for t, _ in self.remote.candidates(plan) for part in ['-part-']))
+        self.assertEqual(self.service.ref, None)
 
     def test_typed_compiler_preserves_promotion_evidence_for_its_legacy_report_source(self):
         first = self.plan('a' * 40)

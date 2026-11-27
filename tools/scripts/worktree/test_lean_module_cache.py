@@ -29,6 +29,8 @@ class MemoryRemote:
         self.publications = {}
         self.saves = []
         self.fail = None
+        self.catalogs = []
+        self.queues = {}
 
     def confirmed(self, rows):
         return rows
@@ -38,6 +40,25 @@ class MemoryRemote:
 
     def partials(self, plan):
         return {n: self.rows[r['fingerprint']] for n, r in plan['shards'].items() if r['fingerprint'] in self.rows}
+
+    def save_compiler_catalog(self, version, catalog):
+        self.catalogs.append(catalog)
+
+    def compiler_seeds(self, plan):
+        from lean_module_dag import recovery_index
+        assets = {name: (tag, dict(digest='sha256:' + hashlib.sha256(data).hexdigest(),
+                                  state='uploaded', size=len(data)))
+                  for (tag, name), data in self.assets.items()}
+        return recovery_index(plan, self.catalogs, assets)
+
+    def compiler_progress(self, plan, pending):
+        return {k: self.rows[k] for k in pending if k in self.rows}
+
+    def claim_compiler_queue(self, plan, queue, lane):
+        return self.queues.setdefault((plan['source'], queue), lane) == lane
+
+    def wait_compiler_progress(self, plan):
+        raise AssertionError('a single live worker must make progress')
 
     def save(self, plan, name, path, row):
         if self.fail == name:
@@ -168,6 +189,63 @@ class ModuleReleases(unittest.TestCase):
 
     def workers(self, plan):
         return [cache.work(self.root, plan, i, self.remote, self.root / 'receipts') for i in range(len(plan['lanes']))]
+
+    def dag_plan(self, workers=2, base=None):
+        _, targets = cache.checkout_targets(self.root)
+        return cache.make_plan(self.source, self.pin, targets, base, self.remote, cache.DEFAULT_CAPACITY,
+                               workers, mathlib_version=self.version, kind='compiler', compiler_dag=True,
+                               prepare_release=True)
+
+    def test_diamond_single_runner_retry_split_from_fresh_worktree(self):
+        # Two cold branches share A. The last runner starts before either of the others.
+        (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
+        (self.root / 'D5/D.lean').write_text('import D5.B\nimport D5.C\ndef valueD := valueB+valueC\n')
+        self.modules['D5.D'] = Module('trureturing', Path('D5/D.lean'), Path('.'))
+        plan = self.dag_plan(workers=3)
+        units = plan['compiler_dag']['units']
+        own = {n: k for k, row in units.items() for n in row['members']}
+        self.assertEqual(set(units[own['D5.D']]['deps']), {own['D5.B'], own['D5.C']})
+        self.assertEqual(units[own['D5.B']]['deps'], [own['D5.A']])
+        self.assertEqual(units[own['D5.C']]['deps'], [own['D5.A']])
+        self.remote.fail = own['D5.D']
+        with self.assertRaises(InterruptedError):
+            cache.work(self.root, plan, 2, self.remote, self.root / 'receipts')
+        self.assertNotIn('D5', self.remote.saves)
+        with self.assertRaisesRegex(ValueError, 'planned shards unavailable'):
+            cache.finish(plan, self.remote)
+        self.compiled.clear()
+        self.remote.fail = None
+        self.remote.queues.clear()
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        # An Actions failed-job retry reuses the original plan artifact.
+        self.assertEqual(cache.work(self.root, plan, 0, self.remote, self.root / 'retry')['compiled_modules'], 1)
+        self.assertEqual(self.compiled, [['D5.D']])
+        index = cache.finish(plan, self.remote)
+        destination = self.root / 'restored'
+        self.assertEqual(cache.restore(self.root, index, ['D5.D'], self.remote, destination,
+                                       kind='compiler')['restored'], 4)
+        self.assertEqual(set(index['shards']), {'D5'})
+        self.assertEqual(set(self.dag_plan(base=index)['lanes']), set())
+
+    def test_cross_source_reuses_matching_member_of_interrupted_unit(self):
+        # A and B fit in one unit. A later edit invalidates B while A and its consumer C still match.
+        original = self.dag_plan(workers=1)
+        self.remote.fail = 'D5'
+        with self.assertRaises(InterruptedError):
+            self.workers(original)
+        self.assertEqual(self.remote.compiler_seeds(original)['targets'].keys(), {'D5.A', 'D5.B', 'D5.C'})
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        self.compiled.clear()
+        self.source = 'b' * 40
+        self.remote.fail = None
+        (self.root / 'D5/B.lean').write_text('def valueB := 70\n')
+        later = self.dag_plan()
+        self.assertEqual(set(later['compiler_dag']['seeds']['owners']), {'D5.A', 'D5.C'})
+        self.workers(later)
+        self.assertEqual(self.compiled, [['D5.B']])
+        index = cache.finish(later, self.remote)
+        self.assertEqual(cache.restore(self.root, index, None, self.remote, self.root / 'restored',
+                                       kind='compiler')['restored'], 3)
 
     def test_compiler_and_report_inputs_restore_independently(self):
         from lean_cache_release import report_selection
