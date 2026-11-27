@@ -25,6 +25,7 @@ class MemoryRemote:
         self.rows = {}
         self.assets = {}
         self.layouts = {}
+        self.publications = {}
         self.saves = []
         self.fail = None
 
@@ -47,18 +48,81 @@ class MemoryRemote:
         self.saves.append(name)
         return row
 
+    def staged_index(self, version):
+        return self.latest(version)
+
+    def publication_layout(self, version):
+        return self.publications.get(version)
+
+    def save_publication_layout(self, version, layout):
+        assert self.publications.setdefault(version, layout) == layout
+
     def splits(self, plan):
-        return {n: self.layouts[r['fingerprint']] for n, r in plan['shards'].items() if r['fingerprint'] in self.layouts}
+        return {n: self.layouts[n, r['fingerprint']] for n, r in plan['shards'].items() if (n, r['fingerprint']) in self.layouts}
 
     def save_split(self, plan, name, layout):
         fingerprint = plan['shards'][name]['fingerprint']
-        assert self.layouts.setdefault(fingerprint, layout) == layout
+        assert self.layouts.setdefault((name, fingerprint), layout) == layout
 
     def download(self, row, output):
         output.write_bytes(self.assets[row['version'], row['asset']])
 
     def publish(self, index):
         assert self.indexes.setdefault(index['version'], index) == index
+
+
+class ColdReportShards(unittest.TestCase):
+    def test_saved_parents_and_split_children_survive_replanning(self):
+        # Warm is an unchanged report. Compiler has no report to extract.
+        targets = {n: {'key': n, 'deps': [], 'report_inputs': [n]} for n in
+                   ('D5.A.One', 'D5.A.Two', 'D5.B', 'D5.C', 'D5.Warm',
+                    'Reg.A', 'Reg.B', 'Reg.C', 'Edge.A', 'Edge.B', 'Edge.Warm')}
+        targets['D5.Compiler'] = {'key': 'compiler', 'deps': []}
+        remote = MemoryRemote()
+
+        def plan(source, inputs, base=None):
+            return cache.make_plan(source, 'm', inputs, base, remote, cache.DEFAULT_CAPACITY, 2,
+                                   mathlib_version='v1')
+
+        with patch.object(cache, 'MAX_COLD_REPORTS_PER_SHARD', 100):
+            original = plan('old', targets)
+            for row in original['shards'].values():
+                remote.rows[row['fingerprint']] = dict(row, bytes=128, version=original['version'])
+            base = cache.finish(original, remote)
+        current = {n: dict(row, key='changed-' + n) if 'report_inputs' in row and not n.endswith('.Warm')
+                   else row for n, row in targets.items()}
+        with patch.object(cache, 'MAX_COLD_REPORTS_PER_SHARD', 100):
+            unsplit = plan('new', current, base)
+        # Reg was already uploaded by a worker from the old plan.
+        reg = dict(unsplit['shards']['Reg'], bytes=256, version=unsplit['version'])
+        remote.rows[reg['fingerprint']] = reg
+        with patch.object(cache, 'MAX_COLD_REPORTS_PER_SHARD', 2):
+            first = plan('new', current, base)
+            self.assertEqual(first['inherited'], {'Reg': reg})
+            self.assertEqual(first['shards'].keys(), {'D5', 'D5.A', 'Reg', 'Edge'})
+            self.assertEqual(first['shards']['Edge'], unsplit['shards']['Edge'])
+            self.assertEqual(first['shards']['D5']['members'], ['D5.B', 'D5.C', 'D5.Compiler', 'D5.Warm'])
+            self.assertEqual(len(first['lanes']), 2)
+            self.assertEqual(first, plan('new', dict(reversed(current.items())), base))
+
+            # The byte-size check further split D5.A. One child completed before interruption.
+            members = first['shards']['D5.A']['members']
+            remote.save_split(first, 'D5.A', {n: [n] for n in members})
+            parts = cache.expanded(first, remote.splits(first))
+            done = parts['shards']['D5.A.One']
+            remote.rows[done['fingerprint']] = dict(done, bytes=128, version=first['version'])
+            retry = plan('new', current, base)
+            self.assertEqual(retry['shards'], parts['shards'])
+            self.assertEqual(retry['inherited'].keys(), {'Reg', 'D5.A.One'})
+            self.assertCountEqual([n for lane in retry['lanes'] for n in lane], ['Edge', 'D5', 'D5.A.Two'])
+            with self.assertRaisesRegex(ValueError, 'planned shards unavailable'):
+                cache.finish(first, remote)
+            for row in retry['shards'].values():
+                remote.rows.setdefault(row['fingerprint'], dict(row, bytes=128, version=first['version']))
+            finished = cache.finish(first, remote)
+            self.assertEqual(cache.finish(retry, remote), finished)
+            self.assertCountEqual([n for r in finished['shards'].values() for n in r['members']], targets)
+            self.assertEqual(plan('later', current, finished)['lanes'], [])
 
 
 class ModuleReleases(unittest.TestCase):
