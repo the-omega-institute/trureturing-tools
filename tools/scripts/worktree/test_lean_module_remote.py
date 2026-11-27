@@ -545,9 +545,11 @@ class VersionedShards(unittest.TestCase):
         newer = cache.finish(other, self.remote)
         retry = plan('c', inputs, newer, prepare=True)
         self.assertEqual((retry['shards'], retry['base_version']), (original['shards'], base['version']))
+        modules = {n: cache.inventory.Module('trureturing', Path(*n.split('.')).with_suffix('.lean'), Path('.'))
+                   for n in inputs}
         with tempfile.TemporaryDirectory() as dest, patch.object(cache, 'restore_shard',
                 side_effect=lambda archive, row, members, *args, **kw: set(members)):
-            self.assertEqual(cache.restore_artifacts(self.root, {}, inputs, self.remote.latest(retry['base_version']),
+            self.assertEqual(cache.restore_artifacts(self.root, modules, inputs, self.remote.latest(retry['base_version']),
                                                      set(inputs), self.remote, Path(dest), 'compiler'), set(warm))
         empty_retry = plan('e', inputs, newer, prepare=True)
         self.assertEqual(empty_retry['shards'], no_base['shards'])

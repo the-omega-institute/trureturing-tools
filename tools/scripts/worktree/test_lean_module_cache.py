@@ -790,6 +790,11 @@ def main : IO Unit := do
         for n in names:
             self.assertEqual(modules[n].extra_builds, ())
             self.assertTrue(modules[n].plugin_input)
+        with patch.object(cache, 'binary_platform', return_value=('linux', 'other-architecture')):
+            _, other_host = cache.checkout_targets(self.root)
+        self.assertNotEqual(original[plugin + '.Layout']['key'], other_host[plugin + '.Layout']['key'])
+        self.assertNotEqual(original['OmegaInit']['key'], other_host['OmegaInit']['key'])
+        self.assertEqual(original['D5.B']['key'], other_host['D5.B']['key'])
         archive = self.root / 'plugin.tar.gz'
         cache.compile_omega_outputs(self.root, modules, names, False)
         descriptor = pack_shard(self.root, modules, names, archive, 'c'*64, kind='compiler')

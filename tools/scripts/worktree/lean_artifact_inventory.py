@@ -214,8 +214,9 @@ def plugin_outputs(name, module):
         return set()
     outputs = {compiler_path(name, module, "ir", "c.o.export")}
     if name == INIT_PLUGIN:
-        suffix = "dylib" if sys.platform == "darwin" else "so"
-        outputs.add(PurePosixPath(module.build, "lib", "libtrureturing_OmegaChecks_InitCompiler." + suffix))
+        extension = {"darwin": "dylib", "win32": "dll"}.get(sys.platform, "so")
+        prefix = "" if sys.platform == "win32" else "lib"
+        outputs.add(PurePosixPath(module.build, "lib", f"{prefix}trureturing_OmegaChecks_InitCompiler.{extension}"))
     return outputs
 
 

@@ -18,7 +18,7 @@ import tomllib
 
 import lean_artifact_inventory as inventory
 import lean_compile_layers as compiler
-from lean_cache import publication_mathlib, seed_partitions
+from lean_cache import binary_platform, publication_mathlib, seed_partitions
 from lean_generation_plan import digest, file_digest, module_config, write
 from lean_module_shards import DEFAULT_CAPACITY, NAME, pack_shard, plan_shards, restore_shard
 
@@ -324,7 +324,8 @@ def checkout_targets(root, *, kind='compiler', requested=None, restore_only=Fals
         inputs = [environment, module.package, pins[module.package], str(module.source), str(module.build),
                   module_config(configs[module.package], name), source, [(d, targets[d]['key']) for d in dependencies]]
         if module.plugin_input:
-            inputs.append(['Lake plugin native outputs', sorted(str(p) for p in inventory.plugin_outputs(name, module))])
+            inputs.append(['Lake plugin native outputs', binary_platform(),
+                           sorted(str(p) for p in inventory.plugin_outputs(name, module))])
         if name in omega_inputs:
             inputs.extend(omega_inputs[name])
         key = digest(inputs)
