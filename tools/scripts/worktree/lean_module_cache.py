@@ -62,8 +62,10 @@ def omega_build_plan(root, modules, graph):
         return modules, graph, {}
     basis = {name for name in graph if namespace(name) in OMEGA_BASIS}
     strict_modules = dict(modules)
+    root_mathlib = (root / 'OmegaMathlib').is_dir() or (root / 'OmegaMathlib.lean').is_file()
     for name in basis:
-        source = Path('strict') / modules[name].source.relative_to('src')
+        relative = modules[name].source.relative_to('src')
+        source = relative if namespace(name) == 'OmegaMathlib' and root_mathlib else Path('strict') / relative
         if not (root / source).is_file():
             raise ValueError(f'no strict source for {name}')
         strict_modules[name] = replace(modules[name], source=source)

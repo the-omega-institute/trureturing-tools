@@ -1067,6 +1067,18 @@ def main : IO Unit := do
         (checks / 'strict_lake.py').write_text('# changed strict configuration\n')
         self.assertTrue({'OmegaInit', 'OmegaMathlib', 'D5.A', 'D5.C'} <= changed())
 
+    def test_root_mathlib_strict_source_invalidates_its_compiler_shards(self):
+        self.omega_fixture()
+        strict = self.root / 'OmegaMathlib.lean'
+        (self.root / 'strict/OmegaMathlib.lean').rename(strict)
+        _, before = cache.checkout_targets(self.root)
+        strict.write_text('import OmegaInit\ndef omegaValue := omegaBase + 2\n')
+        _, after = cache.checkout_targets(self.root)
+        for name in ['OmegaMathlib', 'D5.A']:
+            self.assertNotEqual(before[name]['key'], after[name]['key'])
+        self.assertNotEqual(before['OmegaInit']['key'], after['OmegaInit']['key'])
+        self.assertEqual(before['D5.B']['key'], after['D5.B']['key'])
+
     def test_strict_uses_the_omegainit_family_and_shares_ordinary_prerequisites(self):
         self.omega_fixture()
         leaf = 'OmegaInit.Leaf'

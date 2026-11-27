@@ -23,6 +23,11 @@ internal static class PullRequestLeanChecks
         return path.StartsWith(prefix, StringComparison.Ordinal) ? path[prefix.Length..^5].Replace('/', '.') : null;
     }
 
+    // The strict source and its generated facade have the same Lean module name.
+    private static string? ChangedModule(string path) =>
+        path == "OmegaMathlib.lean" || path.StartsWith("OmegaMathlib/", StringComparison.Ordinal)
+            ? Module("src/" + path) : Module(path);
+
     private static RepositorySnapshot Sources(string root)
     {
         var raw = GitRepositorySnapshotReader.ReadCurrent(root, readContents: path => Module(path) is not null
@@ -54,7 +59,7 @@ internal static class PullRequestLeanChecks
     internal static int Plan(string root, ImmutableArray<string> paths, TextWriter output, string? baseRevision = null)
     {
         var changes = SemanticChanges(RawChangeSet.Create(ExpandReleasePaths(root, paths, baseRevision)));
-        var needImports = changes.Paths.Any(path => Module(path.Value) is not null || FrozenStatePath.IsUnderRoot(path.Value));
+        var needImports = changes.Paths.Any(path => ChangedModule(path.Value) is not null || FrozenStatePath.IsUnderRoot(path.Value));
         var raw = GitRepositorySnapshotReader.ReadCurrent(root, readContents: path =>
             needImports && Module(path) is not null
             || path == ReportProducerScope.InputManifest || path.StartsWith("Meta/", StringComparison.Ordinal)
@@ -82,7 +87,7 @@ internal static class PullRequestLeanChecks
                 throw new InvalidDataException("Blueprint markdown has no matching .scribe.cs source: " + stem + ".md");
             scribePaths.Add(stem + ".scribe.cs");
         }
-        var changed = paths.Select(Module).OfType<string>().ToHashSet(StringComparer.Ordinal);
+        var changed = paths.Select(ChangedModule).OfType<string>().ToHashSet(StringComparer.Ordinal);
         var targets = new HashSet<string>(StringComparer.Ordinal);
         var programs = new HashSet<string>(StringComparer.Ordinal);
         foreach (var path in paths)
@@ -101,7 +106,8 @@ internal static class PullRequestLeanChecks
         }
         if (changed.Count > 0)
             AddAffectedModules(snapshot, changed, targets, programs,
-                includeInternal: paths.Any(path => path.StartsWith("src/", StringComparison.Ordinal) && Module(path) is not null));
+                includeInternal: paths.Any(path => (path.StartsWith("src/", StringComparison.Ordinal) || path == "OmegaMathlib.lean"
+                    || path.StartsWith("OmegaMathlib/", StringComparison.Ordinal)) && ChangedModule(path) is not null));
         var selected = ScribeDefinitionSelector.Select(
             path => snapshot.TryGetFile(path, out var file) ? file.RawBytes.ToArray() : null, scribePaths);
         if (!selected.IsSuccess) throw new InvalidDataException(selected.Failure);
