@@ -22,7 +22,7 @@ QUEUE_HANDOFF_COST = 5
 
 
 def unit_key(mathlib, inputs):
-    return digest(['lean-compiler-unit-v1', mathlib, sorted(inputs.items())])
+    return digest(['lean-compiler-unit-v2', mathlib, sorted(inputs.items())])
 
 
 def unit_row(key, members):
@@ -388,7 +388,7 @@ def compile_units(root, plan, lane, remote, modules, output):
             common_prepared = cache.compile_omega_outputs(root, modules, missing, common_prepared, prepared_reader=True)
         with tempfile.TemporaryDirectory(dir=output) as stage:
             archive = Path(stage) / 'unit.tar.gz'
-            data = pack_shard(root, modules, members, archive, key, kind='compiler')
+            data = pack_shard(root, modules, members, archive, key, kind='compiler', verify_compilers=True)
             row = dict(units[key], bytes=data['bytes'], sha256=data['sha256'], version=plan['version'])
             rows[key] = remote.save(task_plan, key, archive, row)
         installed.update(members)

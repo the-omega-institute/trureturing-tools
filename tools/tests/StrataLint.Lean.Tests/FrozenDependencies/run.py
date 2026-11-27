@@ -72,7 +72,8 @@ def check_duplicate_theorems(directory):
     write_theorem(MODULE.with_name(direct + ".lean"), "frozenDuplicate", "fun _ h => h")
     write_theorem(MODULE.with_name(classical + ".lean"), "frozenDuplicate",
                   "Classical.choice ⟨fun _ h => h⟩")
-    write_theorem(Path("src/OmegaInit/FrozenDuplicateOwner.lean"), "frozenDuplicateOwner", "fun _ h => h")
+    for base in ("src", "strict"):
+        write_theorem(Path(base, "OmegaInit/FrozenDuplicateOwner.lean"), "frozenDuplicateOwner", "fun _ h => h")
     write_theorem(Path("src/OmegaMath/FrozenDuplicateOwner.lean"), "frozenDuplicateOwner",
                   "fun p h => (fun (_ : Prop) => h) p")
 
@@ -186,6 +187,9 @@ def exercise(directory):
     for source, destination in files.items():
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(FIXTURES / source, destination)
+    strict_prelude = Path("strict/OmegaInit/FrozenDependencyFixture.lean")
+    strict_prelude.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(FIXTURES / "Prelude.lean", strict_prelude)
 
     report = directory / "report.json"
     run("dotnet", "build", "tools/StrataLint.Cli/StrataLint.Cli.csproj", "-c", "Release", "--nologo")
@@ -217,6 +221,7 @@ def exercise(directory):
 
     for index, row in enumerate(record["declarations"]):
         if index % 2 == 0 and row != rows["fullAxioms"]:
+            row.pop("strict_omega", None)
             row.pop("libraries")
             row.pop("axioms", None)
         else:

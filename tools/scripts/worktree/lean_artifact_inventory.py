@@ -209,19 +209,20 @@ def compiler_variants(module):
     return [Module(module.package, module.source, build) for build in (module.build, *module.extra_builds)]
 
 
-def plugin_outputs(name, module):
+def plugin_outputs(name, module, platform=None):
     if not module.plugin_input:
         return set()
     outputs = {compiler_path(name, module, "ir", "c.o.export")}
     if name == INIT_PLUGIN:
-        extension = {"darwin": "dylib", "win32": "dll"}.get(sys.platform, "so")
-        prefix = "" if sys.platform == "win32" else "lib"
+        platform = platform or sys.platform
+        extension = {"darwin": "dylib", "win32": "dll"}.get(platform, "so")
+        prefix = "" if platform == "win32" else "lib"
         outputs.add(PurePosixPath(module.build, "lib", f"{prefix}trureturing_OmegaChecks_InitCompiler.{extension}"))
     return outputs
 
 
-def plugin_paths(name, module):
-    return {path.with_name(path.name + suffix) for path in plugin_outputs(name, module)
+def plugin_paths(name, module, platform=None):
+    return {path.with_name(path.name + suffix) for path in plugin_outputs(name, module, platform)
             for suffix in ("", ".hash", ".trace")}
 
 

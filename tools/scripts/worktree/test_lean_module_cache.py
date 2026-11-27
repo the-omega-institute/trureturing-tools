@@ -373,6 +373,21 @@ class ModuleReleases(unittest.TestCase):
         self.assertCountEqual([n for call in self.compiled for n in call], ['D5.B', 'D5.C'])
         self.assertEqual(len(cache.finish(plan, self.remote)['targets']), 3)
 
+    def test_checkpoint_rejects_modified_ordinary_olean_before_upload(self):
+        plan = self.dag_plan()
+        def corrupt(root, modules, names):
+            self.compile(root, modules, names)
+            artifact = root / PROJECT_BUILD / 'lib/lean' / Path(*names[0].split('.')).with_suffix('.olean')
+            with artifact.open('r+b') as stream:
+                stream.seek(-1, os.SEEK_END)
+                last = stream.read(1)[0]
+                stream.seek(-1, os.SEEK_END)
+                stream.write(bytes([last ^ 1]))
+        with patch.object(cache.compiler, 'compile_roots', side_effect=corrupt):
+            with self.assertRaisesRegex(ValueError, 'artifact differs from its Lake trace'):
+                cache.work(self.root, plan, 0, self.remote, self.root / 'receipts')
+        self.assertEqual(self.remote.saves, [])
+
     def test_cross_source_reuses_matching_member_of_interrupted_unit(self):
         # A and B fit in one unit. A later edit invalidates B while A and its consumer C still match.
         original = self.dag_plan(workers=1)
@@ -813,6 +828,14 @@ def main : IO Unit := do
             built = subprocess.run(['lake', '-f', config, 'build', '+OmegaInit:olean'], cwd=other,
                                    check=True, capture_output=True, text=True)
             self.assertNotIn('Built ' + plugin, built.stdout + built.stderr)
+        # A different-platform library in the same archive does not exclude a portable sibling.
+        self.compile(self.root, modules, ['D5.B'])
+        mixed = self.root / 'mixed-native.tar.gz'
+        mixed_row = pack_shard(self.root, modules, names | {'D5.B'}, mixed, 'd'*64, kind='compiler')
+        other_platform = 'darwin' if cache.sys.platform != 'darwin' else 'linux'
+        with patch.object(cache.sys, 'platform', other_platform):
+            self.assertEqual(restore_shard(mixed, mixed_row, ['D5.B'], modules, self.root / 'portable',
+                                           root=self.root, kind='compiler'), {'D5.B'})
         path, = [p for p in plugin_outputs(plugin, modules[plugin]) if p.parent.name == 'lib']
         (self.root / PROJECT_BUILD / path).write_bytes(b'invalid native plugin')
         with self.assertRaisesRegex(ValueError, 'differs from its Lake trace'):

@@ -559,7 +559,8 @@ def legacy_compiler_inputs(root, modules, targets, source):
     remote = legacy.checkpoints.remote_for(root)
     empty = {'source': source, 'targets': {}, 'volumes': {}}
     rows, sizes = legacy.verified_inputs(remote, domain, criteria, empty)
-    rows = {name: row for name, row in rows.items() if not modules[name].extra_builds}
+    rows = {name: row for name, row in rows.items()
+            if not modules[name].extra_builds and not modules[name].plugin_input}
     return dict(empty, targets=rows, volumes={row['volume']: sizes[row['volume']] for row in rows.values()})
 
 

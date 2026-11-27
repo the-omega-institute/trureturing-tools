@@ -155,7 +155,7 @@ def verify_report(root, build, name, module, hashes):
     return build / trace
 
 
-def verify_backend_hashes(root, build, modules, grouped, *, destination=None, reports_only=False):
+def verify_backend_hashes(root, build, modules, grouped, *, destination=None, reports_only=False, all_compilers=False):
     """Check module reports and every compiler variant of paired modules against their Lake traces."""
     hashes = {}
     local_traces = []
@@ -184,10 +184,12 @@ def verify_backend_hashes(root, build, modules, grouped, *, destination=None, re
                     raise ValueError('native compiler output differs from its Lake trace: ' + str(output))
                 hashes[build / output] = description[:16]
                 traces.append(str((build / trace).absolute()))
-        if reports_only or not (module.extra_builds or module.conditional_backends):
+        if reports_only or not (all_compilers or module.extra_builds or module.conditional_backends):
             continue
         for variant in compiler_variants(module):
             trace = compiler_path(name, variant, 'lib/lean', 'trace')
+            if all_compilers:
+                traces.append(str((build / trace).absolute()))
             outputs = read_trace(build / trace)['outputs']
             descriptors = dict(zip(('olean', 'olean.server', 'olean.private'), outputs['o']))
             descriptors.update(ilean=outputs['i'], c=outputs['c'])
@@ -242,7 +244,7 @@ def traces_match(live, staged):
             and all(current.get(key) == published.get(key) for key in ('schemaVersion', 'depHash', 'outputs')))
 
 
-def pack_shard(root, modules, members, output, fingerprint, *, kind='combined'):
+def pack_shard(root, modules, members, output, fingerprint, *, kind='combined', verify_compilers=False):
     if kind not in ('combined', 'compiler', 'report'):
         raise ValueError('unknown module shard kind: ' + str(kind))
     if not valid_digest(fingerprint):
@@ -269,12 +271,13 @@ def pack_shard(root, modules, members, output, fingerprint, *, kind='combined'):
                 raise ValueError('unsafe compiler artifact: ' + str(path))
             if file.is_file():
                 paths.add(path)
-                if module.extra_builds or module.conditional_backends or module.plugin_input or path in reports:
+                if verify_compilers or module.extra_builds or module.conditional_backends or module.plugin_input or path in reports:
                     verified_files[path.as_posix()] = file_identity(file.stat())
         grouped[name] = paths
     if kind != 'report':
         check_outputs(build, selected, grouped)
-    verify_backend_hashes(root, build, selected, grouped, reports_only=kind == 'report')
+    verify_backend_hashes(root, build, selected, grouped, reports_only=kind == 'report',
+                          all_compilers=verify_compilers)
     index = {n: {'build': selected[n].build.as_posix(), 'paths': sorted(map(str, grouped[n]))}
              for n in sorted(selected)}
     for name, row in index.items():
@@ -381,11 +384,16 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
                     if kind != 'report' and (module.build, extra_builds, plugin) != (expected.build, expected.extra_builds, expected.plugin_input):
                         raise ValueError('module build path differs from the checkout: ' + name)
                     selected[name] = replace(expected, report=False) if name in seeds else expected
+                allowed = lean_artifact_paths(name, module)
+                if plugin and name not in wanted:
+                    # A portable sibling may be requested from a publisher on another platform.
+                    for platform in ('linux', 'darwin', 'win32'):
+                        allowed.update(plugin_paths(name, module, platform))
                 paths = {safe_path(p) for p in row['paths']}
                 reports = set(report_paths(name)) if has_report else set()
                 if (not paths or len(paths) != len(row['paths']) or not reports <= paths
                         or (archived_kind == 'report' and paths != reports)
-                        or not paths <= lean_artifact_paths(name, module) | reports
+                        or not paths <= allowed | reports
                         or owners.keys() & paths):
                     raise ValueError('invalid compiler file inventory: ' + name)
                 if kind == 'report':
