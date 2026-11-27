@@ -78,8 +78,9 @@ class MemoryRemote:
     def compiler_progress(self, plan, pending):
         return {k: self.rows[k] for k in pending if k in self.rows}
 
-    def claim_compiler_queue(self, plan, queue, lane):
-        return self.queues.setdefault((plan['source'], queue), lane) == lane
+    def claim_compiler_queue(self, plan, queue, lane, key):
+        owner = self.queues.setdefault((plan['source'], queue), lane if queue == lane else None)
+        return (self.queues.setdefault((plan['source'], key), lane) == lane) if owner is None else owner == lane
 
     def wait_compiler_progress(self, plan):
         raise AssertionError('a single live worker must make progress')
@@ -97,8 +98,8 @@ class MemoryRemote:
     def staged_index(self, version):
         return self.latest(version)
 
-    def publication_layout(self, version):
-        return self.publications.get(version)
+    def publication_layout(self, version, name=None):
+        return self.publications.get((version, name) if name else version)
 
     def save_publication_layout(self, version, layout):
         assert self.publications.setdefault(version, layout) == layout
@@ -276,16 +277,22 @@ class ModuleReleases(unittest.TestCase):
         self.assertEqual(set(self.dag_plan(base=index)['lanes']), set())
 
     def test_simultaneous_workers_publish_each_diamond_module_once(self):
+        self.run_diamond(staggered=False)
+
+    def test_late_worker_joins_natural_fanout_after_first_worker_starts_a_branch(self):
+        self.run_diamond(staggered=True)
+
+    def run_diamond(self, *, staggered):
         from concurrent.futures import ThreadPoolExecutor
-        from threading import Barrier, Condition
+        from threading import Barrier, Condition, Event
         from time import monotonic
         (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
         (self.root / 'D5/D.lean').write_text('import D5.B\nimport D5.C\ndef valueD := valueB+valueC\n')
         self.modules['D5.D'] = Module('trureturing', Path('D5/D.lean'), Path('.'))
         plan = self.dag_plan(workers=2)
-        # Force an actual inter-runner handoff in this four-module execution fixture.
-        for row in plan['compiler_dag']['units'].values():
-            row['queue'] = int('D5.C' in row['members'])
+        queues = {n: u['queue'] for u in plan['compiler_dag']['units'].values() for n in u['members']}
+        self.assertNotEqual(queues['D5.B'], queues['D5.C'])
+        branch_started = Event()
         condition = Condition()
         branches = Barrier(2, timeout=20)
         ready = Barrier(2, timeout=20)
@@ -300,6 +307,7 @@ class ModuleReleases(unittest.TestCase):
         def compile_at(root, modules, roots):
             build_calls.extend(roots)
             if roots in (['D5.B'], ['D5.C']):
+                branch_started.set()
                 branches.wait()
             subprocess.run(['lake', 'build', *['+' + n + ':leanArts' for n in roots]],
                            cwd=root, check=True, capture_output=True)
@@ -311,7 +319,11 @@ class ModuleReleases(unittest.TestCase):
                 return result
 
         def run_lane(lane):
-            ready.wait()
+            if staggered:
+                if lane == queues['D5.A']:
+                    self.assertTrue(branch_started.wait(timeout=20))
+            else:
+                ready.wait()
             return cache.work(checkouts[lane], plan, lane, self.remote, checkouts[lane] / 'receipts')
 
         deadline = monotonic() + 35
@@ -348,13 +360,8 @@ class ModuleReleases(unittest.TestCase):
         shutil.rmtree(self.root / PROJECT_BUILD)
         self.remote.queues.clear()
 
-        # The other runner owns the queue while A and B become visible out of order.
-        def claim(plan, queue, lane):
-            return not observed
-
         with patch.object(self.remote, 'compiler_progress', side_effect=lambda *args: observed.popleft()), \
-             patch.object(self.remote, 'wait_compiler_progress', return_value=None), \
-             patch.object(self.remote, 'claim_compiler_queue', side_effect=claim):
+             patch.object(self.remote, 'wait_compiler_progress', return_value=None):
             result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
         self.assertEqual(result['compiled_modules'], 1)
         self.assertEqual(self.compiled, [['D5.C']])
@@ -387,6 +394,18 @@ class ModuleReleases(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'artifact differs from its Lake trace'):
                 cache.work(self.root, plan, 0, self.remote, self.root / 'receipts')
         self.assertEqual(self.remote.saves, [])
+
+    def test_exact_compiler_verifier_uses_the_frozen_source_plan_on_cold_and_warm_releases(self):
+        from lean_module_remote import COMPILER_PLAN
+        plan = self.dag_plan()
+        self.workers(plan)
+        index = cache.finish(plan, self.remote)
+        for snapshot in (plan, self.dag_plan(base=index)):
+            self.remote.publications[index['version'], COMPILER_PLAN] = snapshot
+            with patch.object(cache, 'checkout_targets', side_effect=AssertionError('verifier reanalyzed source')):
+                result = cache.restore_published(self.root, index, ['D5.C'], self.remote,
+                                                 self.root / 'verified', 'compiler', exact=True)
+            self.assertEqual((result['requested'], result['restored']), (2, 2))
 
     def test_cross_source_reuses_matching_member_of_interrupted_unit(self):
         # A and B fit in one unit. A later edit invalidates B while A and its consumer C still match.

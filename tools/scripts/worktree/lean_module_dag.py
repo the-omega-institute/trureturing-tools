@@ -34,6 +34,7 @@ def assign_queues(units, count):
     """List-schedule in module units, charging a transfer between distinct queues."""
     available = [0] * count
     finish = {}
+    siblings = defaultdict(set)
     for key in sorted(units, key=lambda k: (-units[k]['rank'], k)):
         unit = units[key]
         def start(queue):
@@ -42,7 +43,12 @@ def assign_queues(units, count):
                 handoff = QUEUE_HANDOFF_COST if units[dep]['queue'] != queue else 0
                 ready = max(ready, finish[dep] + handoff)
             return ready
-        begins, _, queue = min((start(q), available[q], q) for q in range(count))
+        # Independent children with the same prerequisites can build simultaneously.
+        used = siblings[tuple(unit['deps'])]
+        if len(used) == count:
+            used.clear()
+        begins, _, queue = min((start(q), available[q], q) for q in range(count) if q not in used)
+        used.add(queue)
         unit['queue'] = queue
         finish[key] = available[queue] = begins + len(unit['members'])
 
@@ -315,6 +321,7 @@ def compile_units(root, plan, lane, remote, modules, output):
     ready = {key for key, count in remaining.items() if not count}
 
     persisted = set()
+    awaiting_metadata = set()
 
     def observed(key, row):
         rows[key] = row
@@ -322,6 +329,16 @@ def compile_units(root, plan, lane, remote, modules, output):
         seed_members[key].update(row['members'])
         persisted.add(key)
         ready.discard(key)
+        if remaining[key]:
+            # Publishing a unit required its missing ancestors to have completed.
+            # Let their catalog entries arrive, even on a fresh attempt with no claims.
+            parents = list(units[key]['deps'])
+            while parents:
+                dep = parents.pop()
+                if dep in pending and dep not in persisted and dep not in awaiting_metadata:
+                    awaiting_metadata.add(dep)
+                    ready.discard(dep)
+                    parents.extend(units[dep]['deps'])
         # Part catalogs are independent snapshots. Hold an observed child until
         # all of its prerequisites can also be located by this worker.
         settled = [] if remaining[key] else [key]
@@ -333,10 +350,9 @@ def compile_units(root, plan, lane, remote, modules, output):
                 if not remaining[child]:
                     if child in persisted:
                         settled.append(child)
-                    else:
+                    elif child not in awaiting_metadata:
                         ready.add(child)
 
-    held = set()
     task_plan = dict(plan, shards=units)
     output.mkdir(parents=True, exist_ok=True)
     refresh = True
@@ -353,19 +369,11 @@ def compile_units(root, plan, lane, remote, modules, output):
             top = [k for k in ordered if units[k]['rank'] == units[ordered[0]]['rank']]
             offset = lane % len(top)
             ordered[:len(top)] = top[offset:] + top[:offset]
-        key = next((k for k in ordered if units[k]['queue'] in held), None)
-        if key is None:
-            candidates = {}
-            for candidate in ordered:
-                candidates.setdefault(units[candidate]['queue'], candidate)
-            # Prefer the planned lane's queue. Earlier single-worker startups
-            # may still claim any ready queue when that lane has not started.
-            for queue in sorted(candidates, key=lambda q: q != lane):
-                candidate = candidates[queue]
-                if remote.claim_compiler_queue(plan, queue, lane):
-                    held.add(queue)
-                    key = candidate
-                    break
+        # The planned lane uses its own queue cheaply. A borrowed queue admits
+        # distinct units concurrently, so a later arrival can still help.
+        ordered.sort(key=lambda k: units[k]['queue'] != lane)
+        key = next((candidate for candidate in ordered if remote.claim_compiler_queue(
+            plan, units[candidate]['queue'], lane, candidate)), None)
         if key is None:
             remote.wait_compiler_progress(plan)
             refresh = True

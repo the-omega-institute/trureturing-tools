@@ -110,7 +110,6 @@ class Remote:
         self.root = root
         self.deadline = deadline if deadline is not None else host.operation_deadline()
         self.http = GitHubHTTP(self.deadline)
-        self.busy_claims = set()
         self.next_job_check = 0
         self.progress_interval = 60
         self.public_pages = {}
@@ -118,7 +117,6 @@ class Remote:
         self.public_resume = 0
         self.next_progress = 0
         self.queue_claims = {}
-        self.next_claim_read = 0
         self.inventory = {}
         self.release_pages = {}
 
@@ -540,14 +538,19 @@ class Remote:
             return row
         tag = row['version']
         catalog = self.catalog(tag)
-        asset = catalog[1].get(row['asset']) if catalog else None
-        if not asset or asset['state'] != 'uploaded':
-            catalog = self.catalog(tag, refresh=True)
+        delay = 0
+        while True:
             asset = catalog[1].get(row['asset']) if catalog else None
-        if (not asset or asset['state'] != 'uploaded' or asset['size'] <= 0
-                or asset['digest'] != 'sha256:' + row['public_digest']):
-            raise ValueError('compiler progress differs from immutable release metadata')
-        return dict(row, bytes=asset['size'], sha256=row['public_digest'])
+            if asset and asset['state'] == 'uploaded':
+                if asset['size'] <= 0 or asset['digest'] != 'sha256:' + row['public_digest']:
+                    raise ValueError('compiler progress differs from immutable release metadata')
+                return dict(row, bytes=asset['size'], sha256=row['public_digest'])
+            # The public directory can announce an asset before the REST read
+            # replica sees the upload. Reconcile within this worker's deadline.
+            if delay:
+                time.sleep(min(delay, host.remaining(self.deadline)))
+            delay = min(30, max(2, delay * 2))
+            catalog = self.catalog(tag, refresh=True)
 
     @cache
     def claim_identity(self, source, lane):
@@ -560,30 +563,31 @@ class Remote:
                        object=source, type='commit')
         return prefix, tag['sha']
 
-    def claim_compiler_queue(self, plan, queue, lane):
-        prefix, owner = self.claim_identity(plan['source'], lane)
-        ref = f'tags/{prefix}{queue}'
-        if ref in self.busy_claims:
-            return False
-        if time.monotonic() >= self.next_claim_read:
-            for entry in self.api('git/matching-refs/tags/' + prefix):
-                self.queue_claims[entry['ref']] = entry['object']['sha']
-            self.next_claim_read = time.monotonic() + 60
-        if self.queue_claims.get('refs/' + ref, owner) != owner:
-            self.busy_claims.add(ref)
-            return False
-        try:
-            self.api('git/refs', 'POST', ref='refs/' + ref, sha=owner)
-            return True
-        except host.GitHubCommandError:
-            # A failed write is contention only if the exact ref exists.
-            entry = self.api('git/ref/' + ref)
-            if entry['ref'] != 'refs/' + ref:
-                raise ValueError('compiler claim returned another ref')
-            if entry['object']['sha'] == owner:
-                return True
-            self.busy_claims.add(ref)
-            return False
+    def compiler_claim(self, ref, owner):
+        if ref not in self.queue_claims:
+            try:
+                self.api('git/refs', 'POST', ref=ref, sha=owner)
+                self.queue_claims[ref] = owner
+            except host.GitHubCommandError:
+                # A lost successful POST and a competing worker are distinguished
+                # by the target of the exact, immutable ref.
+                entry = self.api('git/ref/' + ref.removeprefix('refs/'))
+                if entry['ref'] != ref:
+                    raise ValueError('unexpected compiler claim ref')
+                self.queue_claims[ref] = entry['object']['sha']
+        return self.queue_claims[ref]
+
+    def claim_compiler_queue(self, plan, queue, lane, key):
+        source = plan['source']
+        prefix, owner = self.claim_identity(source, lane)
+        ref = 'refs/tags/' + prefix
+        # The first claimant fixes the protocol for this queue and attempt. Its
+        # home lane can run it exclusively. Borrowers open the queue for shared
+        # work by recording the source commit instead of a worker's tag object.
+        claim = self.compiler_claim(ref + str(queue), owner if queue == lane else source)
+        if claim != source:
+            return claim == owner
+        return self.compiler_claim(ref + 'unit/' + key, owner) == owner
 
     def wait_compiler_progress(self, plan):
         # A dead runner cannot release its reservation. Failed-job reruns use a fresh attempt.
@@ -604,7 +608,7 @@ class Remote:
         prefix = 'tags/lean-unit-claims/' + (source + '/' if source else '')
         for entry in self.api('git/matching-refs/' + prefix):
             ref = entry['ref'].removeprefix('refs/')
-            match = re.fullmatch(r'tags/lean-unit-claims/([0-9a-f]{40})/([0-9]+)/([0-9]+)/([0-9]+)', ref)
+            match = re.fullmatch(r'tags/lean-unit-claims/([0-9a-f]{40})/([0-9]+)/([0-9]+)/(?:[0-9]+|unit/[0-9a-f]{64})', ref)
             if not ref.startswith(prefix) or not match:
                 raise ValueError('unexpected compiler claim ref')
             # The compiler workflow serializes all publishers. Preserve the current

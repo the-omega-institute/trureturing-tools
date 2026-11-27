@@ -538,9 +538,12 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
         lanes[lane].append(name)
         loads[lane] += sum(sizes[n] for n in planned[name]['members'])
     plan['lanes'] = lanes
-    if compiler_dag and missing:
-        from lean_module_dag import prepare
-        prepare(plan, base, remote, workers, prepare_release, modules, root)
+    if compiler_dag:
+        from lean_module_dag import module_snapshot, prepare
+        if missing:
+            prepare(plan, base, remote, workers, prepare_release, modules, root)
+        else:
+            plan['compiler_dag'] = module_snapshot(root, modules, targets)
     if legacy and lanes:
         plan['legacy'] = legacy
     return plan
@@ -812,12 +815,17 @@ def finish(plan, remote, *, stage_only=False):
 
 
 def restore(root, index, requested, remote, destination, *, kind=None, report_index=None, report_remote=None,
-            load_reports=None):
+            load_reports=None, snapshot=None):
     roots = set(requested or ())
     report_error = None
     try:
-        modules, targets = checkout_targets(root, kind='compiler' if kind == 'compiler' else 'report',
-                                            requested=requested, restore_only=True, scope_roots=roots)
+        if snapshot is None:
+            modules, targets = checkout_targets(root, kind='compiler' if kind == 'compiler' else 'report',
+                                               requested=requested, restore_only=True, scope_roots=roots)
+        else:
+            from lean_module_dag import worker_modules
+            modules = worker_modules(root, snapshot['compiler_dag'])
+            targets = snapshot['targets']
     except REPORT_READ_ERRORS as error:
         if kind is not None:
             raise
@@ -910,7 +918,24 @@ def restore_published(root, index, names, remote, destination, kind=None, *, exa
             validate_report_pair(reports, paired)
         return reports, reader
 
-    return restore(root, index, names, remote, destination, kind=kind, load_reports=load_reports)
+    snapshot = None
+    if exact and kind == 'compiler' and index.get('kind') == 'compiler':
+        # Callers can request an old version from another checkout, or restore into a dirty tree.
+        try:
+            same_checkout = compiler.checkout(root) == index['source']
+        except ValueError:
+            same_checkout = False
+        if same_checkout:
+            from lean_module_remote import COMPILER_PLAN
+            saved = remote.publication_layout(index['version'], COMPILER_PLAN)
+            if saved is not None:
+                if any(saved.get(k) != index[k] for k in ('schema', 'kind', 'source', 'version', 'mathlib')):
+                    raise ValueError('compiler restore plan differs from publication')
+                dag = saved.get('compiler_dag')
+                if dag and dag['environment'] == compiler_environment(root):
+                    snapshot = saved
+    return restore(root, index, names, remote, destination, kind=kind, load_reports=load_reports,
+                   snapshot=snapshot)
 
 
 def fetch_published(root, names, deadline, *, refresh_stale, version=None):

@@ -202,16 +202,21 @@ class VersionedShards(unittest.TestCase):
         plan = self.plan('a' * 40)
         other = transport.Remote(self.root)
         other.http = self.service
+        first, second = 'b' * 64, 'c' * 64
         with patch.object(transport, 'publisher', return_value=dict(run='9', attempt='1')):
-            self.assertTrue(self.remote.claim_compiler_queue(plan, 1, 0))
-            self.assertFalse(other.claim_compiler_queue(plan, 1, 7))
-            self.assertTrue(other.claim_compiler_queue(plan, 2, 7))
+            self.assertTrue(self.remote.claim_compiler_queue(plan, 0, 0, first))
+            self.assertFalse(other.claim_compiler_queue(plan, 0, 7, second))
+            self.assertEqual(len(self.service.claims), 1)
+            self.assertTrue(self.remote.claim_compiler_queue(plan, 7, 0, first))
+            self.assertFalse(other.claim_compiler_queue(plan, 7, 7, first))
+            self.assertTrue(other.claim_compiler_queue(plan, 7, 7, second))
+            self.assertFalse(self.remote.claim_compiler_queue(plan, 7, 0, second))
             self.remote.clear_compiler_claims()
-            self.assertEqual(len(self.service.claims), 2)
+            self.assertEqual(len(self.service.claims), 4)
         retry = transport.Remote(self.root)
         retry.http = self.service
         with patch.object(transport, 'publisher', return_value=dict(run='9', attempt='2')):
-            self.assertTrue(retry.claim_compiler_queue(plan, 1, 7))
+            self.assertTrue(retry.claim_compiler_queue(plan, 7, 7, first))
             retry.clear_compiler_claims()
             self.assertEqual(len(self.service.claims), 1)
             retry.clear_compiler_claims(plan['source'])
@@ -234,6 +239,11 @@ class VersionedShards(unittest.TestCase):
             self.assertEqual(self.remote.compiler_progress(plan, {key})[key], observed)
             self.assertEqual(self.remote.progress_interval, transport.PUBLIC_PROGRESS_SECONDS)
             self.assertEqual(self.remote.resolve_checkpoint(observed)['bytes'], saved['bytes'])
+            visible = self.remote.catalog(saved['version'])
+            with patch.object(self.remote, 'catalog', side_effect=[None, (1, {}), visible]), \
+                 patch.object(transport.time, 'sleep') as waited:
+                self.assertEqual(self.remote.resolve_checkpoint(observed)['bytes'], saved['bytes'])
+                waited.assert_called_once_with(2)
             with self.assertRaisesRegex(ValueError, 'differs'):
                 self.remote.resolve_checkpoint(dict(observed, public_digest='a' * 64))
 
