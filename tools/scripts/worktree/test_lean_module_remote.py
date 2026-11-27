@@ -23,6 +23,7 @@ class Service:
         self.creates = Counter()
         self.files = {}
         self.ref = None
+        self.claims = {}
         self.patches = []
         self.uploads = 0
         self.reads = []
@@ -59,6 +60,19 @@ class Service:
             assets = next(r['assets'] for r in self.releases.values() if r['id'] == rid)
             page = int(parse_qs(urlsplit(path).query)['page'][0])
             return assets[(page-1)*100:page*100]
+        if path == 'git/tags':
+            return {'sha': hashlib.sha1(body['tag'].encode()).hexdigest()}
+        if path.startswith('git/matching-refs/tags/lean-unit-claims/'):
+            prefix = path.removeprefix('git/matching-refs/')
+            return [row for ref, row in self.claims.items() if ref.startswith(prefix)]
+        if path.startswith('git/ref/tags/lean-unit-claims/'):
+            return self.claims[path.removeprefix('git/ref/')]
+        if path == 'git/refs' and body['ref'].startswith('refs/tags/lean-unit-claims/'):
+            ref = body['ref'].removeprefix('refs/')
+            if ref in self.claims:
+                raise transport.host.GitHubCommandError(1, ['gh'], stderr='HTTP 422: exists')
+            self.claims[ref] = dict(ref=body['ref'], object={'sha': body['sha']})
+            return self.claims[ref]
         if path.startswith('git/matching-refs/tags/'):
             prefix = path.removeprefix('git/matching-refs/tags/')
             return [{'ref': 'refs/tags/' + tag} for tag in self.releases if tag.startswith(prefix)]
@@ -69,7 +83,31 @@ class Service:
             return {'merge_base_commit': {'sha': self.ref}}
         raise ValueError(path)
 
-    def request(self, url, *, method, path=None):
+    def request(self, url, *, method='GET', path=None, headers=None, accept=None, authenticate=True, redirect=False):
+        if method == 'HEAD' and '/releases/download/' in url:
+            assert not authenticate and redirect
+            tag, name = urlsplit(url).path.split('/')[-2:]
+            if (tag, name) not in self.files:
+                raise transport.host.GitHubCommandError(1, ['HEAD'], stderr='HTTP 404: missing')
+            response = io.BytesIO(b'')
+            response.status = 302
+            return response
+        if '/releases/expanded_assets/' in url:
+            assert method == 'GET' and not authenticate and accept == 'text/html'
+            tag = urlsplit(url).path.split('/')[-1]
+            assets = self.releases.get(tag, {}).get('assets', [])
+            body = ''.join(f'<li><a href="/{transport.host.REPO}/releases/download/{tag}/{a["name"]}"></a>'
+                           f'<clipboard-copy value="{a["digest"]}"></clipboard-copy></li>'
+                           for a in assets if a['state'] == 'uploaded').encode()
+            etag = '"' + hashlib.sha256(body).hexdigest() + '"'
+            if headers.get('If-None-Match') == etag:
+                raise transport.host.GitHubCommandError(1, ['GET'], stderr='HTTP 304: ')
+            response = io.BytesIO(gzip.compress(body))
+            response.headers = {'ETag': etag, 'Content-Encoding': 'gzip'}
+            return response
+        if method == 'DELETE' and '/git/refs/tags/' in url:
+            del self.claims[url.split('/git/refs/')[1]]
+            return io.BytesIO(b'')
         if method == 'DELETE':
             asset_id = int(urlsplit(url).path.split('/')[-1])
             for tag, release in self.releases.items():
@@ -126,6 +164,27 @@ class VersionedShards(unittest.TestCase):
         guard.start()
         self.addCleanup(guard.stop)
 
+    def test_pinned_compiler_plan_is_reused_before_analyzing_the_checkout(self):
+        import lean_module_cache as cache
+
+        source = 'a' * 40
+        version = transport.PREFIX + source
+        plan = dict(schema=cache.SCHEMA, kind='compiler', source=source, version=version,
+                    lanes=[[0]], shards={}, compiler_dag={'units': {}})
+        output = self.root / 'compiler-plan.json'
+        argv = ['lean_module_cache', 'plan', '--kind', 'compiler', '--compiler-dag',
+                '--prepare-release', '--output', str(output)]
+        with patch.object(cache.sys, 'argv', argv), patch.object(cache.compiler, 'checkout', return_value=source), \
+                patch.object(transport, 'Remote', return_value=self.remote), patch.object(self.remote, 'clear_compiler_claims'), \
+                patch.object(cache, 'plan_publication', side_effect=[plan, AssertionError('re-analyzed pinned source')]) as analyze:
+            self.assertEqual(cache.run(), 0)
+            first = output.read_bytes()
+            output.unlink()
+            self.assertEqual(cache.run(), 0)
+            self.assertEqual(output.read_bytes(), first)
+        analyze.assert_called_once()
+        self.assertIn((version, transport.COMPILER_PLAN), self.service.files)
+
     def plan(self, source, name='Small', fingerprint='c'):
         version = transport.PREFIX + source
         key = 'abcd-' + name
@@ -146,6 +205,93 @@ class VersionedShards(unittest.TestCase):
             self.service.releases[saved['version']]['assets'][-1]['label'] = row['fingerprint']
             self.remote.inventory.clear()
         return saved
+
+    def test_compiler_queue_claims_recover_on_retry_and_cleanup(self):
+        plan = self.plan('a' * 40)
+        other = transport.Remote(self.root)
+        other.http = self.service
+        first, second = 'b' * 64, 'c' * 64
+        with patch.object(transport, 'publisher', return_value=dict(run='9', attempt='1')):
+            self.assertTrue(self.remote.claim_compiler_queue(plan, 0, 0, first))
+            self.assertFalse(other.claim_compiler_queue(plan, 0, 7, second))
+            self.assertEqual(len(self.service.claims), 1)
+            self.assertTrue(self.remote.claim_compiler_queue(plan, 7, 0, first))
+            self.assertFalse(other.claim_compiler_queue(plan, 7, 7, first))
+            self.assertTrue(other.claim_compiler_queue(plan, 7, 7, second))
+            self.assertFalse(self.remote.claim_compiler_queue(plan, 7, 0, second))
+            self.remote.clear_compiler_claims()
+            self.assertEqual(len(self.service.claims), 4)
+        retry = transport.Remote(self.root)
+        retry.http = self.service
+        with patch.object(transport, 'publisher', return_value=dict(run='9', attempt='2')):
+            self.assertTrue(retry.claim_compiler_queue(plan, 7, 7, first))
+            retry.clear_compiler_claims()
+            self.assertEqual(len(self.service.claims), 1)
+            retry.clear_compiler_claims(plan['source'])
+            self.assertEqual(self.service.claims, {})
+
+    def test_claim_ref_is_readable_after_conflict_and_delayed_replication(self):
+        ref = 'refs/tags/lean-unit-claims/a'
+        conflict = transport.host.GitHubCommandError(1, ['POST'], stderr='HTTP 422: reference exists')
+        delayed = transport.host.GitHubCommandError(1, ['GET'], stderr='HTTP 404: missing')
+        with patch.object(self.remote, 'api', side_effect=[conflict, delayed, dict(ref=ref, object={'sha':'other'})]), \
+             patch.object(transport.time, 'sleep') as wait:
+            self.assertEqual(self.remote.compiler_claim(ref, 'mine'), 'other')
+            wait.assert_called_once_with(1)
+
+    def test_public_part_notifies_between_api_audits_and_revalidates_digest(self):
+        from lean_module_dag import unit_key, unit_row
+        plan = self.plan('a' * 40)
+        key = unit_key(plan['mathlib'], {'Small': 'input'})
+        row = dict(unit_row(key, ['Small']), part=transport.UNIT_PART_START)
+        plan.update(shards={key: row}, lanes=[[] for _ in range(20)])
+        self.remote.next_inventory_check = float('inf')
+        with patch.object(self.remote, 'indexed_compiler_progress', side_effect=AssertionError('REST poll')):
+            self.assertEqual(self.remote.compiler_progress(plan, {key}), {})
+            path = self.root / 'unit.gz'
+            path.write_bytes(b'compressed')
+            sha = hashlib.sha256(path.read_bytes()).hexdigest()
+            saved = self.remote.save(plan, key, path, dict(row, sha256=sha, bytes=path.stat().st_size))
+            observed = self.remote.compiler_progress(plan, {key})[key]
+            self.assertEqual(self.remote.compiler_progress(plan, {key})[key], observed)
+            self.assertEqual(self.remote.progress_interval, transport.PUBLIC_PROGRESS_SECONDS)
+            self.assertEqual(self.remote.resolve_checkpoint(observed)['bytes'], saved['bytes'])
+            visible = self.remote.catalog(saved['version'])
+            with patch.object(self.remote, 'catalog', side_effect=[None, (1, {}), visible]), \
+                 patch.object(transport.time, 'sleep') as waited:
+                self.assertEqual(self.remote.resolve_checkpoint(observed)['bytes'], saved['bytes'])
+                waited.assert_called_once_with(2)
+            with self.assertRaisesRegex(ValueError, 'differs'):
+                self.remote.resolve_checkpoint(dict(observed, public_digest='a' * 64))
+
+    def test_compiler_unit_subsets_overflow_discovery_and_interrupted_upload(self):
+        from lean_module_dag import unit_key, unit_row
+        plan = self.plan('a' * 40)
+        inputs = {'Small': 'compiler1', 'Other': 'compiler2'}
+        key = unit_key(plan['mathlib'], inputs)
+        part = transport.UNIT_PART_START
+        row = dict(unit_row(key, inputs), part=part)
+        plan.update(shards={key: row}, lanes=[[]], targets={'Small': {'key': 'compiler1'}})
+        self.remote.save_compiler_catalog(plan['version'], dict(mathlib=plan['mathlib'], units={key: inputs}))
+        # An interrupted GitHub upload reserves its filename with a starter asset.
+        tag = f'{plan["version"]}-part-{part}'
+        self.remote.catalog(tag, create=True)
+        self.service.releases[tag]['assets'].append(dict(name=row['asset'], state='starter', size=0))
+        self.remote.inventory.clear()
+        path = self.root / 'unit.tar.gz'
+        with path.open('wb') as raw, gzip.GzipFile(fileobj=raw, filename=key, mode='wb', mtime=0) as archive:
+            archive.write(b'checkpoint')
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        done = self.remote.save(plan, key, path, dict(row, sha256=sha, bytes=path.stat().st_size))
+        self.assertTrue(done['version'].endswith(str(part+1)))
+        self.assertEqual(self.remote.retry_checkpoint(plan, key)['sha256'], sha)
+        self.assertEqual(self.remote.compiler_progress(plan, {key})[key]['sha256'], sha)
+        later = dict(plan, version=transport.PREFIX+'b'*40)
+        recovered = self.remote.compiler_seeds(later)
+        self.assertEqual(set(recovered['targets']), {'Small'})
+        self.assertEqual(recovered['shards'][key]['members'], ['Other', 'Small'])
+        self.assertFalse(any(part in t for t, _ in self.remote.candidates(plan) for part in ['-part-']))
+        self.assertEqual(self.service.ref, None)
 
     def test_typed_compiler_preserves_promotion_evidence_for_its_legacy_report_source(self):
         first = self.plan('a' * 40)
@@ -427,9 +573,11 @@ class VersionedShards(unittest.TestCase):
         newer = cache.finish(other, self.remote)
         retry = plan('c', inputs, newer, prepare=True)
         self.assertEqual((retry['shards'], retry['base_version']), (original['shards'], base['version']))
+        modules = {n: cache.inventory.Module('trureturing', Path(*n.split('.')).with_suffix('.lean'), Path('.'))
+                   for n in inputs}
         with tempfile.TemporaryDirectory() as dest, patch.object(cache, 'restore_shard',
                 side_effect=lambda archive, row, members, *args, **kw: set(members)):
-            self.assertEqual(cache.restore_artifacts(self.root, {}, inputs, self.remote.latest(retry['base_version']),
+            self.assertEqual(cache.restore_artifacts(self.root, modules, inputs, self.remote.latest(retry['base_version']),
                                                      set(inputs), self.remote, Path(dest), 'compiler'), set(warm))
         empty_retry = plan('e', inputs, newer, prepare=True)
         self.assertEqual(empty_retry['shards'], no_base['shards'])

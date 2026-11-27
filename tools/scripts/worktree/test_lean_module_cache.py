@@ -15,8 +15,32 @@ import unittest
 from unittest.mock import patch
 
 import lean_module_cache as cache
+from lean_module_dag import assign_queues
 from lean_artifact_inventory import Module, PROJECT_BUILD
 from lean_module_shards import pack_shard, restore_shard
+
+
+class CompilerQueuePlanning(unittest.TestCase):
+    def test_dependency_handoff_balances_chains_and_wide_fanout(self):
+        paths = {
+            'producer': (3, [], 2),
+            'independent': (1, [], 1),
+            'left': (2, ['producer'], 10),
+            'right': (2, ['producer'], 1),
+            'join': (1, ['left', 'right'], 1),
+        }
+        def run(workers):
+            units = {key: dict(rank=rank, deps=deps, members=range(count))
+                     for key, (rank, deps, count) in paths.items()}
+            assign_queues(units, workers)
+            return {key: unit['queue'] for key, unit in units.items()}
+
+        queues = run(2)
+        self.assertNotEqual(queues['independent'], queues['producer'])
+        self.assertEqual(queues['left'], queues['producer'])
+        self.assertNotEqual(queues['right'], queues['left'])
+        self.assertEqual(queues['join'], queues['left'])
+        self.assertEqual(set(run(1).values()), {0})
 
 
 class MemoryRemote:
@@ -29,6 +53,8 @@ class MemoryRemote:
         self.publications = {}
         self.saves = []
         self.fail = None
+        self.catalogs = []
+        self.queues = {}
 
     def confirmed(self, rows):
         return rows
@@ -38,6 +64,29 @@ class MemoryRemote:
 
     def partials(self, plan):
         return {n: self.rows[r['fingerprint']] for n, r in plan['shards'].items() if r['fingerprint'] in self.rows}
+
+    def save_compiler_catalog(self, version, catalog):
+        self.catalogs.append(catalog)
+
+    def compiler_seeds(self, plan):
+        from lean_module_dag import recovery_index
+        assets = {name: (tag, dict(digest='sha256:' + hashlib.sha256(data).hexdigest(),
+                                  state='uploaded', size=len(data)))
+                  for (tag, name), data in self.assets.items()}
+        return recovery_index(plan, self.catalogs, assets)
+
+    def compiler_progress(self, plan, pending):
+        return {k: self.rows[k] for k in pending if k in self.rows}
+
+    def retry_checkpoint(self, plan, key):
+        return self.rows.get(key)
+
+    def claim_compiler_queue(self, plan, queue, lane, key):
+        owner = self.queues.setdefault((plan['source'], queue), lane if queue == lane else None)
+        return (self.queues.setdefault((plan['source'], key), lane) == lane) if owner is None else owner == lane
+
+    def wait_compiler_progress(self, plan):
+        raise AssertionError('a single live worker must make progress')
 
     def save(self, plan, name, path, row):
         if self.fail == name:
@@ -52,8 +101,8 @@ class MemoryRemote:
     def staged_index(self, version):
         return self.latest(version)
 
-    def publication_layout(self, version):
-        return self.publications.get(version)
+    def publication_layout(self, version, name=None):
+        return self.publications.get((version, name) if name else version)
 
     def save_publication_layout(self, version, layout):
         assert self.publications.setdefault(version, layout) == layout
@@ -168,6 +217,288 @@ class ModuleReleases(unittest.TestCase):
 
     def workers(self, plan):
         return [cache.work(self.root, plan, i, self.remote, self.root / 'receipts') for i in range(len(plan['lanes']))]
+
+    def dag_plan(self, workers=2, base=None):
+        modules, targets = cache.checkout_targets(self.root)
+        return cache.make_plan(self.source, self.pin, targets, base, self.remote, cache.DEFAULT_CAPACITY,
+                               workers, mathlib_version=self.version, kind='compiler', compiler_dag=True,
+                               prepare_release=True, modules=modules, root=self.root)
+
+    def test_static_plan_keeps_cold_ancestor_below_a_warm_intermediary(self):
+        from lean_module_dag import decode_scope
+        graph = {'D5.A': [], 'D5.B': ['D5.A'], 'D5.C': ['D5.B'], 'D5.D': []}
+        targets = {n: dict(key=n, deps=parents) for n, parents in graph.items()}
+        modules = dict(self.modules, **{'D5.D': Module('trureturing', Path('D5/D.lean'), Path('.'))})
+        # A prior partial unit supplies just the intermediary.
+        recovery = dict(targets={'D5.B': dict(key='D5.B', shard='warm')}, shards={
+            'warm': dict(version='old', asset='warm', members=['D5.B'])})
+        with patch.object(self.remote, 'compiler_seeds', return_value=recovery):
+            plan = cache.make_plan(self.source, self.pin, targets, None, self.remote, cache.DEFAULT_CAPACITY,
+                                   2, mathlib_version=self.version, kind='compiler', compiler_dag=True,
+                                   modules=modules, root=self.root)
+        dag = plan['compiler_dag']
+        owner = {n: k for k, unit in dag['units'].items() for n in unit['members']}
+        self.assertEqual(dag['units'][owner['D5.C']]['deps'], [owner['D5.A']])
+        restore = dag['units'][owner['D5.C']]['restore']
+        self.assertEqual(decode_scope(restore, dag['names']), {'D5.A', 'D5.B'})
+
+    def test_diamond_single_runner_retry_split_from_fresh_worktree(self):
+        # Two cold branches share A. The last runner starts before either of the others.
+        (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
+        (self.root / 'D5/D.lean').write_text('import D5.B\nimport D5.C\ndef valueD := valueB+valueC\n')
+        self.modules['D5.D'] = Module('trureturing', Path('D5/D.lean'), Path('.'))
+        plan = self.dag_plan(workers=3)
+        units = plan['compiler_dag']['units']
+        own = {n: k for k, row in units.items() for n in row['members']}
+        self.assertEqual(set(units[own['D5.D']]['deps']), {own['D5.B'], own['D5.C']})
+        self.assertEqual(units[own['D5.B']]['deps'], [own['D5.A']])
+        self.assertEqual(units[own['D5.C']]['deps'], [own['D5.A']])
+        self.remote.fail = own['D5.D']
+        from contextlib import ExitStack
+        import lean_module_dag as dag
+        with ExitStack() as guards:
+            for target, name in ((cache, 'checkout_targets'), (dag, 'TopologicalSorter'),
+                                 (cache.compiler, 'terminal'), (cache.inventory, 'import_closure')):
+                guards.enter_context(patch.object(target, name, side_effect=AssertionError('worker reanalyzed DAG')))
+            with self.assertRaises(InterruptedError):
+                cache.work(self.root, plan, 2, self.remote, self.root / 'receipts')
+        self.assertNotIn('D5', self.remote.saves)
+        with self.assertRaisesRegex(ValueError, 'planned shards unavailable'):
+            cache.finish(plan, self.remote)
+        self.compiled.clear()
+        self.remote.fail = None
+        self.remote.queues.clear()
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        # An Actions failed-job retry reuses the original plan artifact.
+        self.assertEqual(cache.work(self.root, plan, 0, self.remote, self.root / 'retry')['compiled_modules'], 1)
+        self.assertEqual(self.compiled, [['D5.D']])
+        index = cache.finish(plan, self.remote)
+        destination = self.root / 'restored'
+        self.assertEqual(cache.restore(self.root, index, ['D5.D'], self.remote, destination,
+                                       kind='compiler')['restored'], 4)
+        self.assertEqual(set(index['shards']), {'D5'})
+        self.assertEqual(set(self.dag_plan(base=index)['lanes']), set())
+
+    def test_simultaneous_workers_publish_each_diamond_module_once(self):
+        self.run_diamond(staggered=False)
+
+    def test_late_worker_joins_natural_fanout_after_first_worker_starts_a_branch(self):
+        self.run_diamond(staggered=True)
+
+    def run_diamond(self, *, staggered):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier, Condition, Event
+        from time import monotonic
+        (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
+        (self.root / 'D5/D.lean').write_text('import D5.B\nimport D5.C\ndef valueD := valueB+valueC\n')
+        self.modules['D5.D'] = Module('trureturing', Path('D5/D.lean'), Path('.'))
+        plan = self.dag_plan(workers=2)
+        queues = {n: u['queue'] for u in plan['compiler_dag']['units'].values() for n in u['members']}
+        self.assertNotEqual(queues['D5.B'], queues['D5.C'])
+        branch_started = Event()
+        condition = Condition()
+        branches = Barrier(2, timeout=20)
+        ready = Barrier(2, timeout=20)
+        checkouts = [self.root / 'runner0', self.root / 'runner1']
+        for root in checkouts:
+            root.mkdir()
+            for f in ('lakefile.toml', 'lake-manifest.json', 'lean-toolchain'):
+                shutil.copyfile(self.root / f, root / f)
+            shutil.copytree(self.root / 'D5', root / 'D5')
+        build_calls = []
+
+        def compile_at(root, modules, roots):
+            build_calls.extend(roots)
+            if roots in (['D5.B'], ['D5.C']):
+                branch_started.set()
+                branches.wait()
+            subprocess.run(['lake', 'build', *['+' + n + ':leanArts' for n in roots]],
+                           cwd=root, check=True, capture_output=True)
+
+        def save(plan, key, path, row):
+            with condition:
+                result = MemoryRemote.save(self.remote, plan, key, path, row)
+                condition.notify_all()
+                return result
+
+        def run_lane(lane):
+            if staggered:
+                if lane == queues['D5.A']:
+                    self.assertTrue(branch_started.wait(timeout=20))
+            else:
+                ready.wait()
+            return cache.work(checkouts[lane], plan, lane, self.remote, checkouts[lane] / 'receipts')
+
+        deadline = monotonic() + 35
+        def wait(plan):
+            if monotonic() > deadline:
+                raise AssertionError('ready compiler queues stalled')
+            with condition:
+                condition.wait(timeout=0.05)
+
+        with patch.object(cache.compiler, 'compile_roots', side_effect=compile_at), \
+             patch.object(self.remote, 'save', side_effect=save), \
+             patch.object(self.remote, 'wait_compiler_progress', side_effect=wait), \
+             ThreadPoolExecutor(max_workers=2) as runners:
+            results = list(runners.map(run_lane, (1, 0)))
+        self.assertCountEqual(build_calls, ['D5.A', 'D5.B', 'D5.C', 'D5.D'])
+        self.assertEqual(sum(row['compiled_modules'] for row in results), 4)
+        self.assertEqual(set(cache.finish(plan, self.remote)['shards']), {'D5'})
+
+    def test_checkpoints_seen_child_first_release_descendants_after_ancestors(self):
+        from collections import deque
+        import lean_module_dag as dag
+        (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
+        (self.root / 'D5/C.lean').write_text('import D5.B\ndef valueC := valueB+1\n')
+        with patch.object(dag, 'UNIT_LIMIT', 1):
+            plan = self.dag_plan(workers=2)
+        owner = {n: k for k, unit in plan['compiler_dag']['units'].items() for n in unit['members']}
+        self.remote.fail = owner['D5.C']
+        with self.assertRaises(InterruptedError):
+            cache.work(self.root, plan, 0, self.remote, self.root / 'first')
+        a, b = owner['D5.A'], owner['D5.B']
+        observed = deque([{b: self.remote.rows[b]}, {a: self.remote.rows[a]}])
+        self.compiled.clear()
+        self.remote.fail = None
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        self.remote.queues.clear()
+
+        with patch.object(self.remote, 'compiler_progress', side_effect=lambda *args: observed.popleft()), \
+             patch.object(self.remote, 'wait_compiler_progress', return_value=None):
+            result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
+        self.assertEqual(result['compiled_modules'], 1)
+        self.assertEqual(self.compiled, [['D5.C']])
+        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(owner))
+
+    def test_child_visible_while_parent_exists_only_at_its_overflow_address(self):
+        import lean_module_dag as dag
+        import lean_module_remote as transport
+        from test_lean_module_remote import Service
+        (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
+        (self.root / 'D5/C.lean').write_text('import D5.B\ndef valueC := valueB+1\n')
+        with patch.object(dag, 'UNIT_LIMIT', 1):
+            plan = self.dag_plan(workers=2)
+        units = plan['compiler_dag']['units']
+        owner = {n: k for k, unit in units.items() for n in unit['members']}
+        a, b, c = (owner['D5.' + n] for n in 'ABC')
+        self.remote.fail = c
+        with self.assertRaises(InterruptedError):
+            cache.work(self.root, plan, 0, self.remote, self.root / 'first')
+        row = self.remote.rows[a]
+        service = Service()
+        reader = transport.Remote(self.root)
+        reader.http = service
+        reader.actions = lambda *args: False
+        primary = f'{plan["version"]}-part-{row["part"]}'
+        with patch.object(transport, 'publisher', return_value={}):
+            reader.catalog(primary, create=True)
+            service.releases[primary]['assets'].append(dict(name=row['asset'], state='starter', size=0))
+            reader.inventory.clear()
+            archive = self.root / 'parent.gz'
+            archive.write_bytes(self.remote.assets[row['version'], row['asset']])
+            saved = reader.save(dict(plan, shards=units), a, archive, row)
+        self.assertEqual(saved['version'], f'{plan["version"]}-part-{row["part"]+1}')
+        self.remote.queues.clear()
+        self.remote.fail = None
+        self.compiled.clear()
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        download = self.remote.download
+        def restore(row, output):
+            (reader.download if row['version'] == saved['version'] else download)(row, output)
+        with patch.object(self.remote, 'compiler_progress', return_value={b: self.remote.rows[b]}), \
+             patch.object(self.remote, 'retry_checkpoint', wraps=reader.retry_checkpoint) as probe, \
+             patch.object(self.remote, 'download', side_effect=restore):
+            result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
+        self.assertEqual([call.args[1] for call in probe.call_args_list], [a])
+        self.assertEqual(result['compiled_modules'], 1)
+        self.assertEqual(self.compiled, [['D5.C']])
+
+    def test_retry_recovers_uploads_omitted_by_both_inventories(self):
+        plan = self.dag_plan()
+        self.remote.fail = 'D5'
+        with self.assertRaises(InterruptedError):
+            self.workers(plan)
+        self.remote.queues.clear()
+        self.remote.fail = None
+        self.compiled.clear()
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        with patch.dict(os.environ, GITHUB_RUN_ATTEMPT='2'), \
+             patch.object(self.remote, 'compiler_progress', return_value={}):
+            cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
+        self.assertEqual(self.compiled, [])
+        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), {'D5.A', 'D5.B', 'D5.C'})
+
+    def test_dag_adopts_available_first_publication_frames(self):
+        plan = self.dag_plan(workers=1)
+        self.lake('build', '+D5.A:leanArts')
+        plan['legacy'] = {'targets': {'D5.A': {}}}
+        def restore(remote, index, names, destination):
+            return names & index['targets'].keys()
+        with patch('lean_generation_checkpoints.remote_for', return_value=object()), \
+             patch.object(cache, 'restore_legacy', side_effect=restore):
+            result = self.workers(plan)
+        self.assertEqual(sum(r['compiled_modules'] for r in result), 2)
+        self.assertCountEqual([n for call in self.compiled for n in call], ['D5.B', 'D5.C'])
+        self.assertEqual(len(cache.finish(plan, self.remote)['targets']), 3)
+
+    def test_checkpoint_rejects_modified_ordinary_olean_before_upload(self):
+        plan = self.dag_plan()
+        def corrupt(root, modules, names):
+            self.compile(root, modules, names)
+            artifact = root / PROJECT_BUILD / 'lib/lean' / Path(*names[0].split('.')).with_suffix('.olean')
+            with artifact.open('r+b') as stream:
+                stream.seek(-1, os.SEEK_END)
+                last = stream.read(1)[0]
+                stream.seek(-1, os.SEEK_END)
+                stream.write(bytes([last ^ 1]))
+        with patch.object(cache.compiler, 'compile_roots', side_effect=corrupt):
+            with self.assertRaisesRegex(ValueError, 'artifact differs from its Lake trace'):
+                cache.work(self.root, plan, 0, self.remote, self.root / 'receipts')
+        self.assertEqual(self.remote.saves, [])
+
+    def test_exact_compiler_verifier_uses_the_frozen_source_plan_on_cold_and_warm_releases(self):
+        from lean_module_remote import COMPILER_PLAN
+        plan = self.dag_plan()
+        self.workers(plan)
+        index = cache.finish(plan, self.remote)
+        for snapshot in (plan, self.dag_plan(base=index)):
+            self.remote.publications[index['version'], COMPILER_PLAN] = snapshot
+            with patch.object(cache, 'checkout_targets', side_effect=AssertionError('verifier reanalyzed source')):
+                result = cache.restore_published(self.root, index, ['D5.C'], self.remote,
+                                                 self.root / 'verified', 'compiler', exact=True)
+            self.assertEqual((result['requested'], result['restored']), (2, 2))
+
+    def test_older_unit_catalog_does_not_block_trace_verified_publication(self):
+        import lean_module_dag as dag
+        inputs = {'D5.A': 'x'}
+        old = dag.digest(['lean-compiler-unit-v1', self.pin, sorted(inputs.items())])
+        self.remote.catalogs.append(dict(mathlib=self.pin, units={old: inputs}))
+        self.remote.assets['old', dag.unit_row(old, inputs)['asset']] = b'older unit'
+        plan = self.dag_plan()
+        self.assertNotIn('D5.A', plan['compiler_dag']['seeds']['owners'])
+        self.remote.catalogs.append(dict(mathlib=self.pin, units={'0' * 64: inputs}))
+        with self.assertRaisesRegex(ValueError, 'inputs differ'):
+            self.dag_plan()
+
+    def test_cross_source_reuses_matching_member_of_interrupted_unit(self):
+        # A and B fit in one unit. A later edit invalidates B while A and its consumer C still match.
+        original = self.dag_plan(workers=1)
+        self.remote.fail = 'D5'
+        with self.assertRaises(InterruptedError):
+            self.workers(original)
+        self.assertEqual(self.remote.compiler_seeds(original)['targets'].keys(), {'D5.A', 'D5.B', 'D5.C'})
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        self.compiled.clear()
+        self.source = 'b' * 40
+        self.remote.fail = None
+        (self.root / 'D5/B.lean').write_text('def valueB := 70\n')
+        later = self.dag_plan()
+        self.assertEqual(set(later['compiler_dag']['seeds']['owners']), {'D5.A', 'D5.C'})
+        self.workers(later)
+        self.assertEqual(self.compiled, [['D5.B']])
+        index = cache.finish(later, self.remote)
+        self.assertEqual(cache.restore(self.root, index, None, self.remote, self.root / 'restored',
+                                       kind='compiler')['restored'], 3)
 
     def test_compiler_and_report_inputs_restore_independently(self):
         from lean_cache_release import report_selection
@@ -544,6 +875,71 @@ def main : IO Unit := do
             'strict_lake': strict_api, 'portable': portable_api}[name]))
         return portable_api
 
+    def test_strict_foundation_restores_the_ordinary_native_plugin(self):
+        from lean_artifact_inventory import plugin_outputs
+
+        self.omega_fixture()
+        plugin = cache.inventory.INIT_PLUGIN
+        helpers = {plugin + '.Layout', plugin + '.Proofs'}
+        names = helpers | {plugin}
+        for name in sorted(names):
+            source = Path('src', *name.split('.')).with_suffix('.lean')
+            self.modules[name] = Module('trureturing', source, Path('.'))
+            path = self.root / source
+            path.parent.mkdir(exist_ok=True, parents=True)
+            path.write_text(('import ' + '\nimport '.join(sorted(helpers)) + '\n') if name == plugin
+                            else 'namespace ' + name + '\ndef value : Nat := 1\nend ' + name + '\n')
+        with self.cfg.open('a') as file:
+            file.write(f'\n[[lean_lib]]\nname = "{plugin}"\nsrcDir="src"\n')
+        modules, original = cache.checkout_targets(self.root)
+        self.assertIn(plugin, original['OmegaInit']['deps'])
+        self.assertEqual(set(original[plugin]['deps']), helpers)
+        for n in names:
+            self.assertEqual(modules[n].extra_builds, ())
+            self.assertTrue(modules[n].plugin_input)
+        with patch.object(cache, 'binary_platform', return_value=('linux', 'other-architecture')):
+            _, other_host = cache.checkout_targets(self.root)
+        self.assertNotEqual(original[plugin + '.Layout']['key'], other_host[plugin + '.Layout']['key'])
+        self.assertNotEqual(original['OmegaInit']['key'], other_host['OmegaInit']['key'])
+        self.assertEqual(original['D5.B']['key'], other_host['D5.B']['key'])
+        archive = self.root / 'plugin.tar.gz'
+        cache.compile_omega_outputs(self.root, modules, names, False)
+        descriptor = pack_shard(self.root, modules, names, archive, 'c'*64, kind='compiler')
+        with tempfile.TemporaryDirectory() as tmp:
+            other = Path(tmp) / 'checkout'
+            shutil.copytree(self.root, other, ignore=shutil.ignore_patterns('.lake', '*.tar.gz'))
+            dest = other / PROJECT_BUILD
+            self.assertEqual(restore_shard(archive, descriptor, names, modules, dest,
+                                           root=other, kind='compiler'), names)
+            cache.materialize_shared(dest, modules, names)
+            config = other / 'strict-plugin.toml'
+            text = (other / 'lakefile.toml').read_text().replace('name = "OmegaInit"\n',
+                f'name = "OmegaInit"\nneeds=["{plugin}:shared"]\nplugins=["{plugin}:shared"]\n')
+            config.write_text('buildDir=".lake/build/omega-strict"\n' + text)
+            subprocess.run(['lake', '-f', config, '--no-build', 'build', plugin + ':shared'], cwd=other, check=True)
+            built = subprocess.run(['lake', '-f', config, 'build', '+OmegaInit:olean'], cwd=other,
+                                   check=True, capture_output=True, text=True)
+            self.assertNotIn('Built ' + plugin, built.stdout + built.stderr)
+        # A different-platform library in the same archive does not exclude a portable sibling.
+        self.compile(self.root, modules, ['D5.B'])
+        mixed = self.root / 'mixed-native.tar.gz'
+        mixed_row = pack_shard(self.root, modules, names | {'D5.B'}, mixed, 'd'*64, kind='compiler')
+        other_platform = 'darwin' if cache.sys.platform != 'darwin' else 'linux'
+        with patch.object(cache.sys, 'platform', other_platform):
+            self.assertEqual(restore_shard(mixed, mixed_row, ['D5.B'], modules, self.root / 'portable',
+                                           root=self.root, kind='compiler'), {'D5.B'})
+        path, = [p for p in plugin_outputs(plugin, modules[plugin]) if p.parent.name == 'lib']
+        (self.root / PROJECT_BUILD / path).write_bytes(b'invalid native plugin')
+        with self.assertRaisesRegex(ValueError, 'differs from its Lake trace'):
+            pack_shard(self.root, modules, names, archive, 'c'*64, kind='compiler')
+        helper = modules[plugin + '.Layout'].source
+        with (self.root / helper).open('a') as source:
+            source.write('def extraPluginLayout := 2\n')
+        _, updated = cache.checkout_targets(self.root)
+        for name in (plugin + '.Layout', plugin, 'OmegaInit', 'OmegaMathlib', 'D5.A'):
+            self.assertNotEqual(original[name]['key'], updated[name]['key'], name)
+        self.assertEqual(original['D5.B']['key'], updated['D5.B']['key'])
+
     def test_omega_backends_share_module_identity_and_restore_together(self):
         self.omega_fixture()
         strict = self.root / 'strict'
@@ -667,6 +1063,37 @@ def main : IO Unit := do
         (checks / 'strict_lake.py').write_text('# changed strict configuration\n')
         self.assertTrue({'OmegaInit', 'OmegaMathlib', 'D5.A', 'D5.C'} <= changed())
 
+    def test_strict_uses_the_omegainit_family_and_shares_ordinary_prerequisites(self):
+        self.omega_fixture()
+        leaf = 'OmegaInit.Leaf'
+        path = Path('src/OmegaInit/Leaf.lean')
+        for directory, value in [('src', 3), ('strict', 4)]:
+            source = self.root / directory / 'OmegaInit/Leaf.lean'
+            source.parent.mkdir(exist_ok=True)
+            source.write_text(f'def leafValue := {value}\n')
+        self.modules[leaf] = Module('trureturing', path, Path('.'))
+        (self.root / 'D5/A.lean').write_text('import OmegaInit.Leaf\nimport D5.B\ndef valueA := leafValue+valueB\n')
+        plan = self.dag_plan(workers=2)
+        dag = plan['compiler_dag']
+        from lean_module_dag import worker_modules
+        modules = worker_modules(self.root, dag)
+        self.assertEqual(modules['D5.A'].extra_builds, (Path('omega-strict'),))
+        self.assertEqual(modules['D5.C'].extra_builds, (Path('omega-strict'),))
+        ordinary = modules['D5.B']
+        self.assertEqual(ordinary.extra_builds, ())
+        self.assertEqual(ordinary.shared_builds, (Path('omega-strict'),))
+        self.workers(plan)
+        index = cache.finish(plan, self.remote)
+        build = self.root / PROJECT_BUILD
+        shutil.rmtree(build)
+        cache.restore(self.root, index, ['D5.C'], self.remote, build, kind='compiler')
+        official = build / 'lib/lean/D5/B.trace'
+        shared = build / 'omega-strict/lib/lean/D5/B.trace'
+        self.assertEqual(official.read_bytes(), shared.read_bytes())
+        config = self.root / '.lake/omega-strict.toml'
+        self.lake('-f', str(config), '--no-build', 'build', '+D5.C:olean')
+        self.assertFalse((build / 'omega-common/lib/lean/D5/B.olean').exists())
+
     def test_compiled_backend_selection_survives_scoped_cache_and_marker_removal(self):
         api = self.omega_fixture()
         with self.cfg.open('a') as config:
@@ -701,7 +1128,7 @@ def main : IO Unit := do
         self.assertFalse(read)
         self.workers(plan)
         index = cache.finish(plan, self.remote)
-        self.assertEqual(read, set(reasons) | {'D5.B'})
+        self.assertEqual(read, set(reasons))
         build = self.root / PROJECT_BUILD
         shutil.rmtree(build)
         read.clear()
@@ -714,13 +1141,14 @@ def main : IO Unit := do
             self.assertTrue((build / base).is_file())
             self.assertFalse((build / 'omega-strict' / base).exists())
             self.assertFalse((build / 'omega-common' / base).exists())
-        self.assertTrue((build / 'omega-strict/lib/lean/D5/B.olean').is_file())
+        self.assertFalse((build / 'omega-strict/lib/lean/D5/B.olean').exists())
         for filename in ('src/OmegaBuild/Plan.lean', 'src/OmegaBuild/Parts.lean', 'src/OmegaChecks/portable.py'):
             reader_file = self.root / filename
             original = reader_file.read_bytes()
             reader_file.write_bytes(original + b'\n')
             changed = self.plan(index)
-            for name in set(reasons) | {'D5.B'}:
+            self.assertEqual(changed['targets']['D5.B']['key'], plan['targets']['D5.B']['key'])
+            for name in reasons:
                 self.assertNotEqual(changed['targets'][name]['key'], plan['targets'][name]['key'])
             stale = self.root / ('stale-' + reader_file.name)
             cache.restore(self.root, index, ['D5.C'], self.remote, stale)

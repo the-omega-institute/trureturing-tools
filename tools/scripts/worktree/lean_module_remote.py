@@ -2,6 +2,7 @@
 
 from collections import Counter
 from functools import cache
+import gzip
 import hashlib
 from itertools import chain
 import json
@@ -11,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from urllib.parse import quote, urlencode
 
 from lean_cache import publication_mathlib
@@ -24,9 +26,12 @@ PREFIX = 'lean-modules-'
 MARKER = 'heads/lean-modules-published'
 INDEX = 'index.json'
 LAYOUT = 'publication-layout.json'
+COMPILER_PLAN = 'compiler-plan-v1.json'
 PROMOTED = 'published.json'
 TAG = re.compile(r'lean-modules-([0-9a-f]{40})(-report)?(?:-part-([2-9]|[1-9][0-9]+))?')
 CAPACITY = 900
+UNIT_PART_START = 10000000
+PUBLIC_PROGRESS_SECONDS = 15
 
 
 def json_body(value):
@@ -105,6 +110,13 @@ class Remote:
         self.root = root
         self.deadline = deadline if deadline is not None else host.operation_deadline()
         self.http = GitHubHTTP(self.deadline)
+        self.next_job_check = 0
+        self.progress_interval = 60
+        self.public_pages = {}
+        self.next_inventory_check = 0
+        self.public_resume = 0
+        self.next_progress = 0
+        self.queue_claims = {}
         self.inventory = {}
         self.release_pages = {}
 
@@ -200,7 +212,7 @@ class Remote:
                 return tuple(seen)
             cursor = ['-f', 'cursor=' + refs['pageInfo']['endCursor']]
 
-    def candidates(self, plan):
+    def candidates(self, plan, *, include_units=False):
         # Current-version writes by sibling jobs may have happened since planning.
         tags = [plan['version']] if plan.get('source_only') else list(self.tags(plan['version'], plan.get('base_version')))
         prefix = 'tags/' + plan['version'] + '-part-'
@@ -209,6 +221,9 @@ class Remote:
             if self.accepts_tag(tag) and tag.startswith(plan['version'] + '-part-') and tag not in tags:
                 tags.append(tag)
         for tag in tags:
+            part = TAG.fullmatch(tag)[3]
+            if part and int(part) >= UNIT_PART_START and not include_units:
+                continue
             entry = self.catalog(tag, refresh=tag.startswith(plan['version']))
             if entry:
                 yield tag, entry[1]
@@ -259,12 +274,15 @@ class Remote:
             raise ValueError('versioned shard metadata differs from index: ' + row['asset'])
         self.fetch(row['version'], asset, path)
 
-    def stage(self, version, name, path, digest):
+    def stage(self, version, name, path, digest, *, unit_part=None):
         publisher(self.kind)
-        primary_metadata = name in (INDEX, LAYOUT, PROMOTED)
+        primary_metadata = name in (INDEX, LAYOUT, PROMOTED, COMPILER_PLAN)
         # The planner owns the shared Release. Each worker alone creates its overflow parts.
         first_overflow = 2 + (self.lane or 0)
-        for part in chain((1,), range(first_overflow, first_overflow + 9998 * self.lanes, self.lanes)):
+        parts = chain((1,), range(first_overflow, first_overflow + 9998 * self.lanes, self.lanes))
+        if unit_part is not None:
+            parts = range(unit_part, unit_part + 8)
+        for part in parts:
             tag = version if part == 1 else f'{version}-part-{part}'
             catalog = self.catalog(tag, create=self.lane is None or part != 1)
             if catalog is None:
@@ -396,9 +414,236 @@ class Remote:
         publisher(self.kind)
         if path.stat().st_size != row['bytes'] or host.archive_sha(path, self.deadline) != row['sha256']:
             raise ValueError('local shard differs from its advertised payload')
-        tag, _ = self.stage(plan['version'], row['asset'], path, row['sha256'])
+        tag, _ = self.stage(plan['version'], row['asset'], path, row['sha256'], unit_part=row.get('part'))
         self.actions('put', row['key'], row['sha256'], path)
         return {**row, 'version': tag}
+
+    def compiler_seeds(self, plan):
+        from lean_module_dag import recovery_index
+        catalogs, assets = [], {}
+        for tag, entries in self.candidates(dict(plan, source_only=False), include_units=True):
+            for name, asset in entries.items():
+                if re.fullmatch(r'compiler-unit-[0-9a-f]{64}\.tar\.gz', name) and asset['state'] == 'uploaded':
+                    assets.setdefault(name, (tag, asset))
+                if re.fullmatch(r'compiler-units-[0-9a-f]{64}\.json', name) and asset['state'] == 'uploaded':
+                    if not 0 < asset['size'] <= MAX_INDEX or name[15:-5] != asset['digest'].removeprefix('sha256:'):
+                        raise ValueError('invalid compiler unit catalog')
+                    with tempfile.TemporaryDirectory() as temporary:
+                        path = Path(temporary) / 'catalog.json'
+                        self.fetch(tag, asset, path)
+                        catalogs.append(read(path))
+        return recovery_index(plan, catalogs, assets)
+
+    def save_compiler_catalog(self, version, catalog):
+        data = json_body(catalog)
+        if len(data) > MAX_INDEX:
+            raise ValueError('compiler unit catalog exceeds release metadata limit')
+        sha = hashlib.sha256(data).hexdigest()
+        with tempfile.TemporaryDirectory() as stage:
+            path = Path(stage) / 'catalog.json'
+            path.write_bytes(data)
+            self.stage(version, 'compiler-units-' + sha + '.json', path, sha)
+
+    def indexed_compiler_progress(self, plan, pending):
+        result = {}
+        parts = {}
+        for key in pending:
+            row = plan['shards'][key]
+            parts.setdefault(row['part'], []).append(key)
+        for part, keys in parts.items():
+            for offset in range(8):
+                tag = f'{plan["version"]}-part-{part + offset}'
+                catalog = self.catalog(tag, refresh=True)
+                if not catalog:
+                    break
+                retry = []
+                for key in keys:
+                    row = plan['shards'][key]
+                    asset = catalog[1].get(row['asset'])
+                    if asset and asset['state'] == 'starter':
+                        retry.append(key)
+                    if not asset or asset['state'] != 'uploaded':
+                        continue
+                    sha = (asset.get('digest') or '').removeprefix('sha256:')
+                    if not valid_digest(sha) or asset['size'] <= 0:
+                        raise ValueError('invalid completed compiler checkpoint')
+                    result[key] = dict(row, version=tag, bytes=asset['size'], sha256=sha)
+                keys = retry
+                if not keys:
+                    break
+        return result
+
+    def public_compiler_part(self, tag):
+        previous_etag, previous_names = self.public_pages.get(tag, (None, {}))
+        headers = {'Accept-Encoding': 'gzip'}
+        if previous_etag:
+            headers['If-None-Match'] = previous_etag
+        url = f'https://github.com/{host.REPO}/releases/expanded_assets/{tag}'
+        try:
+            with self.http.request(url, headers=headers, accept='text/html', authenticate=False) as response:
+                stream = gzip.GzipFile(fileobj=response) if response.headers.get('Content-Encoding') == 'gzip' else response
+                body = stream.read(8 * 1024**2 + 1)
+                if len(body) > 8 * 1024**2:
+                    raise ValueError('compiler asset listing exceeded byte limit')
+                etag = response.headers.get('ETag')
+        except host.GitHubCommandError as error:
+            if (error.stderr or '').startswith('HTTP 304:'):
+                return previous_names
+            if missing(error):
+                return {}
+            raise
+        prefix = f'/{host.REPO}/releases/download/{tag}/'.encode()
+        names = {}
+        for item in body.split(b'</li>'):
+            link = re.search(rb'href="' + re.escape(prefix) + rb'(compiler-unit-[0-9a-f]{64}\.tar\.gz)"', item)
+            if link:
+                sha = re.search(rb'value="sha256:([0-9a-f]{64})"', item)
+                if not sha:
+                    raise ValueError('compiler download listing has no digest')
+                names[link[1].decode()] = sha[1].decode()
+        self.public_pages[tag] = etag, names
+        return names
+
+    def compiler_progress(self, plan, pending):
+        parts = {}
+        for key in pending:
+            row = plan['shards'][key]
+            parts.setdefault(row['part'], {})[row['asset']] = key
+        now = time.monotonic()
+        result = {}
+        if now >= self.public_resume:
+            try:
+                for part, expected in parts.items():
+                    tag = f'{plan["version"]}-part-{part}'
+                    inventory = self.public_compiler_part(tag)
+                    for name in expected.keys() & inventory.keys():
+                        key = expected[name]
+                        result[key] = dict(plan['shards'][key], version=tag, public_digest=inventory[name])
+            except (ValueError, OSError, EOFError, host.GitHubCommandError) as error:
+                print(f'Public compiler progress unavailable, using release metadata: {error}', file=sys.stderr)
+                self.public_resume = now + 300
+        # Public pages use conditional requests without repository API credentials.
+        # A bounded authoritative reconciliation also finds interrupted-upload overflow.
+        if now >= self.next_inventory_check:
+            result.update(self.indexed_compiler_progress(plan, pending - result.keys()))
+            self.next_inventory_check = now + max(60, 9 * len(plan['lanes']) * len(parts))
+        self.progress_interval = PUBLIC_PROGRESS_SECONDS
+        if now < self.public_resume:
+            self.progress_interval = max(1, min(self.public_resume, self.next_inventory_check) - now)
+        self.next_progress = now + self.progress_interval
+        return result
+
+    def retry_checkpoint(self, plan, key):
+        row = plan['shards'][key]
+        # A fixed download address can become available before both inventories.
+        # An interrupted name can overflow into a deterministic sibling part.
+        for offset in range(8):
+            tag = f'{plan["version"]}-part-{row["part"] + offset}'
+            url = f'https://github.com/{host.REPO}/releases/download/{tag}/{row["asset"]}'
+            try:
+                with self.http.request(url, method='HEAD', redirect=True, authenticate=False) as response:
+                    if response.status not in (200, 302):
+                        raise ValueError('unexpected compiler checkpoint status')
+            except host.GitHubCommandError as error:
+                if missing(error):
+                    continue
+                raise
+            return self.resolve_checkpoint(dict(row, version=tag))
+        return None
+
+    def resolve_checkpoint(self, row):
+        tag = row['version']
+        catalog = self.catalog(tag)
+        delay = 0
+        while True:
+            asset = catalog[1].get(row['asset']) if catalog else None
+            if asset and asset['state'] == 'uploaded':
+                sha = (asset.get('digest') or '').removeprefix('sha256:')
+                if asset['size'] <= 0 or not valid_digest(sha) or sha != row.get('public_digest', sha):
+                    raise ValueError('compiler progress differs from immutable release metadata')
+                return dict(row, bytes=asset['size'], sha256=sha)
+            # The public directory can announce an asset before the REST read
+            # replica sees the upload. Reconcile within this worker's deadline.
+            if delay:
+                time.sleep(min(delay, host.remaining(self.deadline)))
+            delay = min(30, max(2, delay * 2))
+            catalog = self.catalog(tag, refresh=True)
+
+    @cache
+    def claim_identity(self, source, lane):
+        run = publisher('compiler')
+        if not all(re.fullmatch(r'[0-9]+', run[k]) for k in ('run', 'attempt')):
+            raise ValueError('invalid compiler job identity')
+        prefix = f'lean-unit-claims/{source}/{run["run"]}/{run["attempt"]}/'
+        # The tag object distinguishes a lost successful POST from a competing worker.
+        tag = self.api('git/tags', 'POST', tag=prefix + str(lane), message='Compiler unit worker',
+                       object=source, type='commit')
+        return prefix, tag['sha']
+
+    def compiler_claim(self, ref, owner):
+        if ref not in self.queue_claims:
+            try:
+                self.api('git/refs', 'POST', ref=ref, sha=owner)
+                self.queue_claims[ref] = owner
+            except host.GitHubCommandError:
+                # A lost successful POST and a competing worker are distinguished
+                # by the target of the exact, immutable ref.
+                for delay in (0, 1, 2, 4, 8):
+                    if delay:
+                        time.sleep(min(delay, host.remaining(self.deadline)))
+                    try:
+                        entry = self.api('git/ref/' + ref.removeprefix('refs/'))
+                    except host.GitHubCommandError as error:
+                        if missing(error) and delay != 8:
+                            continue
+                        raise
+                    if entry['ref'] != ref:
+                        raise ValueError('unexpected compiler claim ref')
+                    self.queue_claims[ref] = entry['object']['sha']
+                    break
+        return self.queue_claims[ref]
+
+    def claim_compiler_queue(self, plan, queue, lane, key):
+        source = plan['source']
+        prefix, owner = self.claim_identity(source, lane)
+        ref = 'refs/tags/' + prefix
+        # The first claimant fixes the protocol for this queue and attempt. Its
+        # home lane can run it exclusively. Borrowers open the queue for shared
+        # work by recording the source commit instead of a worker's tag object.
+        claim = self.compiler_claim(ref + str(queue), owner if queue == lane else source)
+        if claim != source:
+            return claim == owner
+        return self.compiler_claim(ref + 'unit/' + key, owner) == owner
+
+    def wait_compiler_progress(self, plan):
+        # A dead runner cannot release its reservation. Failed-job reruns use a fresh attempt.
+        if time.monotonic() >= self.next_job_check:
+            run = publisher('compiler')
+            for page in range(1, 5):
+                jobs = self.api(f'actions/runs/{run["run"]}/attempts/{run["attempt"]}/jobs?per_page=100&page={page}')['jobs']
+                if any(job['conclusion'] in ('cancelled', 'failure', 'timed_out') for job in jobs):
+                    raise RuntimeError('compiler job failed; completed unit checkpoints are available for retry')
+                if len(jobs) < 100:
+                    break
+            self.next_job_check = time.monotonic() + max(300, self.progress_interval * 2)
+        delay = max(0, self.next_progress - time.monotonic())
+        time.sleep(min(delay, host.remaining(self.deadline)))
+
+    def clear_compiler_claims(self, source=None):
+        run = publisher('compiler')
+        prefix = 'tags/lean-unit-claims/' + (source + '/' if source else '')
+        for entry in self.api('git/matching-refs/' + prefix):
+            ref = entry['ref'].removeprefix('refs/')
+            match = re.fullmatch(r'tags/lean-unit-claims/([0-9a-f]{40})/([0-9]+)/([0-9]+)/(?:[0-9]+|unit/[0-9a-f]{64})', ref)
+            if not ref.startswith(prefix) or not match:
+                raise ValueError('unexpected compiler claim ref')
+            # The compiler workflow serializes all publishers. Preserve the current
+            # attempt when an exclusive planner collects claims from terminated runs.
+            if source is None and (match[2], match[3]) == (run['run'], run['attempt']):
+                continue
+            url = f'https://api.github.com/repos/{host.REPO}/git/refs/{ref}'
+            with self.http.request(url, method='DELETE'):
+                pass
 
     def staged_index(self, version):
         if not self.accepts_tag(version) or TAG.fullmatch(version)[3]:
@@ -409,26 +654,26 @@ class Remote:
             return self.latest(version)
         return None
 
-    def publication_layout(self, version):
+    def publication_layout(self, version, name=LAYOUT):
         catalog = self.catalog(version)
-        asset = catalog[1].get(LAYOUT) if catalog else None
+        asset = catalog[1].get(name) if catalog else None
         if not asset or (asset['state'] == 'starter' and asset['size'] == 0):
             return None
         if not 0 < asset['size'] <= MAX_INDEX:
             raise ValueError('invalid module publication layout size')
         with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / LAYOUT
+            path = Path(temp) / name
             self.fetch(version, asset, path)
             return read(path)
 
-    def save_publication_layout(self, version, layout):
+    def save_publication_layout(self, version, layout, name=LAYOUT):
         data = json_body(layout)
         if len(data) > MAX_INDEX:
             raise ValueError('invalid module publication layout size')
         with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / LAYOUT
+            path = Path(temp) / name
             path.write_bytes(data)
-            self.stage(version, LAYOUT, path, hashlib.sha256(data).hexdigest())
+            self.stage(version, name, path, hashlib.sha256(data).hexdigest())
 
     def splits(self, plan):
         result = {}

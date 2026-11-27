@@ -58,34 +58,36 @@ def write_record(record):
 
 def check_duplicate_theorems(directory):
     direct, classical = "DuplicateDirect", "DuplicateClassical"
-    omega_init = "OmegaInit.FrozenDuplicateOwner"
+    omega_checks = "OmegaChecks.FrozenDuplicateOwner"
     omega_math = "OmegaMath.FrozenDuplicateOwner"
     proposition = "∀ (p : Prop), p → p"
 
     def target(name):
         return ".".join(MODULE.with_name(name).with_suffix("").parts)
 
-    def write_theorem(source, theorem, proof):
-        source.write_text(f"module\n\npublic theorem {theorem} : {proposition} := {proof}\n",
+    def write_theorem(source, theorem, proof, *, prelude=False):
+        header = "module\nprelude" if prelude else "module"
+        source.write_text(f"{header}\n\npublic theorem {theorem} : {proposition} := {proof}\n",
                           encoding="utf-8")
 
     write_theorem(MODULE.with_name(direct + ".lean"), "frozenDuplicate", "fun _ h => h")
     write_theorem(MODULE.with_name(classical + ".lean"), "frozenDuplicate",
                   "Classical.choice ⟨fun _ h => h⟩")
-    write_theorem(Path("src/OmegaInit/FrozenDuplicateOwner.lean"), "frozenDuplicateOwner", "fun _ h => h")
+    write_theorem(Path("src/OmegaChecks/FrozenDuplicateOwner.lean"), "frozenDuplicateOwner",
+                  "fun _ h => id h")
     write_theorem(Path("src/OmegaMath/FrozenDuplicateOwner.lean"), "frozenDuplicateOwner",
-                  "fun p h => (fun (_ : Prop) => h) p")
+                  "fun p h => (fun (_ : Prop) => h) p", prelude=True)
 
     for name, first, last in (("MergedForward", direct, classical), ("MergedReverse", classical, direct)):
-        owners = (omega_init, omega_math) if first == direct else (omega_math, omega_init)
+        owners = (omega_checks, omega_math) if first == direct else (omega_math, omega_checks)
         source = MODULE.with_name(name + ".lean")
         # Import the compiled theorems directly. Their exported axiom forms
         # have a variable-headed proposition and fail Lean's cheap Prop check.
         source.write_text(
             f"module\nimport all {target(first)}\nimport all {target(last)}\n"
             + "".join(f"import all {owner}\n" for owner in owners)
-            + f"\npublic opaque frozenAxioms : {proposition} := frozenDuplicate\n"
-            + f"public theorem frozenOwner : {proposition} := frozenDuplicateOwner\n", encoding="utf-8")
+            + f"\nnamespace {name}\npublic opaque frozenAxioms : {proposition} := frozenDuplicate\n"
+            + f"public theorem frozenOwner : {proposition} := frozenDuplicateOwner\nend {name}\n", encoding="utf-8")
     targets = (direct, classical, "MergedForward", "MergedReverse")
     run("python3", "-B", INSPECTOR, "prepare", "--targets", " ".join(map(target, targets)))
 
@@ -111,11 +113,13 @@ def check_duplicate_theorems(directory):
     assert measure(classical, direct) == [classical_row, direct_row]
 
     merged = measure("MergedForward", "MergedReverse")
-    expected = ((b, "OmegaMath", []), (a, "OmegaInit", ["Classical.choice"]))
+    expected = ((b, "OmegaMath", []), (a, "Init", ["Classical.choice"]))
     for row, (chosen, owner, report_axioms) in zip(merged, expected, strict=True):
         declarations = {d["nameKey"]: d for d in row["declarations"]}
-        axioms = declarations["ns(n0,12:frozenAxioms)"]
-        provenance = declarations["ns(n0,11:frozenOwner)"]
+        name = row["module"].rsplit(".", 1)[-1]
+        namespace = f"ns(n0,{len(name)}:{name})"
+        axioms = declarations[f"ns({namespace},12:frozenAxioms)"]
+        provenance = declarations[f"ns({namespace},11:frozenOwner)"]
         assert axioms["kind"] == "opaque" and axioms["includeInStatement"], axioms
         assert axioms["axioms"] == chosen["axioms"] and axioms["libraries"] == chosen["libraries"], axioms
         assert provenance["libraries"] == [owner] and provenance["axioms"] == [], provenance
@@ -139,14 +143,19 @@ def check_stale_hidden_axioms(report, deposited):
     source = MODULE.read_text(encoding="utf-8")
     proof = "private theorem _closedWitness : True := "
     assert proof + "True.intro" in source
-    MODULE.write_text(source.replace(proof + "True.intro", proof + "by sorry"), encoding="utf-8")
+    original = json.loads(report.read_bytes())
+    previous, = [module for module in original["modules"] if module["module"] == TARGET]
+    old_axioms = {row["name_key"]: row["axioms"] for row in previous["declarations"]}
+    # An admissible axiom reaches the ledger comparison in both compiler modes.
+    MODULE.write_text(source.replace(proof + "True.intro", proof + "Classical.choice ⟨True.intro⟩"), encoding="utf-8")
     run("python3", "-B", INSPECTOR, "prepare", "--targets", TARGET)
     run("bash", "tools/scripts/report/lean-report-scoped.sh", "--targets", TARGET, "--output", report)
     compiled = json.loads(report.read_bytes())
     module, = [module for module in compiled["modules"] if module["module"] == TARGET]
     hidden, = [row for row in module["declarations"] if row["name"].endswith("._closedWitness")]
-    assert not hidden["include_in_statement"] and hidden["axioms"] == ["sorryAx"], hidden
-    assert all("sorryAx" not in row["axioms"] for row in module["declarations"] if row is not hidden)
+    assert not hidden["include_in_statement"] and hidden["axioms"] == ["Classical.choice"], hidden
+    assert old_axioms[hidden["name_key"]] == []
+    assert all(row["axioms"] == old_axioms[row["name_key"]] for row in module["declarations"] if row is not hidden)
 
     # Keep current source hashes and materials so only the live axiom check can catch this.
     hidden["axioms"] = []
@@ -177,7 +186,6 @@ def exercise(directory):
         sources.append({"pattern": "src/**/*.lean", "optional": True})
         inputs.write_text(json.dumps(selection, indent=2) + "\n", encoding="utf-8")
     files = {
-        "Prelude.lean": Path("src/OmegaInit/FrozenDependencyFixture.lean"),
         "Bridge.lean": Path("src/OmegaMath/FrozenDependencyFixture.lean"),
         "OmegaConsumer.lean": Path("src/OmegaChecks/FrozenDependencyFixture.lean"),
         "Helper.lean": MODULE.with_name("Helper.lean"),
@@ -197,11 +205,11 @@ def exercise(directory):
     record = json.loads(deposited)
     rows = {item["declaration_name_key"].split(",")[-1].removesuffix(")").split(":", 1)[-1]: item
             for item in record["declarations"]}
-    assert rows["omegaProof"]["libraries"] == ["OmegaInit", "OmegaMath"], rows
-    assert rows["omegaProof"]["axioms"] == [], rows
-    assert rows["diagonalHalf"]["libraries"] == ["OmegaInit", "OmegaMath"], rows
-    assert rows["diagonalHalf"]["axioms"] == [], rows
-    assert rows["typeOnly"]["libraries"] == ["OmegaInit", "OmegaMath"], rows
+    for name, official_axioms in (("omegaProof", []), ("typeOnly", []), ("diagonalHalf", ["propext"])):
+        official = rows[name]
+        strict = official["strict_omega"]
+        assert official["libraries"] == ["Init", "OmegaMath"] and official["axioms"] == official_axioms, official
+        assert strict["libraries"] == ["OmegaInit", "OmegaMath"] and strict["axioms"] == [], strict
     assert rows["axiomFree"]["libraries"] == rows["axiomFree"]["axioms"] == [], rows
     assert "Mathlib" in rows["mathlibProof"]["libraries"], rows
     assert "Init" in rows["mathlibProof"]["libraries"], rows
@@ -217,6 +225,7 @@ def exercise(directory):
 
     for index, row in enumerate(record["declarations"]):
         if index % 2 == 0 and row != rows["fullAxioms"]:
+            row.pop("strict_omega", None)
             row.pop("libraries")
             row.pop("axioms", None)
         else:
