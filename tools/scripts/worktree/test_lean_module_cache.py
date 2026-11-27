@@ -303,6 +303,35 @@ class ModuleReleases(unittest.TestCase):
         self.assertEqual(sum(row['compiled_modules'] for row in results), 4)
         self.assertEqual(set(cache.finish(plan, self.remote)['shards']), {'D5'})
 
+    def test_checkpoints_seen_child_first_release_descendants_after_ancestors(self):
+        from collections import deque
+        import lean_module_dag as dag
+        (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
+        (self.root / 'D5/C.lean').write_text('import D5.B\ndef valueC := valueB+1\n')
+        with patch.object(dag, 'UNIT_LIMIT', 1):
+            plan = self.dag_plan(workers=2)
+        owner = {n: k for k, unit in plan['compiler_dag']['units'].items() for n in unit['members']}
+        self.remote.fail = owner['D5.C']
+        with self.assertRaises(InterruptedError):
+            cache.work(self.root, plan, 0, self.remote, self.root / 'first')
+        a, b = owner['D5.A'], owner['D5.B']
+        observed = deque([{b: self.remote.rows[b]}, {a: self.remote.rows[a]}])
+        self.compiled.clear()
+        self.remote.fail = None
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        self.remote.queues.clear()
+
+        def claim(plan, queue, lane):
+            return not observed or queue == plan['compiler_dag']['units'][owner['D5.C']]['queue']
+
+        with patch.object(self.remote, 'compiler_progress', side_effect=lambda *args: observed.popleft()), \
+             patch.object(self.remote, 'wait_compiler_progress', return_value=None), \
+             patch.object(self.remote, 'claim_compiler_queue', side_effect=claim):
+            result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
+        self.assertEqual(result['compiled_modules'], 1)
+        self.assertEqual(self.compiled, [['D5.C']])
+        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(owner))
+
     def test_cross_source_reuses_matching_member_of_interrupted_unit(self):
         # A and B fit in one unit. A later edit invalidates B while A and its consumer C still match.
         original = self.dag_plan(workers=1)

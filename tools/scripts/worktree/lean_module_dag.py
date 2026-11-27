@@ -282,26 +282,37 @@ def compile_units(root, plan, lane, remote, modules, output):
     remaining = {key: len(row['deps']) for key, row in units.items()}
     ready = {key for key, count in remaining.items() if not count}
 
-    def completed(key, row):
-        pending.remove(key)
-        ready.discard(key)
+    persisted = set()
+
+    def observed(key, row):
         rows[key] = row
         owners.update(dict.fromkeys(row['members'], key))
         seed_members[key].update(row['members'])
-        for child in units[key]['next']:
-            remaining[child] -= 1
-            if not remaining[child] and child in pending:
-                ready.add(child)
+        persisted.add(key)
+        ready.discard(key)
+        # Part catalogs are independent snapshots. Hold an observed child until
+        # all of its prerequisites can also be located by this worker.
+        settled = [] if remaining[key] else [key]
+        while settled:
+            finished = settled.pop()
+            pending.remove(finished)
+            for child in units[finished]['next']:
+                remaining[child] -= 1
+                if not remaining[child]:
+                    if child in persisted:
+                        settled.append(child)
+                    else:
+                        ready.add(child)
 
     held = set()
     task_plan = dict(plan, shards=units)
     output.mkdir(parents=True, exist_ok=True)
     refresh = True
     while pending:
-        discovered = remote.compiler_progress(task_plan, pending) if refresh else {}
+        discovered = remote.compiler_progress(task_plan, pending - persisted) if refresh else {}
         refresh = False
         for key, row in discovered.items():
-            completed(key, row)
+            observed(key, row)
         if not pending:
             break
         ordered = sorted(ready, key=lambda k: (-units[k]['rank'], k))
@@ -334,7 +345,7 @@ def compile_units(root, plan, lane, remote, modules, output):
             row = dict(units[key], bytes=data['bytes'], sha256=data['sha256'], version=plan['version'])
             rows[key] = remote.save(task_plan, key, archive, row)
         installed.update(members)
-        completed(key, rows[key])
+        observed(key, rows[key])
         compiled += len(members)
         if cache.shutil.disk_usage(root).free < 4 * 1024**3:
             for n in installed:
