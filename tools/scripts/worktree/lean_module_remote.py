@@ -25,6 +25,7 @@ PREFIX = 'lean-modules-'
 MARKER = 'heads/lean-modules-published'
 INDEX = 'index.json'
 LAYOUT = 'publication-layout.json'
+COMPILER_PLAN = 'compiler-plan-v1.json'
 PROMOTED = 'published.json'
 TAG = re.compile(r'lean-modules-([0-9a-f]{40})(-report)?(?:-part-([2-9]|[1-9][0-9]+))?')
 CAPACITY = 900
@@ -272,7 +273,7 @@ class Remote:
 
     def stage(self, version, name, path, digest, *, unit_part=None):
         publisher(self.kind)
-        primary_metadata = name in (INDEX, LAYOUT, PROMOTED)
+        primary_metadata = name in (INDEX, LAYOUT, PROMOTED, COMPILER_PLAN)
         # The planner owns the shared Release. Each worker alone creates its overflow parts.
         first_overflow = 2 + (self.lane or 0)
         parts = chain((1,), range(first_overflow, first_overflow + 9998 * self.lanes, self.lanes))
@@ -548,26 +549,26 @@ class Remote:
             return self.latest(version)
         return None
 
-    def publication_layout(self, version):
+    def publication_layout(self, version, name=LAYOUT):
         catalog = self.catalog(version)
-        asset = catalog[1].get(LAYOUT) if catalog else None
+        asset = catalog[1].get(name) if catalog else None
         if not asset or (asset['state'] == 'starter' and asset['size'] == 0):
             return None
         if not 0 < asset['size'] <= MAX_INDEX:
             raise ValueError('invalid module publication layout size')
         with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / LAYOUT
+            path = Path(temp) / name
             self.fetch(version, asset, path)
             return read(path)
 
-    def save_publication_layout(self, version, layout):
+    def save_publication_layout(self, version, layout, name=LAYOUT):
         data = json_body(layout)
         if len(data) > MAX_INDEX:
             raise ValueError('invalid module publication layout size')
         with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / LAYOUT
+            path = Path(temp) / name
             path.write_bytes(data)
-            self.stage(version, LAYOUT, path, hashlib.sha256(data).hexdigest())
+            self.stage(version, name, path, hashlib.sha256(data).hexdigest())
 
     def splits(self, plan):
         result = {}

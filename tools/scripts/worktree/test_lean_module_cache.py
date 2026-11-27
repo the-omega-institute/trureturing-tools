@@ -194,7 +194,25 @@ class ModuleReleases(unittest.TestCase):
         _, targets = cache.checkout_targets(self.root)
         return cache.make_plan(self.source, self.pin, targets, base, self.remote, cache.DEFAULT_CAPACITY,
                                workers, mathlib_version=self.version, kind='compiler', compiler_dag=True,
-                               prepare_release=True)
+                               prepare_release=True, modules=self.modules, root=self.root)
+
+    def test_static_plan_keeps_cold_ancestor_below_a_warm_intermediary(self):
+        from lean_module_dag import decode_scope
+        graph = {'D5.A': [], 'D5.B': ['D5.A'], 'D5.C': ['D5.B'], 'D5.D': []}
+        targets = {n: dict(key=n, deps=parents) for n, parents in graph.items()}
+        modules = dict(self.modules, **{'D5.D': Module('trureturing', Path('D5/D.lean'), Path('.'))})
+        # A prior partial unit supplies just the intermediary.
+        recovery = dict(targets={'D5.B': dict(key='D5.B', shard='warm')}, shards={
+            'warm': dict(version='old', asset='warm', members=['D5.B'])})
+        with patch.object(self.remote, 'compiler_seeds', return_value=recovery):
+            plan = cache.make_plan(self.source, self.pin, targets, None, self.remote, cache.DEFAULT_CAPACITY,
+                                   2, mathlib_version=self.version, kind='compiler', compiler_dag=True,
+                                   modules=modules, root=self.root)
+        dag = plan['compiler_dag']
+        owner = {n: k for k, unit in dag['units'].items() for n in unit['members']}
+        self.assertEqual(dag['units'][owner['D5.C']]['deps'], [owner['D5.A']])
+        restore = dag['units'][owner['D5.C']]['restore']
+        self.assertEqual(decode_scope(restore, dag['names']), {'D5.A', 'D5.B'})
 
     def test_diamond_single_runner_retry_split_from_fresh_worktree(self):
         # Two cold branches share A. The last runner starts before either of the others.
@@ -208,8 +226,14 @@ class ModuleReleases(unittest.TestCase):
         self.assertEqual(units[own['D5.B']]['deps'], [own['D5.A']])
         self.assertEqual(units[own['D5.C']]['deps'], [own['D5.A']])
         self.remote.fail = own['D5.D']
-        with self.assertRaises(InterruptedError):
-            cache.work(self.root, plan, 2, self.remote, self.root / 'receipts')
+        from contextlib import ExitStack
+        import lean_module_dag as dag
+        with ExitStack() as guards:
+            for target, name in ((cache, 'checkout_targets'), (dag, 'TopologicalSorter'),
+                                 (cache.compiler, 'terminal'), (cache.inventory, 'import_closure')):
+                guards.enter_context(patch.object(target, name, side_effect=AssertionError('worker reanalyzed DAG')))
+            with self.assertRaises(InterruptedError):
+                cache.work(self.root, plan, 2, self.remote, self.root / 'receipts')
         self.assertNotIn('D5', self.remote.saves)
         with self.assertRaisesRegex(ValueError, 'planned shards unavailable'):
             cache.finish(plan, self.remote)
@@ -226,6 +250,58 @@ class ModuleReleases(unittest.TestCase):
                                        kind='compiler')['restored'], 4)
         self.assertEqual(set(index['shards']), {'D5'})
         self.assertEqual(set(self.dag_plan(base=index)['lanes']), set())
+
+    def test_simultaneous_workers_publish_each_diamond_module_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier, Condition
+        from time import monotonic
+        (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
+        (self.root / 'D5/D.lean').write_text('import D5.B\nimport D5.C\ndef valueD := valueB+valueC\n')
+        self.modules['D5.D'] = Module('trureturing', Path('D5/D.lean'), Path('.'))
+        plan = self.dag_plan(workers=2)
+        condition = Condition()
+        branches = Barrier(2, timeout=20)
+        ready = Barrier(2, timeout=20)
+        checkouts = [self.root / 'runner0', self.root / 'runner1']
+        for root in checkouts:
+            root.mkdir()
+            for f in ('lakefile.toml', 'lake-manifest.json', 'lean-toolchain'):
+                shutil.copyfile(self.root / f, root / f)
+            shutil.copytree(self.root / 'D5', root / 'D5')
+        build_calls = []
+
+        def compile_at(root, modules, roots):
+            build_calls.extend(roots)
+            if roots in (['D5.B'], ['D5.C']):
+                branches.wait()
+            subprocess.run(['lake', 'build', *['+' + n + ':leanArts' for n in roots]],
+                           cwd=root, check=True, capture_output=True)
+
+        def save(plan, key, path, row):
+            with condition:
+                result = MemoryRemote.save(self.remote, plan, key, path, row)
+                condition.notify_all()
+                return result
+
+        def run_lane(lane):
+            ready.wait()
+            return cache.work(checkouts[lane], plan, lane, self.remote, checkouts[lane] / 'receipts')
+
+        deadline = monotonic() + 35
+        def wait(plan):
+            if monotonic() > deadline:
+                raise AssertionError('ready compiler queues stalled')
+            with condition:
+                condition.wait(timeout=0.05)
+
+        with patch.object(cache.compiler, 'compile_roots', side_effect=compile_at), \
+             patch.object(self.remote, 'save', side_effect=save), \
+             patch.object(self.remote, 'wait_compiler_progress', side_effect=wait), \
+             ThreadPoolExecutor(max_workers=2) as runners:
+            results = list(runners.map(run_lane, (1, 0)))
+        self.assertCountEqual(build_calls, ['D5.A', 'D5.B', 'D5.C', 'D5.D'])
+        self.assertEqual(sum(row['compiled_modules'] for row in results), 4)
+        self.assertEqual(set(cache.finish(plan, self.remote)['shards']), {'D5'})
 
     def test_cross_source_reuses_matching_member_of_interrupted_unit(self):
         # A and B fit in one unit. A later edit invalidates B while A and its consumer C still match.

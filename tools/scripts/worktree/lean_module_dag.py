@@ -1,11 +1,15 @@
 """Schedule cold compiler modules separately from published namespace shards."""
 
+import base64
 from collections import defaultdict
 from graphlib import TopologicalSorter
 import math
+import json
 from pathlib import Path
 import tempfile
+import zlib
 
+import lean_compile_layers as compiler
 from lean_artifact_inventory import import_closure
 from lean_generation_plan import digest
 from lean_release_index import valid_digest
@@ -23,7 +27,7 @@ def unit_row(key, members):
     return dict(key=asset, asset=asset, fingerprint=key, members=sorted(members), artifact_kind='compiler')
 
 
-def group_units(graph, cold, basis, workers):
+def group_units(graph, cold, basis, workers, cold_edges):
     """Fold the common facade generator's simultaneous basis build into one vertex."""
     foundation = import_closure(graph, basis) & cold
     anchor = min(foundation) if foundation else None
@@ -34,7 +38,7 @@ def group_units(graph, cold, basis, workers):
     edges = defaultdict(set)
     for n in cold:
         parent = owner(n)
-        edges[parent].update(owner(d) for d in graph[n] if d in cold and owner(d) != parent)
+        edges[parent].update(owner(d) for d in cold_edges[n] if owner(d) != parent)
     sorter = TopologicalSorter(edges)
     sorter.prepare()
     groups = []
@@ -106,7 +110,56 @@ def recovery_index(plan, catalogs, assets):
     return dict(targets=targets, shards=shards)
 
 
-def prepare(plan, base, remote, workers, prepare_release, facade_consumers):
+def encode_scope(mask):
+    data = mask.to_bytes((mask.bit_length() + 7) // 8, 'little')
+    return base64.b64encode(zlib.compress(data, level=1)).decode('ascii')
+
+
+def decode_scope(encoded, names):
+    data = zlib.decompress(base64.b64decode(encoded, validate=True))
+    return {names[8 * i + bit] for i, byte in enumerate(data) if byte
+            for bit in range(8) if byte & (1 << bit)}
+
+
+def module_snapshot(root, modules, targets):
+    from lean_module_cache import compiler_environment, file_digest
+    from lean_artifact_inventory import INSPECTOR, INTERFACE, REG_INSPECTOR
+    metadata = {}
+    for n in targets:
+        module = modules[n]
+        metadata[n] = [module.package, str(module.source), str(module.build),
+                       list(map(str, module.extra_builds)), module.conditional_backends]
+    pin = Path('Meta/tools-release.json')
+    files = set()
+    if (root / pin).is_file():
+        files.add(pin)
+        release_digest = json.loads((root / pin).read_bytes())['sha256']
+        if not valid_digest(release_digest):
+            raise ValueError('invalid tools release pin')
+        files.add(Path('build/tools-releases') / (release_digest + '.tar.gz'))
+        files.update(m.source for n, m in modules.items() if n in targets
+                     and (m.source.is_relative_to(INSPECTOR) or m.source.is_relative_to(INTERFACE)))
+        for package in (INSPECTOR, INTERFACE, REG_INSPECTOR):
+            files.update(package / name for name in ('lakefile.toml', 'lakefile.lean', 'lake-manifest.json')
+                         if (root / package / name).is_file())
+    return dict(modules=metadata, files={str(p): file_digest(root / p) for p in sorted(files)},
+                environment=compiler_environment(root))
+
+
+def worker_modules(root, dag):
+    from lean_artifact_inventory import Module
+    from lean_module_cache import compiler_environment, file_digest
+    if compiler_environment(root) != dag['environment']:
+        raise ValueError('compiler environment differs from plan')
+    for name, expected in dag['files'].items():
+        path = root / name
+        if path.is_symlink() or file_digest(path) != expected:
+            raise ValueError('compiler input differs from plan: ' + name)
+    return {n: Module(package, Path(source), Path(build), tuple(map(Path, extra)), conditional_backends=conditional)
+            for n, (package, source, build, extra, conditional) in dag['modules'].items()}
+
+
+def prepare(plan, base, remote, workers, prepare_release, modules, root):
     from lean_module_cache import partial_index
     from lean_module_remote import UNIT_PART_START
     targets = plan['targets']
@@ -115,12 +168,29 @@ def prepare(plan, base, remote, workers, prepare_release, facade_consumers):
     seeds = matching_seeds(targets, [partial_index(plan, plan['inherited']), checked_base, recovered])
     cold = targets.keys() - seeds['owners'].keys()
     graph = {n: set(t['deps']) for n, t in targets.items()}
+    facade_consumers = {n for n in targets if len(modules[n].extra_builds) == 2}
     basis = {n for n in targets if n.partition('.')[0] in BASIS} if facade_consumers else set()
     # Common facade generation reads all official and strict basis interfaces.
     foundation = import_closure(graph, basis)
     for n in facade_consumers - foundation:
         graph[n].update(basis)
-    groups = group_units(graph, cold, basis, workers)
+    names = sorted(targets)
+    ordinal = {n: i for i, n in enumerate(names)}
+    closure = {}
+    cold_edges = {}
+    # Bypass warm vertices for scheduling, while keeping their files in the restore scope.
+    for n in TopologicalSorter(graph).static_order():
+        parents = set()
+        mask = 1 << ordinal[n]
+        for dep in graph[n]:
+            mask |= closure[dep]
+            if dep in cold:
+                parents.add(dep)
+            else:
+                parents.update(cold_edges[dep])
+        cold_edges[n] = parents
+        closure[n] = mask
+    groups = group_units(graph, cold, basis, workers, cold_edges)
     units = {}
     owner = {}
     catalog = {'mathlib': plan['mathlib'], 'units': {}}
@@ -130,17 +200,39 @@ def prepare(plan, base, remote, workers, prepare_release, facade_consumers):
         catalog['units'][key] = inputs
         owner.update(dict.fromkeys(members, key))
         units[key] = unit_row(key, members)
-    # Separate immutable execution packs from the ordinary physical release parts.
+    foundation_scope = sum(1 << ordinal[n] for n in foundation)
+    # Every cold dependency below a warm intermediary must still be installed
+    # before Lake can consume the intermediary's restored artifact.
+    ancestors = {}
+    successors = defaultdict(list)
     first_part = UNIT_PART_START + int(digest(sorted(units))[:9], 16) * 100000
-    for ordinal, key in enumerate(sorted(units)):
+    for i, key in enumerate(sorted(units)):
+        units[key].update(part=first_part + i // 600 * 8, queue=i % (4 * workers))
+    # Groups were emitted in topological order. Compress transitive edges while
+    # preserving cold dependencies reached through any number of warm modules.
+    for members in groups:
+        key = owner[members[0]]
         unit = units[key]
-        unit['part'] = first_part + ordinal // 600 * 8
-        unit['queue'] = ordinal % (4 * workers)
-        deps = {owner[d] for n in unit['members'] for d in graph[n] if d in owner} - {key}
-        unit['deps'] = sorted(deps)
-    tuple(TopologicalSorter({key: row['deps'] for key, row in units.items()}).static_order())
-    plan['compiler_dag'] = dict(seeds=seeds, units=units, basis=sorted(basis),
-                                facade_consumers=sorted(facade_consumers - foundation))
+        scope = foundation_scope if basis.intersection(members) else 0
+        for n in members:
+            scope |= closure[n]
+        scope &= ~sum(1 << ordinal[n] for n in members)
+        unit['restore'] = encode_scope(scope)
+        deps = {owner[d] for n in members for d in cold_edges[n]} - {key}
+        indirect = set()
+        for d in deps:
+            indirect.update(ancestors[d])
+        unit['deps'] = sorted(deps - indirect)
+        ancestors[key] = deps | indirect
+        for d in unit['deps']:
+            successors[d].append(key)
+        roots = members if any(modules[n].extra_builds for n in members) else compiler.terminal(set(members), graph)
+        unit['roots'] = sorted(roots)
+    for key in reversed([owner[m[0]] for m in groups]):
+        units[key]['next'] = sorted(successors[key])
+        units[key]['rank'] = 1 + max((units[k]['rank'] for k in successors[key]), default=0)
+    plan['compiler_dag'] = dict(seeds=seeds, units=units, names=names,
+                                **module_snapshot(root, modules, targets))
     if catalog['units'] and prepare_release:
         remote.save_compiler_catalog(plan['version'], catalog)
     # Even one physical shard may have enough independent modules for many runners.
@@ -148,7 +240,7 @@ def prepare(plan, base, remote, workers, prepare_release, facade_consumers):
     plan['lanes'].extend([] for _ in range(jobs - len(plan['lanes'])))
 
 
-def compile_units(root, plan, lane, remote, modules, graph, output):
+def compile_units(root, plan, lane, remote, modules, output):
     import lean_module_cache as cache
     from lean_module_shards import pack_shard, restore_shard
     dag = plan['compiler_dag']
@@ -185,17 +277,22 @@ def compile_units(root, plan, lane, remote, modules, graph, output):
                     raise ValueError('compiler dependency could not be installed: ' + min(wanted - restored))
                 installed.update(restored)
 
-    for n in dag['facade_consumers']:
-        graph[n].update(dag['basis'])
     pending = set(units)
     compiled = 0
-    complete = {}
-    # Prefer units that unlock the longest remaining dependency path.
-    ranks = dict.fromkeys(units, 1)
-    order = TopologicalSorter({k: r['deps'] for k, r in units.items()}).static_order()
-    for k in reversed(list(order)):
-        for d in units[k]['deps']:
-            ranks[d] = max(ranks[d], 1 + ranks[k])
+    remaining = {key: len(row['deps']) for key, row in units.items()}
+    ready = {key for key, count in remaining.items() if not count}
+
+    def completed(key, row):
+        pending.remove(key)
+        ready.discard(key)
+        rows[key] = row
+        owners.update(dict.fromkeys(row['members'], key))
+        seed_members[key].update(row['members'])
+        for child in units[key]['next']:
+            remaining[child] -= 1
+            if not remaining[child] and child in pending:
+                ready.add(child)
+
     held = set()
     task_plan = dict(plan, shards=units)
     output.mkdir(parents=True, exist_ok=True)
@@ -204,24 +301,19 @@ def compile_units(root, plan, lane, remote, modules, graph, output):
         discovered = remote.compiler_progress(task_plan, pending) if refresh else {}
         refresh = False
         for key, row in discovered.items():
-            rows[key] = row
-            owners.update(dict.fromkeys(row['members'], key))
-            seed_members[key].update(row['members'])
-            complete[key] = row
-        pending.difference_update(complete)
+            completed(key, row)
         if not pending:
             break
-        ready = sorted((k for k in pending if complete.keys() >= set(units[k]['deps'])),
-                       key=lambda k: (-ranks[k], k))
+        ordered = sorted(ready, key=lambda k: (-units[k]['rank'], k))
         # Spread simultaneous claim attempts across equally urgent work.
-        if ready:
-            top = [k for k in ready if ranks[k] == ranks[ready[0]]]
+        if ordered:
+            top = [k for k in ordered if units[k]['rank'] == units[ordered[0]]['rank']]
             offset = lane % len(top)
-            ready[:len(top)] = top[offset:] + top[:offset]
-        key = next((k for k in ready if units[k]['queue'] in held), None)
+            ordered[:len(top)] = top[offset:] + top[:offset]
+        key = next((k for k in ordered if units[k]['queue'] in held), None)
         if key is None:
             candidates = {}
-            for candidate in ready:
+            for candidate in ordered:
                 candidates.setdefault(units[candidate]['queue'], candidate)
             for queue, candidate in candidates.items():
                 if remote.claim_compiler_queue(plan, queue, lane):
@@ -233,12 +325,8 @@ def compile_units(root, plan, lane, remote, modules, graph, output):
             refresh = True
             continue
         members = set(units[key]['members'])
-        scope = cache.inventory.import_closure(graph, members)
-        if members.intersection(dag['basis']):
-            scope.update(cache.inventory.import_closure(graph, dag['basis']))
-        install(scope - members)
-        roots = members if any(modules[n].extra_builds for n in members) else cache.compiler.terminal(members, graph)
-        cache.compiler.compile_roots(root, modules, sorted(roots))
+        install(decode_scope(units[key]['restore'], dag['names']))
+        cache.compiler.compile_roots(root, modules, units[key]['roots'])
         common_prepared = cache.compile_omega_outputs(root, modules, members, common_prepared)
         with tempfile.TemporaryDirectory(dir=output) as stage:
             archive = Path(stage) / 'unit.tar.gz'
@@ -246,9 +334,7 @@ def compile_units(root, plan, lane, remote, modules, graph, output):
             row = dict(units[key], bytes=data['bytes'], sha256=data['sha256'], version=plan['version'])
             rows[key] = remote.save(task_plan, key, archive, row)
         installed.update(members)
-        owners.update(dict.fromkeys(members, key))
-        complete[key] = rows[key]
-        pending.remove(key)
+        completed(key, rows[key])
         compiled += len(members)
         if cache.shutil.disk_usage(root).free < 4 * 1024**3:
             for n in installed:

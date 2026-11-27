@@ -143,6 +143,27 @@ class VersionedShards(unittest.TestCase):
         guard.start()
         self.addCleanup(guard.stop)
 
+    def test_pinned_compiler_plan_is_reused_before_analyzing_the_checkout(self):
+        import lean_module_cache as cache
+
+        source = 'a' * 40
+        version = transport.PREFIX + source
+        plan = dict(schema=cache.SCHEMA, kind='compiler', source=source, version=version,
+                    lanes=[[0]], shards={}, compiler_dag={'units': {}})
+        output = self.root / 'compiler-plan.json'
+        argv = ['lean_module_cache', 'plan', '--kind', 'compiler', '--compiler-dag',
+                '--prepare-release', '--output', str(output)]
+        with patch.object(cache.sys, 'argv', argv), patch.object(cache.compiler, 'checkout', return_value=source), \
+                patch.object(transport, 'Remote', return_value=self.remote), patch.object(self.remote, 'clear_compiler_claims'), \
+                patch.object(cache, 'plan_publication', side_effect=[plan, AssertionError('re-analyzed pinned source')]) as analyze:
+            self.assertEqual(cache.run(), 0)
+            first = output.read_bytes()
+            output.unlink()
+            self.assertEqual(cache.run(), 0)
+            self.assertEqual(output.read_bytes(), first)
+        analyze.assert_called_once()
+        self.assertIn((version, transport.COMPILER_PLAN), self.service.files)
+
     def plan(self, source, name='Small', fingerprint='c'):
         version = transport.PREFIX + source
         key = 'abcd-' + name

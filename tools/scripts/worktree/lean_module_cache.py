@@ -193,6 +193,13 @@ def compile_omega_outputs(root, modules, names, common_prepared):
     return common_prepared
 
 
+def compiler_environment(root):
+    if any(os.environ.get(name) for name in ('LEAN_PATH', 'LEAN_SRC_PATH', 'LEAN_SYSROOT', 'LEAN_OPTS')):
+        raise ValueError('compiler paths or options overridden outside the Lake project')
+    return [(root / 'lean-toolchain').read_text().strip(), sorted(seed_partitions(root)),
+                   os.environ.get('ELAN_TOOLCHAIN', '')]
+
+
 def checkout_targets(root, *, kind='compiler', requested=None, restore_only=False, scope_roots=None):
     modules = inventory.workspace_modules(root)
     roots = inventory.release_roots(modules) | omega_roots(root, modules)
@@ -254,10 +261,7 @@ def checkout_targets(root, *, kind='compiler', requested=None, restore_only=Fals
         configs[package] = config
         manifest = path / 'lake-manifest.json'
         pins[package] = file_digest(manifest) if manifest.is_file() else None
-    if any(os.environ.get(name) for name in ('LEAN_PATH', 'LEAN_SRC_PATH', 'LEAN_SYSROOT', 'LEAN_OPTS')):
-        raise ValueError('compiler paths or options overridden outside the Lake project')
-    environment = [(root / 'lean-toolchain').read_text().strip(), sorted(seed_partitions(root)),
-                   os.environ.get('ELAN_TOOLCHAIN', '')]
+    environment = compiler_environment(root)
 
     targets = {}
     for name in TopologicalSorter(graph).static_order():
@@ -357,7 +361,7 @@ def split_cold_reports(plan, existing, base, remote):
 
 
 def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version, legacy=None,
-              prepare_release=False, kind=None, compiler_index=None, compiler_dag=False, facade_consumers=()):
+              prepare_release=False, kind=None, compiler_index=None, compiler_dag=False, modules=None, root=None):
     if compiler_dag and kind != 'compiler':
         raise ValueError('dependency scheduling requires a compiler publication')
     if workers < 1 or workers > 256:
@@ -480,7 +484,7 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
     plan['lanes'] = lanes
     if compiler_dag and missing:
         from lean_module_dag import prepare
-        prepare(plan, base, remote, workers, prepare_release, set(facade_consumers))
+        prepare(plan, base, remote, workers, prepare_release, modules, root)
     if legacy and lanes:
         plan['legacy'] = legacy
     return plan
@@ -575,18 +579,22 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
     kind = plan.get('kind', 'compiler')
     splits = {} if kind == 'report' or 'compiler_dag' in original else remote.splits(original)
     plan = expanded(original, splits)
-    modules, checkout = checkout_targets(root, kind=kind)
-    current = {n: r for n, r in checkout.items() if 'report_inputs' in r} if kind == 'report' else checkout
     targets = plan['targets']
-    if current != {name: {k: v for k, v in row.items() if k != 'shard'} for name, row in targets.items()}:
-        raise ValueError('worker compiler inputs differ from its plan')
-    graph = {n: set(row['deps']) for n, row in checkout.items()}
+    if 'compiler_dag' in plan:
+        from lean_module_dag import worker_modules
+        modules = worker_modules(root, plan['compiler_dag'])
+    else:
+        modules, checkout = checkout_targets(root, kind=kind)
+        current = {n: r for n, r in checkout.items() if 'report_inputs' in r} if kind == 'report' else checkout
+        if current != {name: {k: v for k, v in row.items() if k != 'shard'} for name, row in targets.items()}:
+            raise ValueError('worker compiler inputs differ from its plan')
+        graph = {n: set(row['deps']) for n, row in checkout.items()}
     compiler_index = None
     if kind == 'report':
         compiler_index = compiler_remote.published(plan['compiler_version'])
         if not compiler_index or compiler_index['source'] != plan['source']:
             raise ValueError('published compiler prerequisite unavailable')
-    base = remote.latest(plan['base_version']) if plan['base_version'] else None
+    base = remote.latest(plan['base_version']) if plan['base_version'] and 'compiler_dag' not in plan else None
     combined = None
     if compiler_index and not base:
         if compiler_index.get('kind') is None:
@@ -621,7 +629,7 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
     dag_install = None
     if 'compiler_dag' in plan:
         from lean_module_dag import compile_units
-        dag_install, installed, compiled = compile_units(root, plan, lane, remote, modules, graph, output)
+        dag_install, installed, compiled = compile_units(root, plan, lane, remote, modules, output)
     assigned = [child for name in original['lanes'][lane] for child in splits.get(name, {name: None})]
     for name in assigned:
         if name in complete:
@@ -894,6 +902,29 @@ def fetch_published(root, names, deadline, *, refresh_stale, version=None):
         return 0
 
 
+def plan_publication(root, args, remote, source):
+    from lean_module_remote import Remote
+    modules, targets = checkout_targets(root, kind=args.kind)
+    base = json.loads(args.base.read_bytes()) if args.base else remote.latest()
+    compiler_index = None
+    if args.kind == 'report':
+        compiler_index = Remote(root).published(VERSION_PREFIX + source)
+        if not compiler_index:
+            raise ValueError('report publication requires a published compiler cache for ' + source)
+        targets = {n: r for n, r in targets.items() if 'report_inputs' in r}
+    legacy = None
+    if args.kind == 'compiler' and args.legacy_checkpoints and not base:
+        try:
+            legacy = legacy_compiler_inputs(root, modules, targets, source)
+        except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
+            print(f'Compiler checkpoints unavailable; continuing with Lake: {error}', file=sys.stderr)
+    mathlib, mathlib_version = publication_mathlib(root)
+    return make_plan(source, mathlib, targets, base, remote, args.capacity, args.workers,
+                       mathlib_version=mathlib_version, legacy=legacy, prepare_release=args.prepare_release,
+                       kind=args.kind, compiler_index=compiler_index, compiler_dag=args.compiler_dag,
+                       modules=modules, root=root)
+
+
 def run():
     from lean_module_remote import Remote, publisher
     parser = argparse.ArgumentParser(description=__doc__)
@@ -937,29 +968,23 @@ def run():
                               compiler_remote=Remote(root) if kind == 'report' else None)))
         return 0
     if args.command == 'plan':
+        from lean_module_remote import COMPILER_PLAN
         remote = Remote(root, kind=args.kind)
-        if args.compiler_dag and args.prepare_release and args.kind == 'compiler':
-            remote.clear_compiler_claims()
-        modules, targets = checkout_targets(root, kind=args.kind)
-        base = json.loads(args.base.read_bytes()) if args.base else remote.latest()
         source = compiler.checkout(root)
-        compiler_index = None
-        if args.kind == 'report':
-            compiler_index = Remote(root).published(VERSION_PREFIX + source)
-            if not compiler_index:
-                raise ValueError('report publication requires a published compiler cache for ' + source)
-            targets = {n: r for n, r in targets.items() if 'report_inputs' in r}
-        legacy = None
-        if args.kind == 'compiler' and args.legacy_checkpoints and not base:
-            try:
-                legacy = legacy_compiler_inputs(root, modules, targets, source)
-            except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
-                print(f'Compiler checkpoints unavailable; continuing with Lake: {error}', file=sys.stderr)
-        mathlib, mathlib_version = publication_mathlib(root)
-        result = make_plan(source, mathlib, targets, base, remote, args.capacity, args.workers,
-                           mathlib_version=mathlib_version, legacy=legacy, prepare_release=args.prepare_release,
-                           kind=args.kind, compiler_index=compiler_index, compiler_dag=args.compiler_dag,
-                           facade_consumers={n for n in targets if len(modules[n].extra_builds) == 2})
+        durable = args.compiler_dag and args.prepare_release and args.kind == 'compiler'
+        result = None
+        if durable:
+            publisher('compiler')
+            remote.clear_compiler_claims()
+            version = VERSION_PREFIX + source
+            result = remote.publication_layout(version, COMPILER_PLAN)
+            if result is not None and (result.get('kind') != 'compiler' or result.get('source') != source
+                                       or result.get('version') != version or result.get('schema') != SCHEMA):
+                raise ValueError('saved compiler plan differs from pinned source')
+        if result is None:
+            result = plan_publication(root, args, remote, source)
+            if durable:
+                remote.save_publication_layout(version, result, COMPILER_PLAN)
         if args.prepare_release and result['lanes']:
             publisher(args.kind)
         write(args.output, result)
