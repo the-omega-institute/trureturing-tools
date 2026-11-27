@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
 
 import lean_compile_layers as compiler
@@ -329,6 +330,7 @@ def compile_units(root, plan, lane, remote, modules, output):
 
     persisted = set()
     awaiting_metadata = set()
+    next_probe = {}
 
     def observed(key, row):
         rows[key] = row
@@ -382,6 +384,21 @@ def compile_units(root, plan, lane, remote, modules, output):
         key = next((candidate for candidate in ordered if remote.claim_compiler_queue(
             plan, units[candidate]['queue'], lane, candidate)), None)
         if key is None:
+            # A visible child proves the producer finished its predecessors. Their
+            # assets can be in overflow while both listings omit the originals.
+            now = time.monotonic()
+            roots = (k for k in awaiting_metadata - persisted if not remaining[k])
+            missing_rows = sorted(roots, key=lambda k: (next_probe.get(k, 0), k))
+            recovered = False
+            for parent in missing_rows[:4]:
+                if next_probe.get(parent, 0) > now:
+                    break
+                next_probe[parent] = now + 300
+                if row := remote.retry_checkpoint(task_plan, parent):
+                    observed(parent, row)
+                    recovered = True
+            if recovered:
+                continue
             remote.wait_compiler_progress(plan)
             refresh = True
             continue
