@@ -244,21 +244,10 @@ def traces_match(live, staged):
             and all(current.get(key) == published.get(key) for key in ('schemaVersion', 'depHash', 'outputs')))
 
 
-def pack_shard(root, modules, members, output, fingerprint, *, kind='combined', verify_compilers=False):
-    if kind not in ('combined', 'compiler', 'report'):
-        raise ValueError('unknown module shard kind: ' + str(kind))
-    if not valid_digest(fingerprint):
-        raise ValueError('invalid module shard fingerprint')
+def checked_shard_files(root, selected, kind, verify_compilers):
     build = root / PROJECT_BUILD
     if build.is_symlink() or build.parent.is_symlink():
         raise ValueError('unsafe build directory')
-    selected = {name: modules[name] for name in members}
-    if not selected:
-        raise ValueError('empty module shard')
-    if kind == 'compiler':
-        selected = {name: replace(module, report=False) for name, module in selected.items()}
-    if kind == 'report' and not all(module.report for module in selected.values()):
-        raise ValueError('report-only archive includes a module without a report')
     grouped = {}
     verified_files = {}
     for name, module in selected.items():
@@ -278,6 +267,23 @@ def pack_shard(root, modules, members, output, fingerprint, *, kind='combined', 
         check_outputs(build, selected, grouped)
     verify_backend_hashes(root, build, selected, grouped, reports_only=kind == 'report',
                           all_compilers=verify_compilers)
+    return grouped, verified_files
+
+
+def pack_shard(root, modules, members, output, fingerprint, *, kind='combined', verify_compilers=False):
+    if kind not in ('combined', 'compiler', 'report'):
+        raise ValueError('unknown module shard kind: ' + str(kind))
+    if not valid_digest(fingerprint):
+        raise ValueError('invalid module shard fingerprint')
+    build = root / PROJECT_BUILD
+    selected = {name: modules[name] for name in members}
+    if not selected:
+        raise ValueError('empty module shard')
+    if kind == 'compiler':
+        selected = {name: replace(module, report=False) for name, module in selected.items()}
+    if kind == 'report' and not all(module.report for module in selected.values()):
+        raise ValueError('report-only archive includes a module without a report')
+    grouped, verified_files = checked_shard_files(root, selected, kind, verify_compilers)
     index = {n: {'build': selected[n].build.as_posix(), 'paths': sorted(map(str, grouped[n]))}
              for n in sorted(selected)}
     for name, row in index.items():

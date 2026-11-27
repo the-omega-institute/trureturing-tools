@@ -721,7 +721,7 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
                 produced_reports += len(pending)
             restored_reports.update(members)
         elif dag_install:
-            dag_install(members)
+            compiled += dag_install(members)
         else:
             scope = inventory.import_closure(graph, members)
             for index in (partial_index(plan, complete), base):
