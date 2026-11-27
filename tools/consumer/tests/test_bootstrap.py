@@ -39,7 +39,7 @@ class ReleaseBootstrapTest(unittest.TestCase):
                 archive.addfile(member, io.BytesIO(content))
         self.sha = hashlib.sha256(self.archive.read_bytes()).hexdigest()
         self.pin = self.root / "Meta/tools-release.json"
-        self.pin.write_text(json.dumps(dict(version="v1.0.0-ci.1", sha256=self.sha, workflow_sha="1" * 40)))
+        self.pin.write_text(json.dumps(dict(version="v1.0.0-ci.1", sha256=self.sha)))
         self.cache = self.root / f"build/tools-releases/{self.sha}.tar.gz"
 
     def command(self, *args, check=True, **options):

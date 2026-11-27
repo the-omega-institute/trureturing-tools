@@ -55,10 +55,10 @@ def read_pin(revision):
 
 
 def artifact_fields(pin):
-    for key in ("previous_pin", "workflow_sha"):
-        if key in pin and (not isinstance(pin[key], str) or not re.fullmatch(SHA, pin[key])):
-            raise ValueError(f"Invalid {key} in consumer pin")
-    return {key: value for key, value in pin.items() if key not in {"previous_pin", "workflow_sha"}}
+    if "previous_pin" in pin and (not isinstance(pin["previous_pin"], str)
+                                  or not re.fullmatch(SHA, pin["previous_pin"])):
+        raise ValueError("Invalid previous_pin in consumer pin")
+    return {key: value for key, value in pin.items() if key != "previous_pin"}
 
 
 def contains(repo, source, tip):

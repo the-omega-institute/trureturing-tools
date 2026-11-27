@@ -1,4 +1,4 @@
-"""Transport the independent Lean dependency and project cache layers."""
+"""Manage Lean dependency cache transfers and producer resume identities."""
 from __future__ import annotations
 
 import argparse
@@ -9,10 +9,6 @@ import pathlib
 import re
 import shutil
 import tempfile
-import threading
-import urllib.error
-import urllib.parse
-import urllib.request
 
 from cache_material import sha
 from lean_artifact_inventory import retired_report_path
@@ -106,22 +102,6 @@ def manual_source_is_valid() -> bool:
     return source_commit == os.environ.get("STRATALINT_CACHE_CHECKED_OUT_SHA", "")
 
 
-def preparation_source_is_valid() -> bool:
-    """Identify validated PR preparations when reading candidate releases."""
-    source_ref = os.environ.get("STRATALINT_CACHE_SOURCE_REF", "")
-    target_ref = os.environ.get("STRATALINT_CACHE_TARGET_REF", "")
-    source_commit = os.environ.get("STRATALINT_CACHE_SOURCE_COMMIT", "")
-    return (os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-            and os.environ.get("GITHUB_REF_PROTECTED") == "true"
-            and os.environ.get("STRATALINT_CACHE_PR_SOURCE_VALIDATED") == "true"
-            and re.fullmatch(r"refs/pull/[1-9][0-9]*/merge", source_ref) is not None
-            and re.fullmatch(r"refs/heads/(?:dev|integration-[A-Za-z0-9._/-]+)", target_ref) is not None
-            and target_ref == os.environ.get("GITHUB_REF")
-            and re.fullmatch(r"[0-9a-f]{40}", source_commit) is not None
-            and source_commit != "0" * 40
-            and source_commit == os.environ.get("STRATALINT_CACHE_CHECKED_OUT_SHA"))
-
-
 def actions_keys(root: pathlib.Path) -> dict:
     revision = resolved_mathlib(root)
     system, machine = binary_platform()
@@ -141,13 +121,10 @@ def actions_keys(root: pathlib.Path) -> dict:
         "project_save_allowed": writer_allowed and os.environ.get("STRATALINT_REPORT_SUCCEEDED") == "true",
         "release_prefix": f"lean-cache-v2-{revision}-{system}-{machine}-",
     }
-    for layer in LAYERS:
-        generation = "project-push" if layer == "project" else "dependency-v4"
-        prefix = f"lean-{generation}-{revision}-{system}-{machine}-"
-        result[layer] = {
-            "restore_prefix": prefix, "key": f"{prefix}{run}-{attempt}",
-            "path": ".lake/packages" if layer == "dependency" else ".lake/build",
-        }
+    prefix = f"lean-dependency-v4-{revision}-{system}-{machine}-"
+    result["dependency"] = {
+        "restore_prefix": prefix, "key": f"{prefix}{run}-{attempt}", "path": ".lake/packages",
+    }
     return result
 
 
@@ -161,153 +138,6 @@ def output(values, destination="GITHUB_OUTPUT"):
 
 def receipt(layer, status, **fields):
     print("LEAN_ACTIONS_CACHE " + json.dumps({"layer": layer, "status": status, **fields}, sort_keys=True), flush=True)
-
-
-class SeedLookupUnavailable(ValueError):
-    pass
-
-
-def wait_for_seed_lookup(completed, seconds):
-    return completed.wait(seconds)
-
-
-def guarded_seed_lookup(lookup):
-    completed = threading.Event()
-    result = []
-
-    def run():
-        try:
-            result.append((lookup(), None))
-        except Exception as error:
-            result.append((None, error))
-        finally:
-            completed.set()
-
-    threading.Thread(target=run, daemon=True).start()
-    # One transport hang guard covers DNS, headers, bodies and every page.
-    if not wait_for_seed_lookup(completed, 10):
-        raise SeedLookupUnavailable("lookup-transport-hang-guard")
-    key, error = result[0]
-    if error is not None:
-        raise error
-    return key
-
-
-def lookup_project_seed(spec, ref, token, repository, api):
-    endpoint = api + "/repos/" + repository + "/actions/caches"
-    query = dict(key=spec["restore_prefix"], ref=ref, per_page="100", sort="created_at", direction="desc")
-    url = endpoint + "?" + urllib.parse.urlencode(query)
-    total, seen, page, best = None, set(), 1, None
-    pattern = re.compile(re.escape(spec["restore_prefix"]) + r"([1-9][0-9]*)-([1-9][0-9]*)")
-
-    def unique(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise SeedLookupUnavailable("lookup-malformed-listing")
-            result[key] = value
-        return result
-
-    while True:
-        request = urllib.request.Request(url, headers={
-            "Authorization": "Bearer " + token, "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28"})
-        with urllib.request.urlopen(request, timeout=10) as response:
-            if response.status != 200:
-                raise SeedLookupUnavailable("lookup-http-error")
-            try:
-                value = json.loads(response.read(), object_pairs_hook=unique)
-            except (ValueError, UnicodeError):
-                raise SeedLookupUnavailable("lookup-malformed-listing")
-            link = response.headers.get("Link", "")
-        if (not isinstance(value, dict) or type(value.get("total_count")) is not int
-                or value["total_count"] < 0 or not isinstance(value.get("actions_caches"), list)):
-            raise SeedLookupUnavailable("lookup-malformed-listing")
-        if total is None:
-            total = value["total_count"]
-        elif total != value["total_count"]:
-            raise SeedLookupUnavailable("lookup-incomplete-listing")
-        rows = value["actions_caches"]
-        for row in rows:
-            if (not isinstance(row, dict) or not isinstance(row.get("key"), str)
-                    or not isinstance(row.get("ref"), str)):
-                raise SeedLookupUnavailable("lookup-malformed-listing")
-            cache_id = row.get("id")
-            if type(cache_id) is not int or cache_id <= 0 or cache_id in seen:
-                raise SeedLookupUnavailable("lookup-incomplete-listing")
-            seen.add(cache_id)
-            match = pattern.fullmatch(row["key"])
-            if row["ref"] == ref and match:
-                candidate = (int(match[1]), int(match[2]), row["key"])
-                if best is None or candidate[:2] > best[:2]:
-                    best = candidate
-        if len(seen) > total or not isinstance(link, str):
-            raise SeedLookupUnavailable("lookup-incomplete-listing")
-        links = {}
-        if link:
-            for entry in link.split(","):
-                match = re.fullmatch(r'\s*<([^<>]+)>;\s*rel="([^"]+)"\s*', entry)
-                if not match or match[2] in links:
-                    raise SeedLookupUnavailable("lookup-incomplete-listing")
-                links[match[2]] = match[1]
-        next_url = links.get("next")
-        if next_url is None:
-            if len(seen) != total:
-                raise SeedLookupUnavailable("lookup-incomplete-listing")
-            break
-        next_parts = urllib.parse.urlsplit(next_url)
-        if (not rows or len(seen) >= total or next_parts._replace(query="").geturl() != endpoint
-                or urllib.parse.parse_qs(next_parts.query) != {
-                    **{key: [item] for key, item in query.items()}, "page": [str(page + 1)]}):
-            raise SeedLookupUnavailable("lookup-incomplete-listing")
-        url, page = next_url, page + 1
-    if best is None:
-        raise SeedLookupUnavailable("lookup-no-eligible-seed")
-    return best[2]
-
-
-def project_restore_key(keys):
-    spec = keys["project"]
-    fallback = spec["key"]
-    token = os.environ.get("GH_TOKEN", "")
-    repository = os.environ.get("GITHUB_REPOSITORY", "")
-    event = os.environ.get("GITHUB_EVENT_NAME", "")
-    base = os.environ.get("GITHUB_BASE_REF", "")
-    ref = os.environ.get("GITHUB_REF", "")
-    refs = []
-    if event == "pull_request" and base:
-        if re.fullmatch(r"refs/pull/[1-9][0-9]*/merge", ref):
-            refs.append(ref)
-        refs.append("refs/heads/" + base)
-    elif event == "push" and ref:
-        refs.append(ref)
-
-    def preferred_seed():
-        for candidate_ref in refs:
-            try:
-                key = lookup_project_seed(spec, candidate_ref, token, repository, api)
-                return candidate_ref, key
-            except SeedLookupUnavailable as error:
-                if str(error) != "lookup-no-eligible-seed":
-                    raise
-        raise SeedLookupUnavailable("lookup-no-eligible-seed")
-
-    reason = "lookup-not-configured"
-    try:
-        if not token or not repository or not refs:
-            raise SeedLookupUnavailable(reason)
-        api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
-        selected_ref, preferred = guarded_seed_lookup(preferred_seed)
-        receipt("project", "restore-preference", base_ref=selected_ref, requested_key=preferred)
-        return preferred
-    except SeedLookupUnavailable as error:
-        reason = str(error)
-    except urllib.error.HTTPError:
-        reason = "lookup-http-error"
-    except Exception:
-        reason = "lookup-request-failed"
-    receipt("project", "restore-preference-fallback", base_ref=refs[-1] if refs else "", requested_key=fallback, reason=reason)
-    return fallback
 
 
 def dependency_input_materials(root: pathlib.Path):
@@ -370,15 +200,12 @@ def discard_retired_reports(build):
                 path.unlink()
 
 
-def restore_native(root, keys, layer, key, outcome):
-    spec = keys[layer]
-    requested = {"requested_key": spec.get("restore_key", spec["key"])} if layer == "project" else {}
-    transport = {"key": key, **requested} if layer == "project" else {}
+def restore_dependency(root, keys, key, outcome):
+    spec = keys["dependency"]
     record = dependency_restored_record(root)
-    if layer == "dependency":
-        record.unlink(missing_ok=True)
+    record.unlink(missing_ok=True)
     if outcome in ("", "skipped"):
-        receipt(layer, "miss", reason="Actions supplied no cache", **transport)
+        receipt("dependency", "miss", reason="Actions supplied no cache")
         return False
     target = root / spec["path"]
     try:
@@ -388,58 +215,23 @@ def restore_native(root, keys, layer, key, outcome):
             raise ValueError("Actions seed is outside the selected partition")
         if target.is_symlink() or not target.is_dir():
             raise ValueError("native Actions cache directory is unavailable")
-        if layer == "dependency":
-            stamp_restored_dependency(root, keys)
-            try:
-                previous = json.loads((target / ".stratalint-actions-inputs.json").read_text())
-                digest = previous["inputs_sha256"]
-                if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
-                    write_small_record(record, {"snapshot_key": spec["key"], "matched_key": key, "inputs_sha256": digest})
-            except (OSError, ValueError, TypeError, KeyError):
-                pass
-        else:
-            discard_retired_reports(target)
-        receipt(layer, "restored", key=key, partition=keys["partition"], transport="actions-native", **requested)
+        stamp_restored_dependency(root, keys)
+        try:
+            previous = json.loads((target / ".stratalint-actions-inputs.json").read_text())
+            digest = previous["inputs_sha256"]
+            if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+                write_small_record(record, {"snapshot_key": spec["key"], "matched_key": key, "inputs_sha256": digest})
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        receipt("dependency", "restored", key=key, partition=keys["partition"], transport="actions-native")
         return True
     except (OSError, ValueError, TypeError) as error:
         if target.is_symlink() or target.is_file():
             target.unlink()
         elif target.exists():
             shutil.rmtree(target)
-        receipt(layer, "miss", reason=str(error), **transport)
+        receipt("dependency", "miss", reason=str(error))
         return False
-
-
-def adoption_record(root):
-    """Invocation-local acceptance, outside every transported native path."""
-    path = root / "build/lean-cache/pr-adopted.json"
-    try:
-        if path.is_symlink():
-            return None
-        value = json.loads(path.read_text())
-        checkout = os.environ.get("STRATALINT_CACHE_CHECKED_OUT_SHA", os.environ.get("GITHUB_SHA"))
-        if (value["run"] != os.environ.get("GITHUB_RUN_ID")
-                or value["attempt"] != os.environ.get("GITHUB_RUN_ATTEMPT")
-                or value["repository"] != str(root.resolve()) or value["checkout"] != checkout
-                or value["ref"] != os.environ.get("GITHUB_REF")
-                or type(value["artifact"]) is not int or value["artifact"] <= 0
-                or type(value["merged"]) is not bool):
-            return None
-        return value
-    except (OSError, ValueError, TypeError, KeyError):
-        return None
-
-
-def restore(root, keys, matched, layers=LAYERS, *, outcomes=None):
-    if adoption_record(root) is not None:
-        receipt("project", "preparation-retained", reason="validated PR artifact already adopted")
-        return
-    seeded = False
-    for layer in layers:
-        accepted = restore_native(root, keys, layer, matched.get(layer, ""), (outcomes or {}).get(layer, "success"))
-        seeded |= layer == "project" and accepted
-    if "project" in layers:
-        output({"STRATALINT_ACTIONS_CACHE_SEEDED": "1" if seeded else "0"}, "GITHUB_ENV")
 
 
 def resume_marker(root):
@@ -590,9 +382,6 @@ def project_publication(root):
     work = project_work(root)
     if work is None:
         return False, "build-work-unknown", work
-    adopted = adoption_record(root)
-    if adopted is not None and adopted["merged"]:
-        return True, "adopted-merged-preparation", work
     if work == 0:
         if os.environ.get("STRATALINT_RELEASE_CACHE_SEEDED") == "1" and manual_source_is_valid():
             return True, "accepted-explicit-release-seed", work
@@ -605,59 +394,45 @@ def project_publication(root):
     return True, "built-project-artifacts", work
 
 
-def snapshot(root, keys, layers=LAYERS):
-    for layer in layers:
-        if layer not in LAYERS:
-            continue
-        ready = False
-        try:
-            if layer == "project":
-                allowed, reason, work = project_publication(root)
-                if not allowed:
-                    receipt(layer, "save-disabled", reason=reason)
-                    output({layer + "_ready": False, "project_skip_reason": reason})
-                    continue
-            if not keys["project_save_allowed" if layer == "project" else "save_allowed"]:
-                receipt(layer, "save-disabled")
-                output({layer + "_ready": False})
-                continue
-            target = root / keys[layer]["path"]
+def snapshot_dependency(root, keys):
+    ready = False
+    try:
+        if not keys["save_allowed"]:
+            receipt("dependency", "save-disabled")
+        else:
+            spec = keys["dependency"]
+            target = root / spec["path"]
             if target.is_symlink() or not target.is_dir():
-                raise ValueError("native cache directory is unavailable: " + keys[layer]["path"])
-            if layer == "dependency":
-                fingerprint = dependency_inputs(root)
-                try:
-                    restored = json.loads(dependency_restored_record(root).read_text())
-                    spec = keys[layer]
-                    if (restored.get("snapshot_key") == spec["key"]
-                            and re.fullmatch(re.escape(spec["restore_prefix"]) + r"[0-9]+-[0-9]+", restored.get("matched_key", ""))
-                            and restored.get("inputs_sha256") == fingerprint):
-                        receipt(layer, "save-disabled", reason="retained-restored-dependency")
-                        output({layer + "_ready": False})
-                        continue
-                except (OSError, ValueError, TypeError, AttributeError):
-                    pass
-                write_small_record(target / ".stratalint-actions-inputs.json", {"inputs_sha256": fingerprint})
+                raise ValueError("native cache directory is unavailable: " + spec["path"])
+            fingerprint = dependency_inputs(root)
+            try:
+                restored = json.loads(dependency_restored_record(root).read_text())
+                if (restored.get("snapshot_key") == spec["key"]
+                        and re.fullmatch(re.escape(spec["restore_prefix"]) + r"[0-9]+-[0-9]+", restored.get("matched_key", ""))
+                        and restored.get("inputs_sha256") == fingerprint):
+                    receipt("dependency", "save-disabled", reason="retained-restored-dependency")
+                    output({"dependency_ready": False})
+                    return
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+            write_small_record(target / ".stratalint-actions-inputs.json", {"inputs_sha256": fingerprint})
+            receipt("dependency", "snapshot", key=spec["key"])
             ready = True
-            receipt(layer, "snapshot", key=keys[layer]["key"], **({"build_work": work} if layer == "project" else {}))
-        except (OSError, ValueError, TypeError) as error:
-            receipt(layer, "save-failed", reason=str(error))
-        output({layer + "_ready": ready})
+    except (OSError, ValueError, TypeError) as error:
+        receipt("dependency", "save-failed", reason=str(error))
+    output({"dependency_ready": ready})
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("keys", "restore", "snapshot", "resume-keys", "resume-restore", "resume-snapshot"))
     parser.add_argument("--repository", required=True, type=pathlib.Path)
-    parser.add_argument("--layers", choices=LAYERS, nargs="+")
-    parser.add_argument("--project-restore-key", default="")
+    parser.add_argument("--layers", choices=("dependency",), nargs="+")
     parser.add_argument("--resume-key", default="")
     parser.add_argument("--resume-outcome", default="", choices=("", "success", "failure", "cancelled", "skipped"))
-    for layer in LAYERS:
-        parser.add_argument("--" + layer + "-key", default="")
-        parser.add_argument("--" + layer + "-outcome", default="", choices=("", "success", "failure", "cancelled", "skipped"))
+    parser.add_argument("--dependency-key", default="")
+    parser.add_argument("--dependency-outcome", default="", choices=("", "success", "failure", "cancelled", "skipped"))
     args = parser.parse_args()
-    args.layers = list(LAYERS) if args.layers is None else args.layers
     try:
         root = args.repository.resolve()
         keys = actions_keys(root)
@@ -671,22 +446,16 @@ def main():
             else:
                 resume_snapshot(root, spec)
         elif args.command == "keys":
-            archive_paths = native_archive_paths(root, args.layers)
-            if "project" in args.layers:
-                keys["project"]["restore_key"] = project_restore_key(keys)
+            paths = native_archive_paths(root, ["dependency"])["dependency"]
             values = {key: keys[key] for key in ("mathlib_revision", "os", "arch", "partition", "save_allowed", "release_prefix")}
             values["elan_key"] = elan_key(root)
-            for layer in args.layers:
-                values.update({layer + "_" + key: value for key, value in keys[layer].items()})
+            values.update({"dependency_" + key: value for key, value in keys["dependency"].items()})
             output(values)
-            for layer, paths in archive_paths.items():
-                output_archive_paths(layer, paths)
+            output_archive_paths("dependency", paths)
         elif args.command == "restore":
-            keys["project"]["restore_key"] = args.project_restore_key or keys["project"]["key"]
-            restore(root, keys, {layer: getattr(args, layer + "_key") for layer in args.layers}, args.layers,
-                    outcomes={layer: getattr(args, layer + "_outcome") for layer in args.layers})
+            restore_dependency(root, keys, args.dependency_key, args.dependency_outcome)
         else:
-            snapshot(root, keys, args.layers)
+            snapshot_dependency(root, keys)
         return 0
     except (OSError, ValueError, TypeError, KeyError, CachePathRegistrationError) as error:
         print("CI_INPUT_FAILED " + str(error), file=os.sys.stderr)

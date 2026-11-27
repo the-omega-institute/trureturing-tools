@@ -61,7 +61,7 @@ class NativeReleaseSupport:
             ['leanInspector/reportInspector', 'trureturing/Audit'])
         self.env.update(STRATALINT_CACHE_REPO='fixture/cache', GITHUB_ACTIONS='true',
             GITHUB_RUN_ID='4242', GITHUB_RUN_ATTEMPT='1', GITHUB_EVENT_NAME='schedule',
-            GITHUB_REF='refs/heads/dev', STRATALINT_ACTIONS_CACHE_SEEDED='',
+            GITHUB_REF='refs/heads/dev',
             RELEASE_FIXTURE=str(self.root / 'releases'), LEAN_REPORT=str(self.root / 'unexpected.json'),
             STRATALINT_LEAN_INPUT_MEMO_ROOT=str(self.root / 'input-memo'),
             STRATALINT_SUPERVISOR_ROOT=str(self.root / 'supervisor'))

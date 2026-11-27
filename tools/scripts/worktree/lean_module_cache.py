@@ -193,7 +193,7 @@ def compile_omega_outputs(root, modules, names, common_prepared):
     return common_prepared
 
 
-def checkout_targets(root, *, kind='compiler', requested=None, restore_only=False, scope_roots=None):
+def checkout_targets(root, *, kind='compiler', requested=None, restore_only=False, scope_roots=None, scope_inputs=None):
     modules = inventory.workspace_modules(root)
     roots = inventory.release_roots(modules) | omega_roots(root, modules)
     registry = 'LeanInformationAudit.TemplateEnrollment'
@@ -216,11 +216,12 @@ def checkout_targets(root, *, kind='compiler', requested=None, restore_only=Fals
         if selected:
             # The CLI accepts an explicit scope. Large selections use one snapshot parse.
             roots = set(requested or ()) & selected.keys()
-            scope_inputs = {} if roots and scope_roots is not None else None
+            if roots and scope_roots is not None and scope_inputs is None:
+                scope_inputs = {}
             subset = sorted(selected) if requested is not None and sum(len(n) + 1 for n in selected) < 64000 else None
             try:
                 utilities = utility_inputs(root, subset, scope_inputs=scope_inputs)
-                if scope_inputs is not None:
+                if scope_inputs is not None and scope_roots is not None:
                     # Match the scoped inspector's utility references on explicitly requested roots.
                     for name in roots:
                         scope_roots.update(scope_inputs.get(reported[name], ()))
@@ -356,7 +357,7 @@ def split_cold_reports(plan, existing, base, remote):
     return plan
 
 
-def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version, legacy=None,
+def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version,
               prepare_release=False, kind=None, compiler_index=None):
     if workers < 1 or workers > 256:
         raise ValueError('worker count must be within the Actions matrix limit')
@@ -394,11 +395,8 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
             if original_base and (not base or base['version'] != original_base):
                 raise ValueError('missing original module publication base')
         capacity = checkpoint['capacity']
-        legacy = checkpoint.get('legacy')
     previous = base['shards'] if base else {}
     sizes = {n: DEFAULT_MODULE_BYTES for n in targets}
-    if legacy:
-        sizes.update({n: row['bytes'] for n, row in legacy['targets'].items() if n in targets})
     for row in previous.values():
         average = max(1, row['bytes'] // len(row['members']))
         for name in row['members']:
@@ -463,7 +461,6 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
             'version': version, 'mathlib_version': mathlib_version, 'base_version': plan['base_version'],
             **({'kind': kind} if kind else {}),
             'capacity': capacity, 'partials': {n: r for n, r in existing.items() if previous.get(n) != r},
-            **({'legacy': legacy} if legacy and missing else {}),
             'fingerprint': shard_fingerprint(mathlib, targets, targets, kind),
             'groups': {name: row['members'] for name, row in planned.items()},
         })
@@ -476,37 +473,12 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
         lanes[lane].append(name)
         loads[lane] += sum(sizes[n] for n in planned[name]['members'])
     plan['lanes'] = lanes
-    if legacy and lanes:
-        plan['legacy'] = legacy
     return plan
 
 
 def partial_index(plan, rows):
     return {'schema': SCHEMA, **({'kind': plan['kind']} if plan.get('kind') else {}), 'targets': {n: plan['targets'][n] for row in rows.values() for n in row['members']},
             'shards': rows}
-
-
-def legacy_compiler_inputs(root, modules, targets, source):
-    import lean_generation_plan as legacy
-    graph = {n: set(r['deps']) for n, r in targets.items()}
-    criteria = legacy.module_targets(root, modules, graph)
-    domain, _ = legacy.package_inputs(root)
-    remote = legacy.checkpoints.remote_for(root)
-    empty = {'source': source, 'targets': {}, 'volumes': {}}
-    rows, sizes = legacy.verified_inputs(remote, domain, criteria, empty)
-    rows = {name: row for name, row in rows.items() if not modules[name].extra_builds}
-    return dict(empty, targets=rows, volumes={row['volume']: sizes[row['volume']] for row in rows.values()})
-
-
-def restore_legacy(remote, index, names, destination):
-    from lean_cache_generation import restore as restore_frames
-    rows = {n: index['targets'][n] for n in names & index['targets'].keys()}
-    if not rows:
-        return set()
-    subset = {'source': index['source'], 'targets': rows,
-              'volumes': {r['volume']: index['volumes'][r['volume']] for r in rows.values()}}
-    report = restore_frames(remote, subset, subset, rows, destination)
-    return set(rows) if report['restored'] == len(rows) else set()
 
 
 def restore_artifacts(root, modules, targets, index, names, remote, destination, kind, *, restored=None):
@@ -601,10 +573,6 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
     produced_reports = 0
     compiled = uploaded = 0
     common_prepared = False
-    legacy = plan.get('legacy')
-    if legacy:
-        from lean_generation_checkpoints import remote_for
-        old_remote = remote_for(root)
     assigned = [child for name in original['lanes'][lane] for child in splits.get(name, {name: None})]
     for name in assigned:
         if name in complete:
@@ -637,12 +605,6 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
             for index in (partial_index(plan, complete), base):
                 installed.update(restore_artifacts(root, modules, targets, index, scope - installed,
                                                    remote, destination, 'compiler'))
-            if legacy:
-                try:
-                    installed.update(restore_legacy(old_remote, legacy, {n for n in scope - installed if not modules[n].extra_builds}, destination))
-                except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
-                    print(f'Compiler seed unavailable; continuing with Lake: {error}', file=sys.stderr)
-                    legacy = None
             if missing := scope - installed:
                 roots = missing if any(modules[n].extra_builds for n in missing) else compiler.terminal(missing, graph)
                 compiler.compile_roots(root, modules, sorted(roots))
@@ -798,27 +760,31 @@ def validate_report_pair(index, compiler_index):
             raise ValueError('report shard differs from paired compiler shard: ' + name)
 
 
+def published_reports(root, index, remote, *, exact=False, report_remote=None, report_index=None):
+    from lean_module_remote import Remote
+    reader, reports = report_remote, report_index
+    if reader is None:
+        reader = Remote(root, remote.deadline, kind='report')
+        reports = reader.published(index['version'] + '-report') if exact else reader.latest()
+        if reports is None and not exact and index.get('combined_report_version'):
+            mixed = remote.published(index['combined_report_version'])
+            if mixed is not None:
+                if mixed.get('kind') is not None or mixed['mathlib'] != index['mathlib']:
+                    raise ValueError('ineligible historical combined report publication')
+                return mixed, remote
+    if reports is not None:
+        version = reports['compiler_version']
+        paired = index if version == index['version'] else remote.published(version)
+        if paired is None:
+            raise ValueError('published compiler prerequisite for the selected report index is unavailable')
+        validate_report_pair(reports, paired)
+    return reports, reader
+
+
 def restore_published(root, index, names, remote, destination, kind=None, *, exact=False,
                       report_remote=None, report_index=None):
-    from lean_module_remote import Remote
     def load_reports():
-        reader, reports = report_remote, report_index
-        if reader is None:
-            reader = Remote(root, remote.deadline, kind='report')
-            reports = reader.published(index['version'] + '-report') if exact else reader.latest()
-            if reports is None and not exact and index.get('combined_report_version'):
-                mixed = remote.published(index['combined_report_version'])
-                if mixed is not None:
-                    if mixed.get('kind') is not None or mixed['mathlib'] != index['mathlib']:
-                        raise ValueError('ineligible historical combined report publication')
-                    return mixed, remote
-        if reports is not None:
-            version = reports['compiler_version']
-            paired = index if version == index['version'] else remote.published(version)
-            if paired is None:
-                raise ValueError('published compiler prerequisite for the selected report index is unavailable')
-            validate_report_pair(reports, paired)
-        return reports, reader
+        return published_reports(root, index, remote, exact=exact, report_remote=report_remote, report_index=report_index)
 
     return restore(root, index, names, remote, destination, kind=kind, load_reports=load_reports)
 
@@ -880,10 +846,11 @@ def run():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repository', type=Path, default=Path.cwd())
     commands = parser.add_subparsers(dest='command', required=True)
+    index = commands.add_parser('index', help='write published report and compiler keys for CI balancing')
+    index.add_argument('--output', type=Path, required=True)
     plan = commands.add_parser('plan')
     plan.add_argument('--base', type=Path)
     plan.add_argument('--kind', choices=('compiler', 'report'), default='compiler')
-    plan.add_argument('--legacy-checkpoints', action='store_true')
     plan.add_argument('--prepare-release', action='store_true', help='create the shared Release before starting its workers')
     plan.add_argument('--capacity', type=int, default=DEFAULT_CAPACITY)
     plan.add_argument('--workers', type=int, default=20)
@@ -909,6 +876,21 @@ def run():
     get.add_argument('--destination', type=Path)
     args = parser.parse_args()
     root = args.repository.resolve()
+    if args.command == 'index':
+        remote = Remote(root)
+        compiler_index = remote.latest()
+        reports = {}
+        compilers = []
+        if compiler_index:
+            compilers = sorted(compiler_index['targets'])
+            report_index, _ = published_reports(root, compiler_index, remote)
+            reports = {name: row['key'] for name, row in (report_index or {}).get('targets', {}).items()}
+            if compiler_index.get('kind') is None:
+                for name, row in compiler_index['targets'].items():
+                    if 'report_inputs' in row:
+                        reports.setdefault(name, row['key'])
+        write(args.output, {'reports': reports, 'compilers': compilers})
+        return 0
     if args.command == 'worker':
         plan = json.loads(args.plan.read_bytes())
         kind = plan['kind']
@@ -918,7 +900,7 @@ def run():
         return 0
     if args.command == 'plan':
         remote = Remote(root, kind=args.kind)
-        modules, targets = checkout_targets(root, kind=args.kind)
+        _, targets = checkout_targets(root, kind=args.kind)
         base = json.loads(args.base.read_bytes()) if args.base else remote.latest()
         source = compiler.checkout(root)
         compiler_index = None
@@ -927,15 +909,9 @@ def run():
             if not compiler_index:
                 raise ValueError('report publication requires a published compiler cache for ' + source)
             targets = {n: r for n, r in targets.items() if 'report_inputs' in r}
-        legacy = None
-        if args.kind == 'compiler' and args.legacy_checkpoints and not base:
-            try:
-                legacy = legacy_compiler_inputs(root, modules, targets, source)
-            except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
-                print(f'Compiler checkpoints unavailable; continuing with Lake: {error}', file=sys.stderr)
         mathlib, mathlib_version = publication_mathlib(root)
         result = make_plan(source, mathlib, targets, base, remote, args.capacity, args.workers,
-                           mathlib_version=mathlib_version, legacy=legacy, prepare_release=args.prepare_release,
+                           mathlib_version=mathlib_version, prepare_release=args.prepare_release,
                            kind=args.kind, compiler_index=compiler_index)
         if args.prepare_release and result['lanes']:
             publisher(args.kind)

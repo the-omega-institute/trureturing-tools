@@ -38,7 +38,7 @@ class ContractTests(unittest.TestCase):
     def test_consumer_owns_its_registry_even_with_an_installed_release(self):
         self.put("tools/ci/ci-units.json", b"superseded release registry")
         self.put("Meta/tools-release.json", b'{"version":"v1.0.0","sha256":"fixture"}')
-        self.assertEqual({"filemap"}, set(contract.load(self.root)[0]["units"]))
+        self.assertEqual({"filemap", "omega"}, set(contract.load(self.root)[0]["units"]))
         (self.root / contract.CONTRACT).unlink()
         with self.assertRaises(FileNotFoundError):
             contract.load(self.root)
@@ -92,7 +92,7 @@ class ContractTests(unittest.TestCase):
     def test_normal_content_uses_source_policy_without_worktree_lifecycle(self):
         self.put("Blueprint/D5/S3/Content.scribe.cs", b"// changed content\n")
         plan = self.parity()
-        self.assertEqual(plan["hits"], {"current": True, "filemap": True})
+        self.assertEqual(plan["hits"], {"current": True, "filemap": True, "omega": False})
         self.assertTrue(plan["report"])
         self.assertTrue(plan["delta"])
         data, _ = contract.load(self.root)
@@ -101,10 +101,10 @@ class ContractTests(unittest.TestCase):
 
     def test_tools_pin_checks_consumer_integration(self):
         self.put("Meta/tools-release.json", b'{"version": "v1.0.0"}\n')
-        self.assertEqual(self.parity()["hits"], {"current": True, "filemap": True})
+        self.assertEqual(self.parity()["hits"], {"current": True, "filemap": True, "omega": True})
 
-    def test_shared_compute_owner_selects_every_actual_consumer(self):
-        self.put("tools/scripts/workflow/ci_compute.py", b"# changed shared compute owner\n")
+    def test_shared_workflow_selects_every_consumer(self):
+        self.put(".github/workflows/ci-current.yml", b"# changed shared workflow\n")
         self.assertTrue(all(self.parity()["hits"].values()))
 
     def test_staged_rename_unstaged_deletion_untracked_nul_paths(self):
