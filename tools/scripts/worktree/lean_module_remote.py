@@ -32,6 +32,7 @@ CAPACITY = 900
 UNIT_PART_START = 10000000
 ACTIONS_CACHE = 'actions-cache'
 UNIT_ASSET = re.compile(r'compiler-unit-([0-9a-f]{64})\.tar\.gz')
+UNIT_RECEIPT = r'done/([0-9a-f]{64})/([0-9a-f]{64})-([1-9][0-9]{0,15})(?:-part-([1-9][0-9]*))?'
 UNIT_CATALOG = re.compile(r'compiler-units-([0-9a-f]{64})\.json')
 
 
@@ -119,7 +120,7 @@ class Remote:
         self.progress_interval = 60
         self.unit_entries = {}
         self.next_progress = 0
-        self.queue_claims = {}
+        self.claims = {}
         self.inventory = {}
         self.release_pages = {}
 
@@ -510,11 +511,27 @@ class Remote:
             self.compiler_cache('put', 'catalog', sha, sha, str(len(data)), path.resolve())
 
     def compiler_progress(self, plan, pending):
+        if self.next_progress == 0:
+            # Cross-run checkpoints already exist at startup. This attempt's producers
+            # subsequently advertise their verified exact addresses in their receipts.
+            self.unit_entries.update(self.cache_entries('unit'))
         if time.monotonic() >= self.next_progress:
-            self.unit_entries = self.cache_entries('unit')
-            # Share the per-repository GitHub API budget across all live runner lanes.
-            pages = 1 + len(self.unit_entries) // 100
-            self.progress_interval = max(15, min(300, len(plan['lanes']) * pages * 2))
+            prefix = self.claim_prefix(plan['source'])
+            for entry in self.api('git/matching-refs/' + prefix.removeprefix('refs/')):
+                ref = entry['ref']
+                if not ref.startswith(prefix):
+                    raise ValueError('unexpected compiler claim ref')
+                target = entry['object']['sha']
+                suffix = ref[len(prefix):]
+                if receipt := re.fullmatch(UNIT_RECEIPT, suffix):
+                    if target != plan['source']:
+                        raise ValueError('invalid compiler completion receipt')
+                    key, sha, size, part = receipt.groups()
+                    address = plan['version'] + '-part-' + part if part else ACTIONS_CACHE
+                    self.unit_entries[key] = dict(version=address, sha256=sha, bytes=int(size))
+                elif re.fullmatch(r'unit/[0-9a-f]{64}', suffix):
+                    self.claims[ref] = target
+            self.progress_interval = max(10, min(120, 2 * len(plan['lanes'])))
             self.next_progress = time.monotonic() + self.progress_interval
         return {k: dict(plan['shards'][k], **self.unit_entries[k]) for k in pending & self.unit_entries.keys()}
 
@@ -560,21 +577,26 @@ class Remote:
             catalog = self.catalog(tag, refresh=True)
 
     @cache
-    def claim_identity(self, source, lane):
+    def claim_prefix(self, source):
         run = publisher('compiler')
-        if not all(re.fullmatch(r'[0-9]+', run[k]) for k in ('run', 'attempt')):
+        if not re.fullmatch(r'[0-9a-f]{40}', source) or not all(
+                re.fullmatch(r'[0-9]+', run[k]) for k in ('run', 'attempt')):
             raise ValueError('invalid compiler job identity')
-        prefix = f'lean-unit-claims/{source}/{run["run"]}/{run["attempt"]}/'
-        # The tag object distinguishes a lost successful POST from a competing worker.
-        tag = self.api('git/tags', 'POST', tag=prefix + str(lane), message='Compiler unit worker',
+        return f'refs/tags/lean-unit-claims/{source}/{run["run"]}/{run["attempt"]}/'
+
+    @cache
+    def claim_identity(self, source, lane):
+        # Distinguish a lost successful POST from a competing worker's reservation.
+        tag_name = self.claim_prefix(source).removeprefix('refs/tags/') + str(lane)
+        tag = self.api('git/tags', 'POST', tag=tag_name, message='Compiler unit worker',
                        object=source, type='commit')
-        return prefix, tag['sha']
+        return tag['sha']
 
     def compiler_claim(self, ref, owner):
-        if ref not in self.queue_claims:
+        if ref not in self.claims:
             try:
                 self.api('git/refs', 'POST', ref=ref, sha=owner)
-                self.queue_claims[ref] = owner
+                self.claims[ref] = owner
             except host.GitHubCommandError:
                 # A lost successful POST and a competing worker are distinguished
                 # by the target of the exact, immutable ref.
@@ -589,21 +611,45 @@ class Remote:
                         raise
                     if entry['ref'] != ref:
                         raise ValueError('unexpected compiler claim ref')
-                    self.queue_claims[ref] = entry['object']['sha']
+                    self.claims[ref] = entry['object']['sha']
                     break
-        return self.queue_claims[ref]
+        return self.claims[ref]
 
-    def claim_compiler_queue(self, plan, queue, lane, key):
+    def claim_compiler_unit(self, plan, lane, ordered):
+        if not ordered:
+            return None
+        prefix = self.claim_prefix(plan['source']) + 'unit/'
+        owner = self.claim_identity(plan['source'], lane)
+        collisions = 0
+        for key in ordered:
+            ref = prefix + key
+            if ref in self.claims:
+                if self.claims[ref] == owner:
+                    return key
+                continue
+            if self.compiler_claim(ref, owner) == owner:
+                return key
+            # Concurrent workers may have claimed ready units since the bulk read.
+            # Refresh the attempt inventory before making more contested writes.
+            collisions += 1
+            if collisions == 2:
+                self.next_progress = time.monotonic()
+                break
+        return None
+
+    def complete_compiler_unit(self, plan, lane, key, row):
         source = plan['source']
-        prefix, owner = self.claim_identity(source, lane)
-        ref = 'refs/tags/' + prefix
-        # The first claimant fixes the protocol for this queue and attempt. Its
-        # home lane can run it exclusively. Borrowers open the queue for shared
-        # work by recording the source commit instead of a worker's tag object.
-        claim = self.compiler_claim(ref + str(queue), owner if queue == lane else source)
-        if claim != source:
-            return claim == owner
-        return self.compiler_claim(ref + 'unit/' + key, owner) == owner
+        prefix = self.claim_prefix(source)
+        if self.claims.get(prefix + 'unit/' + key) != self.claim_identity(source, lane):
+            raise ValueError('only the compiler unit owner can record its completion')
+        receipt = f'done/{key}/{row["sha256"]}-{row["bytes"]}'
+        if row['version'] != ACTIONS_CACHE:
+            tag = TAG.fullmatch(row['version'])
+            if not tag or not tag[3] or row['version'] != f'{plan["version"]}-part-{tag[3]}':
+                raise ValueError('invalid historical compiler checkpoint version')
+            receipt += '-part-' + tag[3]
+        if not re.fullmatch(UNIT_RECEIPT, receipt) or self.compiler_claim(prefix + receipt, source) != source:
+            raise ValueError('invalid compiler completion receipt')
 
     def wait_compiler_progress(self, plan):
         # A dead runner cannot release its reservation. Failed-job reruns use a fresh attempt.
@@ -622,18 +668,29 @@ class Remote:
     def clear_compiler_claims(self, source=None):
         run = publisher('compiler')
         prefix = 'tags/lean-unit-claims/' + (source + '/' if source else '')
+        updates = []
         for entry in self.api('git/matching-refs/' + prefix):
             ref = entry['ref'].removeprefix('refs/')
-            match = re.fullmatch(r'tags/lean-unit-claims/([0-9a-f]{40})/([0-9]+)/([0-9]+)/(?:[0-9]+|unit/[0-9a-f]{64})', ref)
+            match = re.fullmatch(r'tags/lean-unit-claims/([0-9a-f]{40})/([0-9]+)/([0-9]+)/(?:[0-9]+|unit/[0-9a-f]{64}|' + UNIT_RECEIPT + ')', ref)
             if not ref.startswith(prefix) or not match:
                 raise ValueError('unexpected compiler claim ref')
             # The compiler workflow serializes all publishers. Preserve the current
             # attempt when an exclusive planner collects claims from terminated runs.
             if source is None and (match[2], match[3]) == (run['run'], run['attempt']):
                 continue
-            url = f'https://api.github.com/repos/{host.REPO}/git/refs/{ref}'
-            with self.http.request(url, method='DELETE'):
-                pass
+            updates.append(dict(name=entry['ref'], beforeOid=entry['object']['sha'], afterOid='0' * 40))
+        if updates:
+            with self.http.request('https://api.github.com/repos/' + host.REPO) as response:
+                repository_id = json.load(response)['node_id']
+            query = 'mutation($input:UpdateRefsInput!) { updateRefs(input:$input) { clientMutationId } }'
+            for start in range(0, len(updates), 50):
+                variables = {'input': {'repositoryId': repository_id, 'refUpdates': updates[start:start + 50]}}
+                with self.http.request('https://api.github.com/graphql', method='POST',
+                                       headers={'Content-Type': 'application/json'},
+                                       payload=json_body({'query': query, 'variables': variables})) as response:
+                    result = json.load(response)
+                if result.get('errors') or result.get('data', {}).get('updateRefs') is None:
+                    raise ValueError('GitHub could not delete completed compiler claims: ' + str(result))
 
     def staged_index(self, version):
         if not self.accepts_tag(version) or TAG.fullmatch(version)[3]:

@@ -54,7 +54,8 @@ class MemoryRemote:
         self.saves = []
         self.fail = None
         self.catalogs = []
-        self.queues = {}
+        self.claims = {}
+        self.completed = {}
 
     def confirmed(self, rows):
         return rows
@@ -76,14 +77,17 @@ class MemoryRemote:
         return recovery_index(plan, self.catalogs, assets)
 
     def compiler_progress(self, plan, pending):
-        return {k: self.rows[k] for k in pending if k in self.rows}
+        return {k: r for k, r in (self.rows | self.completed).items() if k in pending}
 
     def retry_checkpoint(self, plan, key):
         return self.rows.get(key)
 
-    def claim_compiler_queue(self, plan, queue, lane, key):
-        owner = self.queues.setdefault((plan['source'], queue), lane if queue == lane else None)
-        return (self.queues.setdefault((plan['source'], key), lane) == lane) if owner is None else owner == lane
+    def claim_compiler_unit(self, plan, lane, ordered):
+        return next((k for k in ordered if self.claims.setdefault((plan['source'], k), lane) == lane), None)
+
+    def complete_compiler_unit(self, plan, lane, key, row):
+        assert self.claims[plan['source'], key] == lane
+        self.completed[key] = row
 
     def wait_compiler_progress(self, plan):
         raise AssertionError('a single live worker must make progress')
@@ -267,7 +271,7 @@ class ModuleReleases(unittest.TestCase):
             cache.finish(plan, self.remote)
         self.compiled.clear()
         self.remote.fail = None
-        self.remote.queues.clear()
+        self.remote.claims.clear()
         shutil.rmtree(self.root / PROJECT_BUILD)
         # An Actions failed-job retry reuses the original plan artifact.
         self.assertEqual(cache.work(self.root, plan, 0, self.remote, self.root / 'retry')['compiled_modules'], 1)
@@ -295,6 +299,10 @@ class ModuleReleases(unittest.TestCase):
         plan = self.dag_plan(workers=2)
         queues = {n: u['queue'] for u in plan['compiler_dag']['units'].values() for n in u['members']}
         self.assertNotEqual(queues['D5.B'], queues['D5.C'])
+        # A persisted plan may assign simultaneous branches to one queue.
+        for unit in plan['compiler_dag']['units'].values():
+            unit['queue'] = queues['D5.A']
+            unit['part'] = 10000000
         branch_started = Event()
         condition = Condition()
         branches = Barrier(2, timeout=20)
@@ -361,9 +369,10 @@ class ModuleReleases(unittest.TestCase):
         self.compiled.clear()
         self.remote.fail = None
         shutil.rmtree(self.root / PROJECT_BUILD)
-        self.remote.queues.clear()
+        self.remote.claims.clear()
+        self.remote.claims[plan['source'], a] = 1
 
-        with patch.object(self.remote, 'compiler_progress', side_effect=lambda *args: observed.popleft()), \
+        with patch.object(self.remote, 'compiler_progress', side_effect=lambda *args: observed.popleft() if observed else {}), \
              patch.object(self.remote, 'wait_compiler_progress', return_value=None):
             result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
         self.assertEqual(result['compiled_modules'], 1)
@@ -382,12 +391,20 @@ class ModuleReleases(unittest.TestCase):
         self.remote.fail = c
         with self.assertRaises(InterruptedError):
             cache.work(self.root, plan, 0, self.remote, self.root / 'first')
-        del self.remote.rows[a]
-        self.remote.queues.clear()
+        evicted = self.remote.rows.pop(a)
+        del self.remote.assets[evicted['version'], evicted['asset']]
+        self.remote.claims.clear()
         self.remote.fail = None
         self.compiled.clear()
         shutil.rmtree(self.root / PROJECT_BUILD)
-        result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
+        from lean_module_remote import CompilerCacheMiss
+        download = self.remote.download
+        def get(row, path):
+            if row['asset'] == evicted['asset']:
+                raise CompilerCacheMiss(a)
+            download(row, path)
+        with patch.object(self.remote, 'download', side_effect=get):
+            result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
         self.assertEqual(result['compiled_modules'], 2)
         self.assertEqual(self.compiled, [['D5.A'], ['D5.C']])
         self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(owner))
@@ -408,13 +425,64 @@ class ModuleReleases(unittest.TestCase):
         self.assertEqual(result['compiled_modules'], 3)
         self.assertEqual(set(cache.finish(retry, self.remote)['targets']), set(retry['targets']))
 
-    def test_evicted_claimed_queue_cannot_stall_publication(self):
-        import lean_module_dag as dag
+    def test_partial_historical_shard_rebuilds_only_conflicting_lake_outputs(self):
+        first = self.plan()
+        self.workers(first)
+        previous = cache.finish(first, self.remote)
+        self.source = 'b' * 40
+        (self.root / 'D5/C.lean').write_text('import D5.A\ndef valueC := valueA + 1\n')
+        plan = self.dag_plan(workers=1, base=previous)
+        seeds = plan['compiler_dag']['seeds']['owners']
+        self.assertEqual(set(seeds), {'D5.A', 'D5.B'})
+        self.assertEqual(seeds['D5.A'], seeds['D5.B'])
+
+        build = self.root / PROJECT_BUILD
+        shutil.rmtree(build)
+        self.lake('build', '+D5.C:leanArts')  # Lake builds A as a transitive prerequisite.
+        artifact = build / 'lib/lean/D5/A.olean'
+        good = artifact.read_bytes()
+        artifact.write_bytes(good + b'corrupt')
+        self.lake('build', '+D5.A:leanArts')
+        self.assertEqual(artifact.read_bytes(), good + b'corrupt')
+        sibling = build / 'lib/lean/D5/B.olean'
+        self.assertFalse(sibling.exists())
+        self.compiled.clear()
+        with patch.object(self.remote, 'download', side_effect=lambda row, path: path.write_bytes(b'corrupt archive')):
+            with self.assertRaisesRegex(ValueError, 'shard length or checksum mismatch'):
+                self.workers(plan)
+        self.assertFalse(sibling.exists())
+        self.assertEqual(artifact.read_bytes(), good + b'corrupt')
+        self.assertEqual(self.compiled, [])
+        result = self.workers(plan)
+        self.assertEqual(sum(r['compiled_modules'] for r in result), 2)
+        self.assertEqual(self.compiled, [['D5.A'], ['D5.C']])
+        self.assertEqual(artifact.read_bytes(), good)
+        self.assertTrue(sibling.is_file())
+        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(plan['targets']))
+
+    def test_slow_claimed_unit_stays_owned_until_its_producer_finishes(self):
         plan = self.dag_plan()
-        with patch.object(dag, 'MAX_IDLE_SECONDS', 0), \
-             patch.object(self.remote, 'claim_compiler_queue', return_value=False):
+        self.remote.fail = 'D5'
+        with self.assertRaises(InterruptedError):
+            self.workers(plan)
+        durable = self.remote.rows.copy()
+        self.remote.rows.clear()
+        self.remote.completed.clear()
+        self.remote.fail = None
+        self.compiled.clear()
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        clock = [0]
+        def wait(_):
+            self.assertEqual(self.compiled, [])
+            clock[0] += 3600
+            if clock[0] == 7200:
+                self.remote.completed.update(durable)
+        with patch.object(self.remote, 'claim_compiler_unit', return_value=None), \
+             patch('time.monotonic', side_effect=lambda: clock[0]), \
+             patch.object(self.remote, 'wait_compiler_progress', side_effect=wait) as waiting:
             result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
-        self.assertEqual(result['compiled_modules'], 3)
+        self.assertEqual(waiting.call_count, 2)
+        self.assertEqual(result['compiled_modules'], 0)
         self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(plan['targets']))
 
     def test_retry_recovers_uploads_omitted_by_both_inventories(self):
@@ -422,7 +490,7 @@ class ModuleReleases(unittest.TestCase):
         self.remote.fail = 'D5'
         with self.assertRaises(InterruptedError):
             self.workers(plan)
-        self.remote.queues.clear()
+        self.remote.claims.clear()
         self.remote.fail = None
         self.compiled.clear()
         shutil.rmtree(self.root / PROJECT_BUILD)
