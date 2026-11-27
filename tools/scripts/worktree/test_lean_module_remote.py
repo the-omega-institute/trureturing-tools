@@ -147,6 +147,18 @@ class VersionedShards(unittest.TestCase):
             self.remote.inventory.clear()
         return saved
 
+    def test_typed_compiler_preserves_promotion_evidence_for_its_legacy_report_source(self):
+        first = self.plan('a' * 40)
+        old = dict(first, shards={'Small': self.save(first, b'mixed')})
+        self.remote.publish(old)
+        self.assertNotIn((old['version'], transport.PROMOTED), self.service.files)
+        second = self.plan('b' * 40, fingerprint='e')
+        index = dict(second, kind='compiler', combined_report_version=old['version'],
+                     shards={'Small': self.save(second, b'compiler')})
+        self.remote.publish(index)
+        self.assertEqual(self.remote.current(), second['source'])
+        self.assertEqual(self.remote.published(old['version']), old)
+
     def test_independent_report_release_and_promotion(self):
         report = transport.Remote(self.root, kind='report')
         report.http = self.service

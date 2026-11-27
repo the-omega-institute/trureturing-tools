@@ -440,6 +440,11 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
         plan['kind'] = kind
     if kind == 'report':
         plan['compiler_version'] = compiler_index['version']
+    if kind == 'compiler' and base:
+        # Carry the last combined release until report publication has had a chance to migrate its ZIPs.
+        combined = base['version'] if base.get('kind') is None else base.get('combined_report_version')
+        if combined:
+            plan['combined_report_version'] = combined
     plan['base_version'] = base['version'] if base else None
     plan['source_only'] = checkpoint is not None or finished
     if kind != 'report' and (checkpoint is not None or planned.keys() - matching(plan, previous).keys()):
@@ -577,6 +582,19 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
         if not compiler_index or compiler_index['source'] != plan['source']:
             raise ValueError('published compiler prerequisite unavailable')
     base = remote.latest(plan['base_version']) if plan['base_version'] else None
+    combined = None
+    if compiler_index and not base:
+        if compiler_index.get('kind') is None:
+            combined = compiler_index
+        elif previous := compiler_index.get('combined_report_version'):
+            try:
+                combined = compiler_remote.published(previous)
+                if combined and (combined.get('kind') is not None or combined['version'] != previous
+                                 or combined['mathlib'] != plan['mathlib']):
+                    raise ValueError('ineligible historical combined module publication')
+            except REPORT_READ_ERRORS as error:
+                print(f'Historical reports unavailable: {error}', file=sys.stderr)
+                combined = None
     complete = recover_partials(plan, matching(plan, plan['inherited']), remote)
     installed = set()
     restored_reports = set()
@@ -596,9 +614,12 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
         destination = root / inventory.PROJECT_BUILD
         if kind == 'report':
             reports = restore_artifacts(root, modules, targets, base, members, remote, destination, 'report')
-            if compiler_index.get('kind') is None:
-                reports.update(restore_artifacts(root, modules, targets, compiler_index, members - reports,
-                                                 compiler_remote, destination, 'report'))
+            if combined:
+                try:
+                    restore_artifacts(root, modules, targets, combined, members - reports, compiler_remote,
+                                      destination, 'report', restored=reports)
+                except REPORT_READ_ERRORS as error:
+                    print(f'Historical report shard unavailable: {error}', file=sys.stderr)
             pending = members - reports
             if pending:
                 inputs = {d for n in pending for d in targets[n]['report_inputs']}
@@ -667,8 +688,8 @@ def finish(plan, remote):
         # An earlier plan may have picked different physical shards for the same inputs.
         if staged.get('kind') != (None if plan.get('historical_index') else plan.get('kind')):
             raise ValueError('staged module publication kind differs from plan')
-        if staged.get('compiler_version') != plan.get('compiler_version'):
-            raise ValueError('staged report compiler version differs from publication plan')
+        if any(staged.get(field) != plan.get(field) for field in ('compiler_version', 'combined_report_version')):
+            raise ValueError('staged publication input version differs from plan')
         targets = staged['targets']
         if (any(staged[k] != plan[k] for k in ('schema', 'source', 'version', 'mathlib'))
                 or targets.keys() != plan['targets'].keys()):
@@ -693,7 +714,7 @@ def finish(plan, remote):
     if missing:
         raise ValueError(f'{len(missing)} planned shards unavailable, including {min(missing)}')
     index = {k: plan[k] for k in ('schema', 'source', 'version', 'mathlib', 'targets')}
-    index.update((k, plan[k]) for k in ('kind', 'compiler_version') if k in plan)
+    index.update((k, plan[k]) for k in ('kind', 'compiler_version', 'combined_report_version') if k in plan)
     index['shards'] = rows
     remote.publish(index)
     return index

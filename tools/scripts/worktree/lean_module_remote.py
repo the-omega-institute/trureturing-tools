@@ -542,7 +542,7 @@ class Remote:
             self.actions('put', key, digest, path)
         if current and current != source:
             previous = self.latest(self.version(current))
-            if previous.get('kind'):
+            if previous.get('kind') or index.get('combined_report_version') == previous['version']:
                 self.record_promotion(previous)
             self.clear_indexed_labels(previous, local_only=True)
             self.present(previous)

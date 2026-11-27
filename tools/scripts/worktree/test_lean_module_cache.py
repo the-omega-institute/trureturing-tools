@@ -351,6 +351,60 @@ class ModuleReleases(unittest.TestCase):
             self.assertEqual(fallback['report_error'], 'report metadata unavailable')
             self.assertIn('report metadata unavailable', diagnostic.getvalue())
 
+    def test_first_report_publication_migrates_unchanged_zips_after_two_compiler_versions(self):
+        from lean_cache_release import report_selection
+        import lean_generation_facets as facets
+        from test_lean_module_shards import ShardCompilerTransport
+        (self.root / 'lean-report-inputs.json').write_text('{}')
+        self.enterContext(patch.object(report_selection, 'Selection')).return_value.modules.return_value = {
+            n: 'D5/' + n[-1] + '.lean' for n in ('D5.A', 'D5.B')}
+        self.enterContext(patch.object(facets, 'utility_inputs', return_value={}))
+        modules, historical = cache.checkout_targets(self.root, kind='report')
+        self.compile(self.root, modules, ['D5.A', 'D5.B', 'D5.C'])
+        def generate(names):
+            fixture = SimpleNamespace(root=self.root, build=self.root / PROJECT_BUILD, modules=modules)
+            for name in names:
+                ShardCompilerTransport.prepare_report(fixture, name)
+        generate(['D5.A', 'D5.B'])
+        # The original producer marked compiler-only siblings in a mixed namespace.
+        row = historical['D5.C']
+        historical['D5.C'] = dict(row, compiler_input=row['key'], key=cache.digest(['module-report-shard', row['key']]))
+        mixed_plan = cache.make_plan(self.source, self.pin, historical, None, self.remote, cache.DEFAULT_CAPACITY,
+                                     2, mathlib_version=self.version)
+        shard = mixed_plan['shards']['D5']
+        archive = self.root / 'mixed.tar.gz'
+        packed = pack_shard(self.root, modules, historical, archive, shard['fingerprint'])
+        self.remote.save(mixed_plan, 'D5', archive, {**shard, **packed, 'version': mixed_plan['version']})
+        mixed = cache.finish(mixed_plan, self.remote)
+        self.assertNotIn('kind', mixed)
+        self.remote.published = self.remote.latest
+        base = mixed
+        for revision in ('b', 'c'):
+            self.source = revision * 40
+            if revision == 'c':
+                (self.root / 'D5/A.lean').write_text('def valueA := 67')
+            shutil.rmtree(self.root / PROJECT_BUILD, ignore_errors=True)
+            compiler = self.plan(base)
+            self.workers(compiler)
+            base = cache.finish(compiler, self.remote)
+            self.assertEqual(base['combined_report_version'], mixed['version'])
+        modules, current = cache.checkout_targets(self.root, kind='report')
+        targets = {n: r for n, r in current.items() if 'report_inputs' in r}
+        reports = MemoryRemote()
+        plan = cache.make_plan(self.source, self.pin, targets, None, reports, cache.DEFAULT_CAPACITY,
+                               2, mathlib_version=self.version, kind='report', compiler_index=base)
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        calls = []
+        def produce(root, names, inputs, *, prebuilt):
+            calls.extend(names)
+            generate(names)
+        with patch.object(facets, 'materialize', side_effect=produce):
+            result = cache.work(self.root, plan, 0, reports, self.root / 'worker', compiler_remote=self.remote)
+        self.assertEqual(calls, ['D5.A'])
+        self.assertEqual(result['compiled_modules'], 0)
+        self.assertEqual(result['prepared_reports'], 1)
+        self.assertEqual(cache.finish(plan, reports)['targets'].keys(), {'D5.A', 'D5.B'})
+
     def test_report_cli_reads_the_explicit_report_and_paired_compiler_tags(self):
         import lean_module_remote
         compiler_remote, report_remote = MemoryRemote(), MemoryRemote()
