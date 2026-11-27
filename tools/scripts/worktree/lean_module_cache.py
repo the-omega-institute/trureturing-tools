@@ -357,6 +357,20 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
               prepare_release=False):
     if workers < 1 or workers > 256:
         raise ValueError('worker count must be within the Actions matrix limit')
+    version = VERSION_PREFIX + source
+    if base is None or base['version'] != version:
+        # A finalizer can stop after uploading index.json and before advancing the published ref.
+        base = remote.staged_index(version) or base
+    finished = base is not None and base['source'] == source and targets.keys() == base['targets'].keys()
+    checkpoint = None if finished else remote.publication_layout(version)
+    if checkpoint is not None:
+        original_base = checkpoint['base_version']
+        if original_base != (base['version'] if base else None):
+            base = remote.latest(original_base) if original_base else None
+            if original_base and (not base or base['version'] != original_base):
+                raise ValueError('missing original module publication base')
+        capacity = checkpoint['capacity']
+        legacy = checkpoint.get('legacy')
     previous = base['shards'] if base else {}
     sizes = {n: DEFAULT_MODULE_BYTES for n in targets}
     if legacy:
@@ -367,9 +381,6 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
             if name in sizes:
                 sizes[name] = row.get('module_sizes', {}).get(name, average)
     boundaries = {n: r['members'] for n, r in previous.items()}
-    version = VERSION_PREFIX + source
-    finished = base is not None and base['source'] == source and targets.keys() == base['targets'].keys()
-    checkpoint = None if finished else remote.publication_layout(version)
     if finished:
         layout = boundaries
     elif checkpoint is not None:
@@ -391,22 +402,28 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
     plan = {'schema': SCHEMA, 'source': source, 'mathlib': mathlib, 'targets': targets,
             'shards': planned, 'mathlib_version': mathlib_version, 'version': version, 'capacity': capacity}
     plan['base_version'] = base['version'] if base else None
+    plan['source_only'] = checkpoint is not None or finished
     if checkpoint is not None or planned.keys() - matching(plan, previous).keys():
         plan = expanded(plan, remote.splits(plan))
-    existing = remote.confirmed(matching(plan, previous))
+    inherited = {**previous, **checkpoint['partials']} if checkpoint is not None else previous
+    existing = remote.confirmed(matching(plan, inherited))
     recover_partials(plan, existing, remote)
     if checkpoint is None and not finished:
         plan = split_cold_reports(plan, existing, base, remote)
     planned = plan['shards']
     plan['inherited'] = existing
     missing = sorted(planned.keys() - existing.keys(), key=lambda s: (-sum(sizes[n] for n in planned[s]['members']), s))
-    if prepare_release and missing and checkpoint is None and not finished:
+    if prepare_release and checkpoint is None and not finished:
         # Workers address immutable assets by group name. Keep the first coordinates across base advances.
         remote.save_publication_layout(version, {
-            'version': version, 'mathlib_version': mathlib_version,
+            'version': version, 'mathlib_version': mathlib_version, 'base_version': plan['base_version'],
+            'capacity': capacity, 'partials': {n: r for n, r in existing.items() if previous.get(n) != r},
+            **({'legacy': legacy} if legacy and missing else {}),
             'fingerprint': shard_fingerprint(mathlib, targets, targets),
             'groups': {name: row['members'] for name, row in planned.items()},
         })
+    # The planner already adopted all usable historical uploads. Workers now follow this source's writes.
+    plan['source_only'] = True
     lanes = [[] for _ in range(min(len(missing), workers))]
     loads = [0] * len(lanes)
     for name in missing:

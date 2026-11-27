@@ -188,7 +188,7 @@ class Remote:
 
     def candidates(self, plan):
         # Current-version writes by sibling jobs may have happened since planning.
-        tags = list(self.tags(plan['version'], plan.get('base_version')))
+        tags = [plan['version']] if plan.get('source_only') else list(self.tags(plan['version'], plan.get('base_version')))
         prefix = 'tags/' + plan['version'] + '-part-'
         for row in self.api('git/matching-refs/' + prefix):
             tag = row['ref'].removeprefix('refs/tags/')
@@ -281,7 +281,7 @@ class Remote:
                 url = f'https://api.github.com/repos/{host.REPO}/releases/assets/{existing["id"]}'
                 with self.http.request(url, method='DELETE'):
                     pass
-                assets.pop(INDEX)
+                assets.pop(name)
                 return self.stage(version, name, path, digest)
             if (existing['state'] != 'uploaded' or existing['digest'] != 'sha256:' + digest
                     or existing['size'] != path.stat().st_size):
@@ -355,8 +355,15 @@ class Remote:
         self.actions('put', row['key'], row['sha256'], path)
         return {**row, 'version': tag}
 
-    def publication_layout(self, version):
+    def staged_index(self, version):
         catalog = self.catalog(version, refresh=True)
+        asset = catalog[1].get(INDEX) if catalog else None
+        if asset and asset['state'] == 'uploaded':
+            return self.latest(version)
+        return None
+
+    def publication_layout(self, version):
+        catalog = self.catalog(version)
         asset = catalog[1].get(LAYOUT) if catalog else None
         if not asset or (asset['state'] == 'starter' and asset['size'] == 0):
             return None

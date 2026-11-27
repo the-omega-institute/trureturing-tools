@@ -69,7 +69,16 @@ class Service:
             return {'merge_base_commit': {'sha': self.ref}}
         raise ValueError(path)
 
-    def request(self, url, *, method, path):
+    def request(self, url, *, method, path=None):
+        if method == 'DELETE':
+            asset_id = int(urlsplit(url).path.split('/')[-1])
+            for tag, release in self.releases.items():
+                for asset in release['assets']:
+                    if asset['id'] == asset_id:
+                        release['assets'].remove(asset)
+                        self.files.pop((tag, asset['name']), None)
+                        return io.BytesIO(b'')
+            raise AssertionError('missing asset to delete')
         params = parse_qs(urlsplit(url).query)
         rid = int(urlsplit(url).path.split('/')[-2])
         tag, release = next((tag, r) for tag, r in self.releases.items() if r['id'] == rid)
@@ -266,12 +275,7 @@ class VersionedShards(unittest.TestCase):
         self.assertEqual(retry['shards'], first['shards'])
         self.assertEqual(retry['inherited'], {'D5': completed})
         self.assertEqual(retry['lanes'], [['D5.A']])
-        self.assertEqual(retry['base_version'], advanced['version'])
-        with tempfile.TemporaryDirectory() as dest, patch.object(cache, 'restore_shard',
-                side_effect=lambda archive, row, names, *args, **kw: set(names)):
-            recovered = cache.restore_matching(self.root, {}, inputs, self.remote.latest(retry['base_version']),
-                                               set(warm), self.remote, Path(dest))
-        self.assertEqual(recovered, set(warm))
+        self.assertEqual(retry['base_version'], base['version'])
         save(retry, 'D5.A')
         index = cache.finish(retry, self.remote)
         self.assertEqual(cache.finish(first, self.remote), index)
@@ -304,6 +308,100 @@ class VersionedShards(unittest.TestCase):
         self.assertEqual(set(retry['shards']), set(inputs))
         self.assertEqual(self.service.files[first['version'], transport.LAYOUT], coordinates)
         self.assertEqual(self.service.uploads, 2)
+
+    def test_planner_replaces_an_interrupted_layout_reservation(self):
+        source = 'a' * 40
+        version = transport.PREFIX + source
+        self.remote.catalog(version, create=True)
+        starter = {'id': 100, 'name': transport.LAYOUT, 'state': 'starter', 'size': 0}
+        self.service.releases[version]['assets'].append(starter)
+        inputs = {'D5.X': {'key': 'x', 'deps': []}}
+        result = cache.make_plan(source, 'abcd', inputs, None, self.remote, cache.DEFAULT_CAPACITY,
+                                 2, mathlib_version='v1', prepare_release=True)
+        self.assertEqual(result['lanes'], [['D5']])
+        assets = self.service.releases[version]['assets']
+        self.assertEqual([(a['name'], a['state']) for a in assets], [(transport.LAYOUT, 'uploaded')])
+        self.assertIsNone(self.remote.publication_layout(version)['base_version'])
+
+    def test_retry_restores_300_reports_from_the_original_base_or_keeps_an_empty_base(self):
+        def plan(source, inputs, base=None, prepare=False):
+            return cache.make_plan(source * 40, 'abcd', inputs, base, self.remote, cache.DEFAULT_CAPACITY,
+                                   2, mathlib_version='v1', prepare_release=prepare)
+        names = [f'D5.X{i:03}' for i in range(300)]
+        warm = {n: {'key': n, 'deps': [], 'report_inputs': []} for n in names}
+        inputs = warm | {'D5.New': {'key': 'new', 'deps': [], 'report_inputs': []}}
+        no_base = plan('e', inputs, prepare=True)
+        # The first published base stores the 300 reports together.
+        with patch.object(cache, 'MAX_COLD_REPORTS_PER_SHARD', 300):
+            before = plan('a', warm)
+        self.save(before, b'warm')
+        base = cache.finish(before, self.remote)
+        original = plan('c', inputs, base, prepare=True)
+        self.assertEqual(set(original['shards']), {'D5'})
+        different = {'D5.Else': {'key': 'other', 'deps': [], 'report_inputs': []}}
+        other = plan('b', different, base)
+        self.save(other, b'different')
+        newer = cache.finish(other, self.remote)
+        retry = plan('c', inputs, newer, prepare=True)
+        self.assertEqual((retry['shards'], retry['base_version']), (original['shards'], base['version']))
+        with tempfile.TemporaryDirectory() as dest, patch.object(cache, 'restore_shard',
+                side_effect=lambda archive, row, members, *args, **kw: set(members)):
+            self.assertEqual(cache.restore_matching(self.root, {}, inputs, self.remote.latest(retry['base_version']),
+                                                    set(inputs), self.remote, Path(dest)), set(warm))
+        empty_retry = plan('e', inputs, newer, prepare=True)
+        self.assertEqual(empty_retry['shards'], no_base['shards'])
+        self.assertIsNone(empty_retry['base_version'])
+
+    def test_retries_the_staged_index_after_interrupted_promotion_and_a_new_base(self):
+        self.remote.tags = lambda current, base: [current]
+        def plan(source, inputs, base=None, prepare=False):
+            return cache.make_plan(source * 40, 'abcd', inputs, base, self.remote, cache.DEFAULT_CAPACITY,
+                                   2, mathlib_version='v1', prepare_release=prepare)
+        def save(plan, name):
+            return self.save(dict(plan, shards={name: plan['shards'][name]}), name.encode())
+        old_inputs = {'D5.X': {'key': 'x', 'deps': []}}
+        old = plan('a', old_inputs)
+        save(old, 'D5')
+        base = cache.finish(old, self.remote)
+        inputs = old_inputs | {'Other.Y': {'key': 'y', 'deps': []}}
+        # This source predates publication-layout.json. Its staged index is sufficient to resume.
+        first = plan('c', inputs, base)
+        self.assertEqual(first['inherited'], base['shards'])
+        save(first, 'D5')  # An earlier source-local upload has the same payload.
+        save(first, 'Other')
+        with patch.object(self.remote, 'present', side_effect=InterruptedError('promotion')):
+            with self.assertRaisesRegex(InterruptedError, 'promotion'):
+                cache.finish(first, self.remote)
+        index_bytes = self.service.files[first['version'], transport.INDEX]
+        self.assertEqual(self.service.ref, base['source'])
+        newer = plan('b', {'D5.Z': {'key': 'z', 'deps': []}}, base)
+        save(newer, 'D5')
+        advanced = cache.finish(newer, self.remote)
+        self.assertEqual(self.service.ref, advanced['source'])
+        retry = plan('c', inputs, advanced, True)
+        self.assertEqual(retry['lanes'], [])
+        result = cache.finish(retry, self.remote)
+        self.assertEqual(self.service.ref, first['source'])
+        self.assertEqual(transport.json_body(result), index_bytes)
+        self.assertEqual(result['shards']['D5'], base['shards']['D5'])
+
+    def test_retry_keeps_the_original_address_of_an_unpublished_sibling_shard(self):
+        inputs = {'D5.X': {'key': 'x', 'deps': []}}
+        def plan(source, base=None, prepare=False):
+            return cache.make_plan(source * 40, 'abcd', inputs, base, self.remote, cache.DEFAULT_CAPACITY,
+                                   2, mathlib_version='v1', prepare_release=prepare)
+        sibling = plan('a')
+        adopted = self.save(sibling, b'first sibling')
+        original = plan('c', prepare=True)
+        self.assertEqual(original['lanes'], [])
+        self.assertEqual(original['inherited'], {'D5': adopted})
+        newer = plan('b')
+        newer_row = self.save(newer, b'newer sibling')
+        advanced = {**newer, 'shards': {'D5': newer_row}}
+        self.remote.publish(advanced)
+        retry = plan('c', advanced, prepare=True)
+        self.assertEqual(retry['inherited'], original['inherited'])
+        self.assertEqual(cache.finish(retry, self.remote)['shards'], {'D5': adopted})
 
     def test_planner_owns_primary_and_parallel_workers_own_sparse_overflow(self):
         version = transport.PREFIX + 'a' * 40

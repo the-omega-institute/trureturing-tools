@@ -48,6 +48,9 @@ class MemoryRemote:
         self.saves.append(name)
         return row
 
+    def staged_index(self, version):
+        return self.latest(version)
+
     def publication_layout(self, version):
         return self.publications.get(version)
 
