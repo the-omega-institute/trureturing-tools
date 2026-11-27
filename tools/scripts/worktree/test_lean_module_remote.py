@@ -183,14 +183,24 @@ class VersionedShards(unittest.TestCase):
         report.publish(first)
         self.assertEqual(report.published(first['version']), first)
         second = index(b)
-        raw = transport.json_body(second)
-        file = self.root / 'staged'
-        file.write_bytes(raw)
-        report.stage(second['version'], transport.INDEX, file, hashlib.sha256(raw).hexdigest())
+        report.stage_index(second)
+        self.assertEqual(report.staged_index(second['version']), second)
         self.assertIsNone(report.published(second['version']))
-        report.publish(second)
+        self.assertEqual(report.latest(), first)
+        def break_metadata(index, **kwargs):
+            if index['source'] == b:
+                raise OSError('final release metadata failed')
+        with patch.object(report, 'clear_indexed_labels', side_effect=break_metadata):
+            with self.assertRaisesRegex(OSError, 'metadata failed'):
+                report.promote(second['version'])
+        self.assertIsNone(report.published(second['version']))
+        self.assertEqual(report.latest(), first)
+        self.assertNotIn((second['version'], transport.PROMOTED), self.service.files)
+        report.promote(second['version'])
         self.assertEqual(report.published(first['version']), first)
         self.assertEqual(report.published(second['version']), second)
+        report.promote(first['version'])
+        report.promote(second['version'])
         self.assertEqual(reports, [a, b])
 
     def marker(self, version, filename, contents):

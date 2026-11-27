@@ -401,6 +401,8 @@ class Remote:
         return {**row, 'version': tag}
 
     def staged_index(self, version):
+        if not self.accepts_tag(version) or TAG.fullmatch(version)[3]:
+            raise ValueError('invalid staged module version')
         catalog = self.catalog(version, refresh=True)
         asset = catalog[1].get(INDEX) if catalog else None
         if asset and asset['state'] == 'uploaded':
@@ -517,7 +519,7 @@ class Remote:
             digest = hashlib.sha256(data).hexdigest()
             self.clear_label(catalog[1].get(INDEX), digest, len(data), digest)
 
-    def publish(self, index):
+    def stage_index(self, index):
         publisher(self.kind)
         source = index['source']
         if index['version'] != self.version(source) or not re.fullmatch('[0-9a-f]{40}', source):
@@ -527,11 +529,6 @@ class Remote:
             raise ValueError('complete module index references an unavailable shard')
         data = json_body(index)
         digest = hashlib.sha256(data).hexdigest()
-        current = self.current()
-        if current != source and current:
-            comparison = self.api(f'compare/{current}...{source}?per_page=1')
-            if comparison['merge_base_commit']['sha'] != current:
-                raise ValueError('stale module cache publisher')
         with tempfile.TemporaryDirectory() as stage:
             path = Path(stage) / INDEX
             path.write_bytes(data)
@@ -540,6 +537,26 @@ class Remote:
             self.fetch(version, asset, readback)
             key = 'lean-module-index-' + source + self.suffix
             self.actions('put', key, digest, path)
+
+    def publish(self, index):
+        self.stage_index(index)
+        self.promote(index['version'])
+
+    def promote(self, version):
+        publisher(self.kind)
+        if self.published(version) is not None:
+            return
+        index = self.staged_index(version)
+        if index is None:
+            raise ValueError('complete staged module index unavailable: ' + version)
+        if self.confirmed(index['shards']).keys() != index['shards'].keys():
+            raise ValueError('staged module index references an unavailable shard')
+        source = index['source']
+        current = self.current()
+        if current != source and current:
+            comparison = self.api(f'compare/{current}...{source}?per_page=1')
+            if comparison['merge_base_commit']['sha'] != current:
+                raise ValueError('stale module cache publisher')
         if current and current != source:
             previous = self.latest(self.version(current))
             if previous.get('kind') or index.get('combined_report_version') == previous['version']:
@@ -547,11 +564,8 @@ class Remote:
             self.clear_indexed_labels(previous, local_only=True)
             self.present(previous)
         self.present(index)
+        self.clear_indexed_labels(index)
         if current is None:
             self.api('git/refs', 'POST', ref='refs/' + self.marker, sha=source)
         elif current != source:
             self.api('git/refs/' + self.marker, 'PATCH', sha=source, force=False)
-        if index.get('kind'):
-            self.record_promotion(index)
-        # A legacy partial can lose its label once readers can recover it from the complete index.
-        self.clear_indexed_labels(index)

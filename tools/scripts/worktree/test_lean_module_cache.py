@@ -394,6 +394,10 @@ class ModuleReleases(unittest.TestCase):
         plan = cache.make_plan(self.source, self.pin, targets, None, reports, cache.DEFAULT_CAPACITY,
                                2, mathlib_version=self.version, kind='report', compiler_index=base)
         shutil.rmtree(self.root / PROJECT_BUILD)
+        import lean_module_remote
+        with patch.object(lean_module_remote, 'Remote', return_value=reports):
+            stats = cache.restore_published(self.root, base, None, self.remote, self.root / 'pre-migration-consumer')
+            self.assertEqual((stats['compiler_restored'], stats['reports_restored']), (3, 1))
         calls = []
         def produce(root, names, inputs, *, prebuilt):
             calls.extend(names)
@@ -428,6 +432,34 @@ class ModuleReleases(unittest.TestCase):
             self.assertEqual(cache.run(), 1)
             report_remote.published = lambda version: None
             self.assertEqual(cache.run(), 3)
+
+    def test_report_suffix_requires_published_reports_and_staged_checks_are_explicit(self):
+        import lean_module_remote
+        compiler_reader, report_reader = MemoryRemote(), MemoryRemote()
+        compiler_tag = cache.VERSION_PREFIX + self.source
+        report_tag = compiler_tag + '-report'
+        index = {'source': self.source, 'version': compiler_tag}
+        reports = {'source': self.source, 'compiler_version': compiler_tag}
+        report_reader.indexes[report_tag] = reports
+        compiler_reader.published = lambda version: index if version == compiler_tag else self.fail(version)
+        report_reader.published = lambda version: None
+        def reader(root, deadline=None, *, kind='compiler'):
+            return report_reader if kind == 'report' else compiler_reader
+        args = ['test', '--repository', str(self.root), 'restore', '--version', report_tag, '--targets', 'D5.A']
+        with patch.object(lean_module_remote, 'Remote', side_effect=reader), \
+             patch.object(cache, 'restore_published', return_value={'requested': 1, 'restored': 1}) as restore:
+            with patch.object(cache.sys, 'argv', args):
+                self.assertEqual(cache.run(), 3)
+            self.assertEqual(cache.fetch_published(self.root, ['D5.A'], None, refresh_stale=False, version=report_tag), 1)
+            with patch.object(cache.sys, 'argv', [*args, '--kind', 'report', '--staged']):
+                self.assertEqual(cache.run(), 0)
+            self.assertEqual(restore.call_args.args[5], 'report')
+            self.assertIs(restore.call_args.kwargs['report_index'], reports)
+            report_reader.published = lambda version: reports if version == report_tag else self.fail(version)
+            with patch.object(cache.sys, 'argv', args):
+                self.assertEqual(cache.run(), 0)
+            self.assertEqual(cache.fetch_published(self.root, ['D5.A'], None, refresh_stale=False, version=report_tag), 0)
+            self.assertEqual(restore.call_args.args[5], 'report')
 
     def test_incremental_releases_and_scoped_consumers(self):
         plan = self.plan()

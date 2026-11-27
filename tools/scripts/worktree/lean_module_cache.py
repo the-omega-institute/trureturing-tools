@@ -680,7 +680,8 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
     return result
 
 
-def finish(plan, remote):
+def finish(plan, remote, *, stage_only=False):
+    publish = remote.stage_index if stage_only else remote.publish
     staged = remote.staged_index(plan['version'])
     if plan.get('historical_index') and not staged:
         raise ValueError('historical compiler index unavailable')
@@ -705,7 +706,7 @@ def finish(plan, remote):
                        or row['fingerprint'] != shard_fingerprint(plan['mathlib'], targets, members[group], staged.get('kind'))
                        for group, row in staged['shards'].items())):
             raise ValueError('staged module shards differ from indexed targets')
-        remote.publish(staged)
+        publish(staged)
         return staged
     if plan.get('kind') != 'report' and plan['shards'].keys() - plan['inherited'].keys():
         plan = expanded(plan, remote.splits(plan))
@@ -716,7 +717,7 @@ def finish(plan, remote):
     index = {k: plan[k] for k in ('schema', 'source', 'version', 'mathlib', 'targets')}
     index.update((k, plan[k]) for k in ('kind', 'compiler_version', 'combined_report_version') if k in plan)
     index['shards'] = rows
-    remote.publish(index)
+    publish(index)
     return index
 
 
@@ -805,6 +806,12 @@ def restore_published(root, index, names, remote, destination, kind=None, *, exa
         if reader is None:
             reader = Remote(root, remote.deadline, kind='report')
             reports = reader.published(index['version'] + '-report') if exact else reader.latest()
+            if reports is None and not exact and index.get('combined_report_version'):
+                mixed = remote.published(index['combined_report_version'])
+                if mixed is not None:
+                    if mixed.get('kind') is not None or mixed['mathlib'] != index['mathlib']:
+                        raise ValueError('ineligible historical combined report publication')
+                    return mixed, remote
         if reports is not None:
             version = reports['compiler_version']
             paired = index if version == index['version'] else remote.published(version)
@@ -820,19 +827,34 @@ def fetch_published(root, names, deadline, *, refresh_stale, version=None):
     from lean_cache_release import receipt
     from lean_module_remote import Remote
     remote = Remote(root, deadline)
-    index = remote.latest(version.removesuffix('-report') if version else None)
+    require_report = bool(version and version.endswith('-report'))
+    reports = report_remote = None
+    if require_report:
+        report_remote = Remote(root, deadline, kind='report')
+        reports = report_remote.published(version)
+        if reports is None:
+            return 1
+        index = remote.published(reports['compiler_version'])
+    else:
+        index = remote.published(version) if version else remote.latest()
     if index is None:
         return None
     destination = root / inventory.PROJECT_BUILD
     if destination.is_symlink() or destination.parent.is_symlink():
         raise ValueError('unsafe local compiler build directory')
-    if not names and destination.is_dir() and any(destination.iterdir()) and not refresh_stale:
+    if not names and destination.is_dir() and any(destination.iterdir()) and not refresh_stale and not require_report:
         receipt('fetch', 'skipped', reason='local build already exists')
         return 0
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
         stage = Path(temporary)
         output = destination if names else stage / 'build'
+        if require_report:
+            stats = restore_published(root, index, names or None, remote, destination, 'report', exact=True,
+                                      report_remote=report_remote, report_index=reports)
+            complete = stats['restored'] == stats['requested']
+            receipt('fetch', 'scoped' if complete else 'miss', mode='report', producer_commit_sha=index['source'], **stats)
+            return 0 if complete else 1
         stats = restore_published(root, index, names or None, remote, output, exact=version is not None)
         if not stats.get('compiler_restored', stats['restored']):
             receipt('fetch', 'miss', reason='no matching published compiler targets', **stats)
@@ -873,8 +895,13 @@ def run():
     final = commands.add_parser('finish')
     final.add_argument('--plan', type=Path, required=True)
     final.add_argument('--output', type=Path, required=True)
+    final.add_argument('--stage-only', action='store_true')
+    promote = commands.add_parser('promote')
+    promote.add_argument('--kind', choices=('compiler', 'report'), required=True)
+    promote.add_argument('--version', required=True)
     get = commands.add_parser('restore')
     get.add_argument('--version')
+    get.add_argument('--staged', action='store_true')
     get.add_argument('--kind', choices=('compiler', 'report'))
     roots = get.add_mutually_exclusive_group()
     roots.add_argument('--targets', nargs='*')
@@ -922,8 +949,14 @@ def run():
         plan = json.loads(args.plan.read_bytes())
         if compiler.checkout(root) != plan['source']:
             raise ValueError('publisher checkout differs from plan')
-        write(args.output, finish(plan, Remote(root, kind=plan['kind'])))
+        write(args.output, finish(plan, Remote(root, kind=plan['kind']), stage_only=args.stage_only))
+    elif args.command == 'promote':
+        Remote(root, kind=args.kind).promote(args.version)
     else:
+        if args.staged and not (args.kind and args.version):
+            parser.error('--staged requires --kind and --version')
+        if args.kind is None and args.version and args.version.endswith('-report'):
+            args.kind = 'report'
         roots = args.targets_file.read_text().split() if args.targets_file else args.targets
         if roots == []:
             print(json.dumps({'requested': 0, 'restored': 0}))
@@ -932,13 +965,18 @@ def run():
         report_remote, reports = None, None
         if args.kind == 'report':
             report_remote = Remote(root, kind='report')
-            reports = report_remote.published(args.version) if args.version else report_remote.latest()
+            if args.staged:
+                reports = report_remote.staged_index(args.version)
+            else:
+                reports = report_remote.published(args.version) if args.version else report_remote.latest()
             if reports is None:
                 return 3
             index = remote.published(reports['compiler_version'])
         else:
-            version = args.version.removesuffix('-report') if args.version and args.kind is None else args.version
-            index = remote.latest(version)
+            if args.staged:
+                index = remote.staged_index(args.version)
+            else:
+                index = remote.published(args.version) if args.version else remote.latest()
         if index is None:
             return 3
         stats = restore_published(root, index, roots, remote, args.destination or root / inventory.PROJECT_BUILD,
