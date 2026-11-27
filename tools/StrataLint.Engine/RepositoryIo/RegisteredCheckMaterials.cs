@@ -27,8 +27,15 @@ internal static class RegisteredCheckMaterials
     internal static string[] Read(RepositorySnapshot snapshot, string id)
     {
         var check = Declaration(snapshot, id);
-        return EngineeringProjectRegistry.ExpandInputs(snapshot.Files.Keys.Select(path => path.Value),
-            check.Materials, check.MaterialExcludes, id);
+        try
+        {
+            return EngineeringProjectRegistry.ExpandInputs(snapshot.Files.Keys.Select(path => path.Value),
+                check.Materials, check.MaterialExcludes, id);
+        }
+        catch (Exception exception) when (exception is FormatException or InvalidDataException)
+        {
+            throw new InvalidDataException($"invalid check material registration: {PathIn(snapshot)}: {id}: {exception.Message}", exception);
+        }
     }
 
     internal static string[] DirectoryCapacityRoots(RepositorySnapshot snapshot)
