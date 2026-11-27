@@ -78,6 +78,9 @@ class MemoryRemote:
     def compiler_progress(self, plan, pending):
         return {k: self.rows[k] for k in pending if k in self.rows}
 
+    def retry_checkpoint(self, plan, key):
+        return self.rows.get(key)
+
     def claim_compiler_queue(self, plan, queue, lane, key):
         owner = self.queues.setdefault((plan['source'], queue), lane if queue == lane else None)
         return (self.queues.setdefault((plan['source'], key), lane) == lane) if owner is None else owner == lane
@@ -367,6 +370,21 @@ class ModuleReleases(unittest.TestCase):
         self.assertEqual(self.compiled, [['D5.C']])
         self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(owner))
 
+    def test_retry_recovers_uploads_omitted_by_both_inventories(self):
+        plan = self.dag_plan()
+        self.remote.fail = 'D5'
+        with self.assertRaises(InterruptedError):
+            self.workers(plan)
+        self.remote.queues.clear()
+        self.remote.fail = None
+        self.compiled.clear()
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        with patch.dict(os.environ, GITHUB_RUN_ATTEMPT='2'), \
+             patch.object(self.remote, 'compiler_progress', return_value={}):
+            cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
+        self.assertEqual(self.compiled, [])
+        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), {'D5.A', 'D5.B', 'D5.C'})
+
     def test_dag_adopts_available_first_publication_frames(self):
         plan = self.dag_plan(workers=1)
         self.lake('build', '+D5.A:leanArts')
@@ -406,6 +424,18 @@ class ModuleReleases(unittest.TestCase):
                 result = cache.restore_published(self.root, index, ['D5.C'], self.remote,
                                                  self.root / 'verified', 'compiler', exact=True)
             self.assertEqual((result['requested'], result['restored']), (2, 2))
+
+    def test_older_unit_catalog_does_not_block_trace_verified_publication(self):
+        import lean_module_dag as dag
+        inputs = {'D5.A': 'x'}
+        old = dag.digest(['lean-compiler-unit-v1', self.pin, sorted(inputs.items())])
+        self.remote.catalogs.append(dict(mathlib=self.pin, units={old: inputs}))
+        self.remote.assets['old', dag.unit_row(old, inputs)['asset']] = b'older unit'
+        plan = self.dag_plan()
+        self.assertNotIn('D5.A', plan['compiler_dag']['seeds']['owners'])
+        self.remote.catalogs.append(dict(mathlib=self.pin, units={'0' * 64: inputs}))
+        with self.assertRaisesRegex(ValueError, 'inputs differ'):
+            self.dag_plan()
 
     def test_cross_source_reuses_matching_member_of_interrupted_unit(self):
         # A and B fit in one unit. A later edit invalidates B while A and its consumer C still match.

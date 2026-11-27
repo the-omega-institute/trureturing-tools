@@ -1072,6 +1072,7 @@ def run():
         if result is None:
             result = plan_publication(root, args, remote, source)
             if durable:
+                result['planner_run'] = os.environ.get('GITHUB_RUN_ID')
                 remote.save_publication_layout(version, result, COMPILER_PLAN)
         if args.prepare_release and result['lanes']:
             publisher(args.kind)

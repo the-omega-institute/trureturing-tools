@@ -533,18 +533,35 @@ class Remote:
         self.next_progress = now + self.progress_interval
         return result
 
+    def retry_checkpoint(self, plan, key):
+        row = plan['shards'][key]
+        # A fixed download address can become available before both inventories.
+        # An interrupted name can overflow into a deterministic sibling part.
+        for offset in range(8):
+            tag = f'{plan["version"]}-part-{row["part"] + offset}'
+            url = f'https://github.com/{host.REPO}/releases/download/{tag}/{row["asset"]}'
+            try:
+                with self.http.request(url, method='HEAD', redirect=True, authenticate=False) as response:
+                    if response.status not in (200, 302):
+                        raise ValueError('unexpected compiler checkpoint status')
+            except host.GitHubCommandError as error:
+                if missing(error):
+                    continue
+                raise
+            return self.resolve_checkpoint(dict(row, version=tag))
+        return None
+
     def resolve_checkpoint(self, row):
-        if not row.get('public_digest'):
-            return row
         tag = row['version']
         catalog = self.catalog(tag)
         delay = 0
         while True:
             asset = catalog[1].get(row['asset']) if catalog else None
             if asset and asset['state'] == 'uploaded':
-                if asset['size'] <= 0 or asset['digest'] != 'sha256:' + row['public_digest']:
+                sha = (asset.get('digest') or '').removeprefix('sha256:')
+                if asset['size'] <= 0 or not valid_digest(sha) or sha != row.get('public_digest', sha):
                     raise ValueError('compiler progress differs from immutable release metadata')
-                return dict(row, bytes=asset['size'], sha256=row['public_digest'])
+                return dict(row, bytes=asset['size'], sha256=sha)
             # The public directory can announce an asset before the REST read
             # replica sees the upload. Reconcile within this worker's deadline.
             if delay:
@@ -571,10 +588,19 @@ class Remote:
             except host.GitHubCommandError:
                 # A lost successful POST and a competing worker are distinguished
                 # by the target of the exact, immutable ref.
-                entry = self.api('git/ref/' + ref.removeprefix('refs/'))
-                if entry['ref'] != ref:
-                    raise ValueError('unexpected compiler claim ref')
-                self.queue_claims[ref] = entry['object']['sha']
+                for delay in (0, 1, 2, 4, 8):
+                    if delay:
+                        time.sleep(min(delay, host.remaining(self.deadline)))
+                    try:
+                        entry = self.api('git/ref/' + ref.removeprefix('refs/'))
+                    except host.GitHubCommandError as error:
+                        if missing(error) and delay != 8:
+                            continue
+                        raise
+                    if entry['ref'] != ref:
+                        raise ValueError('unexpected compiler claim ref')
+                    self.queue_claims[ref] = entry['object']['sha']
+                    break
         return self.queue_claims[ref]
 
     def claim_compiler_queue(self, plan, queue, lane, key):

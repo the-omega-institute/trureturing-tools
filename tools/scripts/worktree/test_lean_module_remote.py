@@ -83,7 +83,15 @@ class Service:
             return {'merge_base_commit': {'sha': self.ref}}
         raise ValueError(path)
 
-    def request(self, url, *, method='GET', path=None, headers=None, accept=None, authenticate=True):
+    def request(self, url, *, method='GET', path=None, headers=None, accept=None, authenticate=True, redirect=False):
+        if method == 'HEAD' and '/releases/download/' in url:
+            assert not authenticate and redirect
+            tag, name = urlsplit(url).path.split('/')[-2:]
+            if (tag, name) not in self.files:
+                raise transport.host.GitHubCommandError(1, ['HEAD'], stderr='HTTP 404: missing')
+            response = io.BytesIO(b'')
+            response.status = 302
+            return response
         if '/releases/expanded_assets/' in url:
             assert method == 'GET' and not authenticate and accept == 'text/html'
             tag = urlsplit(url).path.split('/')[-1]
@@ -222,6 +230,15 @@ class VersionedShards(unittest.TestCase):
             retry.clear_compiler_claims(plan['source'])
             self.assertEqual(self.service.claims, {})
 
+    def test_claim_ref_is_readable_after_conflict_and_delayed_replication(self):
+        ref = 'refs/tags/lean-unit-claims/a'
+        conflict = transport.host.GitHubCommandError(1, ['POST'], stderr='HTTP 422: reference exists')
+        delayed = transport.host.GitHubCommandError(1, ['GET'], stderr='HTTP 404: missing')
+        with patch.object(self.remote, 'api', side_effect=[conflict, delayed, dict(ref=ref, object={'sha':'other'})]), \
+             patch.object(transport.time, 'sleep') as wait:
+            self.assertEqual(self.remote.compiler_claim(ref, 'mine'), 'other')
+            wait.assert_called_once_with(1)
+
     def test_public_part_notifies_between_api_audits_and_revalidates_digest(self):
         from lean_module_dag import unit_key, unit_row
         plan = self.plan('a' * 40)
@@ -267,6 +284,7 @@ class VersionedShards(unittest.TestCase):
         sha = hashlib.sha256(path.read_bytes()).hexdigest()
         done = self.remote.save(plan, key, path, dict(row, sha256=sha, bytes=path.stat().st_size))
         self.assertTrue(done['version'].endswith(str(part+1)))
+        self.assertEqual(self.remote.retry_checkpoint(plan, key)['sha256'], sha)
         self.assertEqual(self.remote.compiler_progress(plan, {key})[key]['sha256'], sha)
         later = dict(plan, version=transport.PREFIX+'b'*40)
         recovered = self.remote.compiler_seeds(later)

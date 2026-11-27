@@ -1,13 +1,13 @@
 module
 prelude
-public import OmegaInit.FrozenDependencyFixture
+public import OmegaInit.Prelude
 
 @[expose] public section
 
 namespace FrozenFixture
 
-def Claim : Prop := Witness
+def Claim : Prop := Omega.True
 
-theorem claim : Claim := Witness.intro
+theorem claim : Claim := Omega.True.intro
 
 end FrozenFixture

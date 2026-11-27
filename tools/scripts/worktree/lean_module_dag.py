@@ -4,6 +4,7 @@ import base64
 from collections import defaultdict
 from graphlib import TopologicalSorter
 import math
+import os
 import json
 from pathlib import Path
 import subprocess
@@ -120,6 +121,10 @@ def recovery_index(plan, catalogs, assets):
             continue
         for key, inputs in catalog['units'].items():
             if unit_key(catalog['mathlib'], inputs) != key:
+                # Earlier unit archives did not verify each ordinary module against its Lake trace.
+                previous = digest(['lean-compiler-unit-v1', catalog['mathlib'], sorted(inputs.items())])
+                if key == previous:
+                    continue
                 raise ValueError('compiler unit inputs differ from catalog')
             row = unit_row(key, inputs)
             address = assets.get(row['asset'])
@@ -276,6 +281,8 @@ def compile_units(root, plan, lane, remote, modules, output):
     from lean_module_shards import pack_shard, restore_shard
     dag = plan['compiler_dag']
     units = dag['units']
+    run = os.environ.get('GITHUB_RUN_ID')
+    retry = int(os.environ.get('GITHUB_RUN_ATTEMPT', '1')) > 1 or (run and run != plan.get('planner_run', run))
     owners = dict(dag['seeds']['owners'])
     rows = dict(dag['seeds']['rows'])
     installed = set()
@@ -378,6 +385,11 @@ def compile_units(root, plan, lane, remote, modules, output):
             remote.wait_compiler_progress(plan)
             refresh = True
             continue
+        if retry:
+            saved = remote.retry_checkpoint(task_plan, key)
+            if saved:
+                observed(key, saved)
+                continue
         members = set(units[key]['members'])
         install(decode_scope(units[key]['restore'], dag['names']))
         missing = members
