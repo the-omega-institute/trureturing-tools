@@ -84,7 +84,21 @@ class Service:
             return {'merge_base_commit': {'sha': self.ref}}
         raise ValueError(path)
 
-    def request(self, url, *, method='GET', path=None, headers=None, accept=None, authenticate=True, redirect=False):
+    def request(self, url, *, method='GET', path=None, headers=None, accept=None, authenticate=True, redirect=False, payload=None):
+        if url == 'https://api.github.com/repos/' + transport.host.REPO:
+            return io.BytesIO(b'{"node_id":"repository-id"}')
+        if url == 'https://api.github.com/graphql':
+            body = json.loads(payload)
+            changes = body['variables']['input']
+            assert method == 'POST' and changes['repositoryId'] == 'repository-id'
+            updates = changes['refUpdates']
+            assert len(updates) <= 50
+            for update in updates:
+                ref = update['name'].removeprefix('refs/')
+                assert self.claims[ref]['object']['sha'] == update['beforeOid'] and update['afterOid'] == '0'*40
+            for update in updates:
+                del self.claims[update['name'].removeprefix('refs/')]
+            return io.BytesIO(b'{"data":{"updateRefs":{"clientMutationId":null}}}')
         if method == 'HEAD' and '/releases/download/' in url:
             assert not authenticate and redirect
             tag, name = urlsplit(url).path.split('/')[-2:]
@@ -177,7 +191,7 @@ class VersionedShards(unittest.TestCase):
                 return True
             return False
         self.remote.compiler_cache = compiler_cache
-        guard = patch.object(transport, 'publisher', return_value={})
+        guard = patch.object(transport, 'publisher', return_value=dict(run='9', attempt='1'))
         guard.start()
         self.addCleanup(guard.stop)
 
@@ -223,29 +237,61 @@ class VersionedShards(unittest.TestCase):
             self.remote.inventory.clear()
         return saved
 
-    def test_compiler_queue_claims_recover_on_retry_and_cleanup(self):
+    def test_per_unit_claims_receipts_and_retry_cleanup(self):
         plan = self.plan('a' * 40)
         other = transport.Remote(self.root)
         other.http = self.service
+        other.cache_entries = lambda kind: {}
         first, second = 'b' * 64, 'c' * 64
+        plan.update(shards={first: {}, second: {}}, lanes=[[], []])
+        row = dict(sha256='d'*64, bytes=42, version=transport.ACTIONS_CACHE)
         with patch.object(transport, 'publisher', return_value=dict(run='9', attempt='1')):
-            self.assertTrue(self.remote.claim_compiler_queue(plan, 0, 0, first))
-            self.assertFalse(other.claim_compiler_queue(plan, 0, 7, second))
-            self.assertEqual(len(self.service.claims), 1)
-            self.assertTrue(self.remote.claim_compiler_queue(plan, 7, 0, first))
-            self.assertFalse(other.claim_compiler_queue(plan, 7, 7, first))
-            self.assertTrue(other.claim_compiler_queue(plan, 7, 7, second))
-            self.assertFalse(self.remote.claim_compiler_queue(plan, 7, 0, second))
+            self.assertEqual(self.remote.claim_compiler_unit(plan, 0, [first]), first)
+            self.assertEqual(other.compiler_progress(plan, {first, second}), {})
+            with patch.object(other, 'compiler_claim', wraps=other.compiler_claim) as writes:
+                self.assertEqual(other.claim_compiler_unit(plan, 7, [first, second]), second)
+                self.assertEqual(writes.call_count, 1)
+            self.assertIsNone(self.remote.claim_compiler_unit(plan, 0, [second]))
+            self.remote.complete_compiler_unit(plan, 0, first, row)
+            with self.assertRaisesRegex(ValueError, 'only the compiler unit owner'):
+                other.complete_compiler_unit(plan, 7, first, row)
+            other.next_progress = 0
+            self.assertEqual(other.compiler_progress(plan, {first, second}), {first: row})
             self.remote.clear_compiler_claims()
-            self.assertEqual(len(self.service.claims), 4)
+            self.assertEqual(len(self.service.claims), 3)
         retry = transport.Remote(self.root)
         retry.http = self.service
         with patch.object(transport, 'publisher', return_value=dict(run='9', attempt='2')):
-            self.assertTrue(retry.claim_compiler_queue(plan, 7, 7, first))
+            self.assertEqual(retry.claim_compiler_unit(plan, 7, [first]), first)
             retry.clear_compiler_claims()
             self.assertEqual(len(self.service.claims), 1)
             retry.clear_compiler_claims(plan['source'])
             self.assertEqual(self.service.claims, {})
+
+    def test_bulk_claim_inventory_and_cleanup_at_production_plan_size(self):
+        plan = self.plan('a' * 40)
+        prefix = self.remote.claim_prefix(plan['source'])
+        sha = 'd' * 64
+        units = {f'{i:064x}': {} for i in range(1587)}
+        plan.update(shards=units, lanes=[[]]*64)
+        for key in units:
+            for tail, owner in [('unit/' + key, 'b'*40), (f'done/{key}/{sha}-42', plan['source'])]:
+                ref = prefix + tail
+                self.service.claims[ref.removeprefix('refs/')] = dict(ref=ref, object={'sha': owner})
+        with patch.object(self.service, 'api', wraps=self.service.api) as listed:
+            done = self.remote.compiler_progress(plan, set(units))
+            self.assertEqual(len(done), len(units))
+            self.assertEqual(listed.call_count, 1)
+        with patch.object(self.service, 'request', wraps=self.service.request) as deletes:
+            self.remote.clear_compiler_claims(plan['source'])
+            self.assertEqual(sum(call.args[0] == 'https://api.github.com/graphql'
+                                 for call in deletes.call_args_list), 64)
+            self.assertEqual(self.service.claims, {})
+
+    def test_failed_attempt_releases_waiters_for_a_fresh_retry(self):
+        with patch.object(self.remote, 'api', return_value={'jobs': [{'conclusion': 'failure'}]}):
+            with self.assertRaisesRegex(RuntimeError, 'available for retry'):
+                self.remote.wait_compiler_progress(self.plan('a'*40))
 
     def test_claim_ref_is_readable_after_conflict_and_delayed_replication(self):
         ref = 'refs/tags/lean-unit-claims/a'
