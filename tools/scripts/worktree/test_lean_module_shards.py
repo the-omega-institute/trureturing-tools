@@ -123,7 +123,7 @@ class ShardCompilerTransport(unittest.TestCase):
         config.write_text('''import Lake
 open Lake DSL
 package ns_fixture
-lean_lib Demo
+lean_lib MODULE_NAMESPACE
 module_facet report (mod : Module) : System.FilePath := withCurrPackage mod.pkg do
   let input := mod.pkg.dir / s!"{mod.name}.zip"
   let file := mod.pkg.buildDir / "lean-inspector/modules" / s!"{mod.name}.zip"
@@ -141,7 +141,7 @@ module_facet report (mod : Module) : System.FilePath := withCurrPackage mod.pkg 
       IO.FS.createDirAll file.parent.get!
       IO.FS.writeBinFile file (← IO.FS.readBinFile input)) (ext := "zip") (restore := true)
     return file
-''')
+'''.replace('MODULE_NAMESPACE', name.partition('.')[0]))
         subprocess.run(['lake', '-f', config.name, '--no-cache', 'build', '+' + name + ':report'],
                        cwd=self.root, check=True, stdout=subprocess.DEVNULL)
         self.modules[name] = replace(module, report=True, report_utility=utility)
@@ -211,6 +211,66 @@ module_facet report (mod : Module) : System.FilePath := withCurrPackage mod.pkg 
                                      expected.get(path))
                 for path in report_paths('Demo.B'):
                     self.assertEqual((dest / path).read_bytes(), (self.build / path).read_bytes())
+
+    def test_separate_archives_and_historical_combined_archive_restore_each_kind(self):
+        name = 'Demo.A'
+        self.prepare_report(name)
+        reports = set(report_paths(name))
+        combined = self.root / 'combined.tar.gz'
+        previous = pack_shard(self.root, self.modules, [name], combined, 'a' * 64)
+        self.assertNotIn('artifact_kind', previous)
+        archives = {}
+        for kind in ('compiler', 'report'):
+            path = self.root / (kind + '.tar.gz')
+            row = pack_shard(self.root, self.modules, [name], path, 'b' * 64, kind=kind)
+            self.assertEqual(row['artifact_kind'], kind)
+            with tarfile.open(path) as bundle:
+                files = {Path(p) for p in bundle.getnames()[1:]}
+            if kind == 'report':
+                self.assertEqual(files, reports)
+            else:
+                self.assertIn(Path('lib/lean/Demo/A.olean'), files)
+                self.assertTrue(files.isdisjoint(reports))
+            for archived, descriptor in ((path, row), (combined, previous)):
+                dest = self.root / (kind + '-' + archived.stem)
+                self.assertEqual(restore_shard(archived, descriptor, [name], self.modules, dest,
+                                               root=self.root, kind=kind), {name})
+                restored = {p.relative_to(dest) for p in dest.rglob('*') if p.is_file()}
+                self.assertEqual(restored, files)
+            archives[kind] = path, row
+
+        dest = self.root / 'independent-consumer'
+        for kind in ('report', 'compiler', 'report'):
+            path, row = archives[kind]
+            self.assertEqual(restore_shard(path, row, [name], self.modules, dest,
+                                           root=self.root, kind=kind), {name})
+        self.assertTrue((dest / 'lib/lean/Demo/A.olean').is_file())
+        self.assertTrue(all((dest / p).is_file() for p in reports))
+
+    def test_report_only_transport_requires_verified_report_without_compiler_files(self):
+        name = 'Demo.A'
+        self.prepare_report(name)
+        module = replace(self.modules[name], conditional_backends=True, extra_builds=(Path('omega-strict'),))
+        self.modules[name] = module
+        shutil.rmtree(self.build / 'lib')
+        archive = self.root / 'report.tar.gz'
+        row = pack_shard(self.root, self.modules, [name], archive, 'a' * 64, kind='report')
+        dest = self.root / 'restore'
+        self.assertEqual(restore_shard(archive, row, [name], self.modules, dest, root=self.root,
+                                       kind='report'), {name})
+        self.assertEqual(self.modules[name], module)
+        with self.assertRaisesRegex(ValueError, 'cannot restore'):
+            restore_shard(archive, row, [name], self.modules, dest, kind='compiler')
+        for path in report_paths(name):
+            self.assertEqual((dest / path).read_bytes(), (self.build / path).read_bytes())
+        self.assertFalse((dest / 'lib').exists())
+
+        (self.build / report_paths(name)[1]).unlink()
+        with self.assertRaisesRegex(ValueError, 'missing module report'):
+            pack_shard(self.root, self.modules, [name], archive, 'a' * 64, kind='report')
+        self.assertEqual(inspector_publication().digest(archive), row['sha256'])
+        with self.assertRaisesRegex(ValueError, 'module without a report'):
+            pack_shard(self.root, self.modules, ['Demo.B'], archive, 'a' * 64, kind='report')
 
     def test_current_claim_source_is_required_for_report_reuse(self):
         name = 'Demo.A'

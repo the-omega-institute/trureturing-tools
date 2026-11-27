@@ -12,6 +12,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tarfile
 import shutil
 import tomllib
 
@@ -19,13 +20,14 @@ import lean_artifact_inventory as inventory
 import lean_compile_layers as compiler
 from lean_cache import publication_mathlib, seed_partitions
 from lean_generation_plan import digest, file_digest, module_config, write
-from lean_module_shards import DEFAULT_CAPACITY, NAME, lookup_shard, pack_shard, plan_shards, restore_shard
+from lean_module_shards import DEFAULT_CAPACITY, NAME, pack_shard, plan_shards, restore_shard
 
 
 SCHEMA = 'lean-module-shards-v1'
 VERSION_PREFIX = 'lean-modules-'
 DEFAULT_MODULE_BYTES = 712650
 MAX_COLD_REPORTS_PER_SHARD = 250
+REPORT_READ_ERRORS = (OSError, EOFError, KeyError, TypeError, ValueError, ImportError, subprocess.SubprocessError, tarfile.TarError)
 
 
 OMEGA_BASIS = {'OmegaInit', 'OmegaMathlib'}
@@ -191,16 +193,19 @@ def compile_omega_outputs(root, modules, names, common_prepared):
     return common_prepared
 
 
-def checkout_targets(root, *, requested=None, restore_only=False, scope_roots=None):
+def checkout_targets(root, *, kind='compiler', requested=None, restore_only=False, scope_roots=None):
     modules = inventory.workspace_modules(root)
     roots = inventory.release_roots(modules) | omega_roots(root, modules)
+    registry = 'LeanInformationAudit.TemplateEnrollment'
+    if registry in modules:
+        roots.add(registry)
     graph = compiler.scoped_imports(root, modules, roots)
     modules, graph, omega_inputs = omega_build_plan(root, modules, graph)
     scope = set(graph)
     reported = {}
     selected = {}
     utilities = {}
-    if (root / 'lean-report-inputs.json').is_file():
+    if kind == 'report' and (root / 'lean-report-inputs.json').is_file():
         from lean_cache_release import report_selection
         from lean_generation_facets import module_report_targets, utility_inputs
         reported = report_selection.Selection(root).modules()
@@ -229,10 +234,11 @@ def checkout_targets(root, *, requested=None, restore_only=False, scope_roots=No
         if selected:
             paths = set(selected.values())
             report_roots = {row['claimModule'] for path, row in utilities.items() if path in paths}
-            if 'LeanInformationAudit.TemplateEnrollment' in modules:
-                report_roots.add('LeanInformationAudit.TemplateEnrollment')
-            # Report-only compiler prerequisites do not introduce report-to-report edges.
-            graph = {**compiler.scoped_imports(root, modules, report_roots - scope), **graph}
+            if missing := report_roots - scope:
+                if not restore_only:
+                    raise ValueError('report dependency is outside the compiler publication: ' + min(missing))
+                selected = {n: path for n, path in selected.items()
+                            if utilities.get(path, {}).get('claimModule') not in missing}
     configs = {}
     pins = {}
     directories = {'trureturing': Path('.'), 'reg': Path('Reg'), 'leanInspectorInterface': inventory.INTERFACE,
@@ -273,20 +279,14 @@ def checkout_targets(root, *, requested=None, restore_only=False, scope_roots=No
             targets[name] = dict(row, key=report['key'] if report else None, compiler_input=row['key'],
                                  report_inputs=report['deps'] if report else [])
             modules[name] = replace(modules[name], report=True, report_utility=utilities.get(path))
-        # Older readers validate every member of a tar against a compiler-only allowlist.
-        # A compiler-only sibling must not pick a mixed namespace's archive at the old identity.
-        namespaces = {namespace(n) for n in reported}
-        for name in scope - reported.keys():
-            if namespace(name) in namespaces:
-                row = targets[name]
-                targets[name] = dict(row, key=digest(['module-report-shard', row['key']]), compiler_input=row['key'])
     return modules, {name: targets[name] for name in sorted(scope)}
 
 
 def matching(plan, rows):
     return {name: row for name, row in rows.items() if name in plan['shards']
             and row['fingerprint'] == plan['shards'][name]['fingerprint']
-            and row['members'] == plan['shards'][name]['members']}
+            and row['members'] == plan['shards'][name]['members']
+            and (plan.get('kind') != 'report' or row['key'] == plan['shards'][name]['key'])}
 
 
 def recover_partials(plan, rows, remote):
@@ -296,17 +296,19 @@ def recover_partials(plan, rows, remote):
     return rows
 
 
-def shard_fingerprint(mathlib, targets, members):
-    return digest([SCHEMA, mathlib, [(n, targets[n]['key']) for n in sorted(members)]])
+def shard_fingerprint(mathlib, targets, members, kind=None):
+    domain = SCHEMA if kind is None else [SCHEMA, kind]
+    return digest([domain, mathlib, [(n, targets[n]['key']) for n in sorted(members)]])
 
 
-def shard_row(mathlib, mathlib_version, targets, name, members):
+def shard_row(mathlib, mathlib_version, targets, name, members, *, kind=None, compiler_key=None):
     members = sorted(members)
-    key = mathlib_version + '-' + name + '.tar.gz'
+    key = compiler_key + '-report' if kind == 'report' else mathlib_version + '-' + name + '.tar.gz'
     if len(key) > 512:
         raise ValueError('Actions key exceeds 512 characters: ' + key)
     return {'members': members, 'key': key, 'asset': key,
-            'fingerprint': shard_fingerprint(mathlib, targets, members)}
+            'fingerprint': shard_fingerprint(mathlib, targets, members, kind),
+            **({'artifact_kind': kind} if kind is not None else {})}
 
 
 def expanded(plan, splits):
@@ -319,14 +321,15 @@ def expanded(plan, splits):
         if sorted(n for members in layout.values() for n in members) != expected or groups.keys() & layout.keys():
             raise ValueError('split layout differs from group membership: ' + name)
         for child, members in layout.items():
-            groups[child] = shard_row(plan['mathlib'], plan.get('mathlib_version', plan['mathlib']), targets, child, members)
+            groups[child] = shard_row(plan['mathlib'], plan.get('mathlib_version', plan['mathlib']), targets, child, members,
+                                      kind=plan.get('kind'))
             for n in members:
                 targets[n] = dict(targets[n], shard=child)
     return dict(plan, targets=targets, shards=groups)
 
 
 def split_cold_reports(plan, existing, base, remote):
-    """Checkpoint bounded groups of reports that workers must produce before uploading a shard."""
+    """Keep each new compiler owner small enough to publish its paired report in one upload."""
     previous = base['targets'] if base else {}
     targets = plan['targets']
     splits = {}
@@ -334,8 +337,8 @@ def split_cold_reports(plan, existing, base, remote):
         members = shard['members']
         if name in existing or len(members) <= MAX_COLD_REPORTS_PER_SHARD:
             continue
-        cold = {n for n in members if 'report_inputs' in targets[n]
-                and targets[n]['key'] != previous.get(n, {}).get('key')}
+        cold = set(members) if plan.get('kind') == 'compiler' else {
+            n for n in members if 'report_inputs' in targets[n] and targets[n]['key'] != previous.get(n, {}).get('key')}
         if len(cold) > MAX_COLD_REPORTS_PER_SHARD:
             weights = {n: int(n in cold) for n in members}
             splits[name] = plan_shards(weights, MAX_COLD_REPORTS_PER_SHARD, previous={name: members})
@@ -354,15 +357,36 @@ def split_cold_reports(plan, existing, base, remote):
 
 
 def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version, legacy=None,
-              prepare_release=False):
+              prepare_release=False, kind=None, compiler_index=None):
     if workers < 1 or workers > 256:
         raise ValueError('worker count must be within the Actions matrix limit')
-    version = VERSION_PREFIX + source
+    version = VERSION_PREFIX + source + ('-report' if kind == 'report' else '')
+    if base is not None and (kind == 'report' and base.get('kind') != 'report'
+                             or kind == 'compiler' and base.get('kind') == 'report'):
+        raise ValueError('publication base belongs to another artifact kind')
+    if kind == 'report' and (not compiler_index or compiler_index['source'] != source
+                             or compiler_index['mathlib'] != mathlib or compiler_index.get('kind') == 'report'
+                             or compiler_index['version'] != VERSION_PREFIX + source):
+        raise ValueError('report publication requires the published compiler index for this checkout')
+    if kind == 'report':
+        for name, row in targets.items():
+            published = compiler_index['targets'].get(name, {})
+            if published.get('compiler_input', published.get('key')) != row['compiler_input']:
+                raise ValueError('published compiler input differs from report target: ' + name)
     if base is None or base['version'] != version:
         # A finalizer can stop after uploading index.json and before advancing the published ref.
         base = remote.staged_index(version) or base
     finished = base is not None and base['source'] == source and targets.keys() == base['targets'].keys()
+    if kind == 'compiler' and base and base['source'] == source and not base.get('kind'):
+        # A mixed index already owns this immutable tag. It supplies compiler artifacts through the old manifest.
+        if any(n not in targets or row.get('compiler_input', row['key']) != targets[n]['key']
+               for n, row in base['targets'].items()):
+            raise ValueError('historical module publication differs from current compiler inputs')
+        return {**base, 'kind': kind, 'historical_index': True, 'lanes': [], 'inherited': base['shards']}
     checkpoint = None if finished else remote.publication_layout(version)
+    if checkpoint and checkpoint.get('kind') != kind:
+        # A pre-split unfinished source owns these immutable shard addresses.
+        raise ValueError('source already has a different module publication layout')
     if checkpoint is not None:
         original_base = checkpoint['base_version']
         if original_base != (base['version'] if base else None):
@@ -381,12 +405,22 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
             if name in sizes:
                 sizes[name] = row.get('module_sizes', {}).get(name, average)
     boundaries = {n: r['members'] for n, r in previous.items()}
-    if finished:
+    if kind == 'report':
+        layout = defaultdict(list)
+        for name in sorted(targets):
+            owner = compiler_index['targets'][name]['shard']
+            layout[owner].append(name)
+        if any(not set(members) <= set(compiler_index['shards'][name]['members']) for name, members in layout.items()):
+            raise ValueError('published compiler shard disagrees with its target index')
+        if checkpoint is not None and (checkpoint['groups'] != layout
+                or checkpoint['fingerprint'] != shard_fingerprint(mathlib, targets, targets, kind)):
+            raise ValueError('report publication layout differs from compiler groups or report inputs')
+    elif finished:
         layout = boundaries
     elif checkpoint is not None:
         layout = checkpoint['groups']
         if (checkpoint['version'] != version or checkpoint['mathlib_version'] != mathlib_version
-                or checkpoint['fingerprint'] != shard_fingerprint(mathlib, targets, targets)
+                or checkpoint['fingerprint'] != shard_fingerprint(mathlib, targets, targets, kind)
                 or any(not NAME.fullmatch(name) or not isinstance(members, list) or not members
                        for name, members in layout.items())
                 or sorted(n for members in layout.values() for n in members) != sorted(targets)):
@@ -396,19 +430,29 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
     planned = {}
     targets = {n: dict(row) for n, row in targets.items()}
     for name, members in layout.items():
-        planned[name] = shard_row(mathlib, mathlib_version, targets, name, members)
+        compiler_key = compiler_index['shards'][name]['key'] if kind == 'report' else None
+        planned[name] = shard_row(mathlib, mathlib_version, targets, name, members, kind=kind, compiler_key=compiler_key)
         for n in members:
             targets[n]['shard'] = name
     plan = {'schema': SCHEMA, 'source': source, 'mathlib': mathlib, 'targets': targets,
             'shards': planned, 'mathlib_version': mathlib_version, 'version': version, 'capacity': capacity}
+    if kind:
+        plan['kind'] = kind
+    if kind == 'report':
+        plan['compiler_version'] = compiler_index['version']
+    if kind == 'compiler' and base:
+        # Carry the last combined release until report publication has had a chance to migrate its ZIPs.
+        combined = base['version'] if base.get('kind') is None else base.get('combined_report_version')
+        if combined:
+            plan['combined_report_version'] = combined
     plan['base_version'] = base['version'] if base else None
     plan['source_only'] = checkpoint is not None or finished
-    if checkpoint is not None or planned.keys() - matching(plan, previous).keys():
+    if kind != 'report' and (checkpoint is not None or planned.keys() - matching(plan, previous).keys()):
         plan = expanded(plan, remote.splits(plan))
     inherited = {**previous, **checkpoint['partials']} if checkpoint is not None else previous
     existing = remote.confirmed(matching(plan, inherited))
     recover_partials(plan, existing, remote)
-    if checkpoint is None and not finished:
+    if checkpoint is None and not finished and kind != 'report':
         plan = split_cold_reports(plan, existing, base, remote)
     planned = plan['shards']
     plan['inherited'] = existing
@@ -417,9 +461,10 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
         # Workers address immutable assets by group name. Keep the first coordinates across base advances.
         remote.save_publication_layout(version, {
             'version': version, 'mathlib_version': mathlib_version, 'base_version': plan['base_version'],
+            **({'kind': kind} if kind else {}),
             'capacity': capacity, 'partials': {n: r for n, r in existing.items() if previous.get(n) != r},
             **({'legacy': legacy} if legacy and missing else {}),
-            'fingerprint': shard_fingerprint(mathlib, targets, targets),
+            'fingerprint': shard_fingerprint(mathlib, targets, targets, kind),
             'groups': {name: row['members'] for name, row in planned.items()},
         })
     # The planner already adopted all usable historical uploads. Workers now follow this source's writes.
@@ -436,49 +481,8 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
     return plan
 
 
-def restore_matching(root, modules, targets, index, names, remote, destination, *,
-                     compiler_seeds=None, compiler_only=(), available_compilers=()):
-    """Read one authenticated asset per selected shard, including old-version references."""
-    if not index or not names:
-        return set()
-    if index.get('schema') != SCHEMA:
-        raise ValueError('unsupported module cache index')
-    owners = {n: t['shard'] for n, t in index['targets'].items()}
-    groups = {s: set(row['members']) for s, row in index['shards'].items()}
-    selected = defaultdict(list)
-    seed_only = set()
-    for name in sorted(names & targets.keys() & index['targets'].keys()):
-        previous = index['targets'][name]
-        if name in compiler_only or targets[name]['key'] != previous['key']:
-            if name in available_compilers:
-                continue
-            # Report inputs may change independently of the compiler output in the same shard.
-            current_compiler = targets[name].get('compiler_input', targets[name]['key'])
-            if compiler_seeds is None or previous.get('compiler_input', previous['key']) != current_compiler:
-                continue
-            seed_only.add(name)
-        shard = lookup_shard(name, owners, groups)
-        selected[shard].append(name)
-    restored = set()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
-        archive = Path(temporary) / 'shard.tar.gz'
-        for shard, members in selected.items():
-            row = index['shards'][shard]
-            remote.download(row, archive)
-            selected_seeds = seed_only.intersection(members)
-            installed = restore_shard(archive, row, members, modules, destination, root=root,
-                                      compiler_only=selected_seeds, compiler_hits=compiler_seeds)
-            missing_reports = {n for n in installed & selected_seeds if modules[n].report}
-            restored.update(installed - missing_reports)
-            if compiler_seeds is not None:
-                compiler_seeds.update(missing_reports)
-            archive.unlink()
-    return restored
-
-
 def partial_index(plan, rows):
-    return {'schema': SCHEMA, 'targets': {n: plan['targets'][n] for row in rows.values() for n in row['members']},
+    return {'schema': SCHEMA, **({'kind': plan['kind']} if plan.get('kind') else {}), 'targets': {n: plan['targets'][n] for row in rows.values() for n in row['members']},
             'shards': rows}
 
 
@@ -505,10 +509,47 @@ def restore_legacy(remote, index, names, destination):
     return set(rows) if report['restored'] == len(rows) else set()
 
 
+def restore_artifacts(root, modules, targets, index, names, remote, destination, kind, *, restored=None):
+    if restored is None:
+        restored = set()
+    if not index:
+        return restored
+    if index['schema'] != SCHEMA or index.get('kind') not in (None, kind):
+        raise ValueError('unexpected ' + kind + ' publication schema')
+    selected = defaultdict(list)
+    for name in sorted(names & targets.keys() & index['targets'].keys()):
+        row = index['targets'][name]
+        expected = targets[name]
+        if kind == 'compiler':
+            previous_key, current_key = row.get('compiler_input', row['key']), expected.get('compiler_input', expected['key'])
+        else:
+            if not expected.get('key') or (index.get('kind') is None and 'report_inputs' not in row):
+                continue
+            previous_key, current_key = row['key'], expected['key']
+        if previous_key == current_key:
+            shard = row['shard']
+            selected[shard].append(name)
+    if selected:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
+            archive = Path(temporary) / 'shard.tar.gz'
+            for name, members in selected.items():
+                row = index['shards'][name]
+                if not set(members) <= set(row['members']) or row.get('artifact_kind') != index.get('kind'):
+                    raise ValueError('shard content differs from publication index')
+                remote.download(row, archive)
+                restored.update(restore_shard(archive, row, members, modules, destination, root=root, kind=kind))
+    return restored
+
+
 def measured_archives(root, modules, name, members, directory, plan):
     capacity = plan['capacity']
     path = directory / (name + '.tar.gz')
-    row = pack_shard(root, modules, members, path, shard_fingerprint(plan['mathlib'], plan['targets'], members))
+    kind = plan.get('kind')
+    fingerprint = shard_fingerprint(plan['mathlib'], plan['targets'], members, kind)
+    row = pack_shard(root, modules, members, path, fingerprint, kind=kind or 'combined')
+    if kind == 'report':
+        return {name: row}
     if row['bytes'] <= capacity or len(members) == 1:
         return {name: row}
     path.unlink()
@@ -522,18 +563,38 @@ def measured_archives(root, modules, name, members, directory, plan):
     return archives
 
 
-def work(root, plan, lane, remote, output):
+def work(root, plan, lane, remote, output, *, compiler_remote=None):
     if not 0 <= lane < len(plan['lanes']) or compiler.checkout(root) != plan['source']:
         raise ValueError('worker checkout or lane differs from its plan')
     original = plan
-    splits = remote.splits(original)
+    kind = plan.get('kind', 'compiler')
+    splits = {} if kind == 'report' else remote.splits(original)
     plan = expanded(original, splits)
-    modules, current = checkout_targets(root)
+    modules, checkout = checkout_targets(root, kind=kind)
+    current = {n: r for n, r in checkout.items() if 'report_inputs' in r} if kind == 'report' else checkout
     targets = plan['targets']
     if current != {name: {k: v for k, v in row.items() if k != 'shard'} for name, row in targets.items()}:
         raise ValueError('worker compiler inputs differ from its plan')
-    graph = {n: set(row['deps']) for n, row in targets.items()}
+    graph = {n: set(row['deps']) for n, row in checkout.items()}
+    compiler_index = None
+    if kind == 'report':
+        compiler_index = compiler_remote.published(plan['compiler_version'])
+        if not compiler_index or compiler_index['source'] != plan['source']:
+            raise ValueError('published compiler prerequisite unavailable')
     base = remote.latest(plan['base_version']) if plan['base_version'] else None
+    combined = None
+    if compiler_index and not base:
+        if compiler_index.get('kind') is None:
+            combined = compiler_index
+        elif previous := compiler_index.get('combined_report_version'):
+            try:
+                combined = compiler_remote.published(previous)
+                if combined and (combined.get('kind') is not None or combined['version'] != previous
+                                 or combined['mathlib'] != plan['mathlib']):
+                    raise ValueError('ineligible historical combined module publication')
+            except REPORT_READ_ERRORS as error:
+                print(f'Historical reports unavailable: {error}', file=sys.stderr)
+                combined = None
     complete = recover_partials(plan, matching(plan, plan['inherited']), remote)
     installed = set()
     restored_reports = set()
@@ -550,38 +611,44 @@ def work(root, plan, lane, remote, output):
             continue
         shard = plan['shards'][name]
         members = set(shard['members'])
-        scope = inventory.import_closure(graph, members)
         destination = root / inventory.PROJECT_BUILD
-        for index in (partial_index(plan, complete), base):
-            seeds = set()
-            missing_reports = {n for n in members - restored_reports if modules[n].report}
-            exact = restore_matching(root, modules, targets, index, (scope - installed) | missing_reports,
-                                     remote, destination, compiler_seeds=seeds,
-                                     compiler_only=scope - members, available_compilers=installed)
-            restored_reports.update(n for n in exact if modules[n].report)
-            installed.update(exact | seeds)
-        if legacy:
-            try:
-                installed.update(restore_legacy(old_remote, legacy, {n for n in scope - installed if not modules[n].extra_builds}, destination))
-            except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
-                print(f'Compiler seed unavailable; continuing with Lake: {error}', file=sys.stderr)
-                legacy = None
-        missing = scope - installed
-        if missing:
-            # The official and strict import graphs can have different edges.
-            # Explicitly name the missing modules for each active backend.
-            roots = missing if any(modules[n].extra_builds for n in missing) else compiler.terminal(missing, graph)
-            compiler.compile_roots(root, modules, sorted(roots))
-            common_prepared = compile_omega_outputs(root, modules, missing, common_prepared)
-            installed.update(missing)
-            compiled += len(missing)
-        reports = sorted(n for n in members - restored_reports if modules[n].report)
-        if reports:
-            from lean_generation_facets import materialize
-            inputs = {dep for n in reports for dep in targets[n]['report_inputs']}
-            materialize(root, reports, inputs)
-            restored_reports.update(reports)
-            produced_reports += len(reports)
+        if kind == 'report':
+            reports = restore_artifacts(root, modules, targets, base, members, remote, destination, 'report')
+            if combined:
+                try:
+                    restore_artifacts(root, modules, targets, combined, members - reports, compiler_remote,
+                                      destination, 'report', restored=reports)
+                except REPORT_READ_ERRORS as error:
+                    print(f'Historical report shard unavailable: {error}', file=sys.stderr)
+            pending = members - reports
+            if pending:
+                inputs = {d for n in pending for d in targets[n]['report_inputs']}
+                scope = inventory.import_closure(graph, inputs)
+                installed.update(restore_artifacts(root, modules, checkout, compiler_index, scope - installed,
+                                                  compiler_remote, destination, 'compiler'))
+                if missing := scope - installed:
+                    raise ValueError('published compiler prerequisite unavailable: ' + min(missing))
+                from lean_generation_facets import materialize
+                materialize(root, sorted(pending), inputs, prebuilt=True)
+                produced_reports += len(pending)
+            restored_reports.update(members)
+        else:
+            scope = inventory.import_closure(graph, members)
+            for index in (partial_index(plan, complete), base):
+                installed.update(restore_artifacts(root, modules, targets, index, scope - installed,
+                                                   remote, destination, 'compiler'))
+            if legacy:
+                try:
+                    installed.update(restore_legacy(old_remote, legacy, {n for n in scope - installed if not modules[n].extra_builds}, destination))
+                except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
+                    print(f'Compiler seed unavailable; continuing with Lake: {error}', file=sys.stderr)
+                    legacy = None
+            if missing := scope - installed:
+                roots = missing if any(modules[n].extra_builds for n in missing) else compiler.terminal(missing, graph)
+                compiler.compile_roots(root, modules, sorted(roots))
+                common_prepared = compile_omega_outputs(root, modules, missing, common_prepared)
+                installed.update(missing)
+                compiled += len(missing)
         output.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=output) as temporary:
             directory = Path(temporary)
@@ -608,15 +675,22 @@ def work(root, plan, lane, remote, output):
             installed.clear()
         write(output / 'worker.json', {'compiled_modules': compiled, 'saved_shards': uploaded})
     result = {'compiled_modules': compiled, 'saved_shards': uploaded}
-    if produced_reports:
+    if kind == 'report':
         result['prepared_reports'] = produced_reports
     return result
 
 
-def finish(plan, remote):
+def finish(plan, remote, *, stage_only=False):
+    publish = remote.stage_index if stage_only else remote.publish
     staged = remote.staged_index(plan['version'])
+    if plan.get('historical_index') and not staged:
+        raise ValueError('historical compiler index unavailable')
     if staged is not None:
         # An earlier plan may have picked different physical shards for the same inputs.
+        if staged.get('kind') != (None if plan.get('historical_index') else plan.get('kind')):
+            raise ValueError('staged module publication kind differs from plan')
+        if any(staged.get(field) != plan.get(field) for field in ('compiler_version', 'combined_report_version')):
+            raise ValueError('staged publication input version differs from plan')
         targets = staged['targets']
         if (any(staged[k] != plan[k] for k in ('schema', 'source', 'version', 'mathlib'))
                 or targets.keys() != plan['targets'].keys()):
@@ -629,62 +703,159 @@ def finish(plan, remote):
             members[row['shard']].append(name)
         if (members.keys() != staged['shards'].keys()
                 or any(row['members'] != sorted(members[group])
-                       or row['fingerprint'] != shard_fingerprint(plan['mathlib'], targets, members[group])
+                       or row['fingerprint'] != shard_fingerprint(plan['mathlib'], targets, members[group], staged.get('kind'))
                        for group, row in staged['shards'].items())):
             raise ValueError('staged module shards differ from indexed targets')
-        remote.publish(staged)
+        publish(staged)
         return staged
-    if plan['shards'].keys() - plan['inherited'].keys():
+    if plan.get('kind') != 'report' and plan['shards'].keys() - plan['inherited'].keys():
         plan = expanded(plan, remote.splits(plan))
     rows = recover_partials(plan, matching(plan, plan['inherited']), remote)
     missing = plan['shards'].keys() - rows.keys()
     if missing:
         raise ValueError(f'{len(missing)} planned shards unavailable, including {min(missing)}')
     index = {k: plan[k] for k in ('schema', 'source', 'version', 'mathlib', 'targets')}
+    index.update((k, plan[k]) for k in ('kind', 'compiler_version', 'combined_report_version') if k in plan)
     index['shards'] = rows
-    remote.publish(index)
+    publish(index)
     return index
 
 
-def restore(root, index, requested, remote, destination):
+def restore(root, index, requested, remote, destination, *, kind=None, report_index=None, report_remote=None,
+            load_reports=None):
     roots = set(requested or ())
-    modules, targets = checkout_targets(root, requested=requested, restore_only=True, scope_roots=roots)
+    report_error = None
+    try:
+        modules, targets = checkout_targets(root, kind='compiler' if kind == 'compiler' else 'report',
+                                            requested=requested, restore_only=True, scope_roots=roots)
+    except REPORT_READ_ERRORS as error:
+        if kind is not None:
+            raise
+        roots = set(requested or ())
+        modules, targets = checkout_targets(root, kind='compiler', requested=requested)
+        report_error = str(error)
     graph = {n: row['deps'] for n, row in targets.items()}
     wanted = inventory.import_closure(graph, roots & targets.keys()) if requested is not None else set(targets)
-    prerequisites = {d for n in wanted for d in targets[n].get('report_inputs', ()) if d in graph}
-    supporting = inventory.import_closure(graph, prerequisites) - wanted
-    seeds = set()
-    restored = restore_matching(root, modules, targets, index, wanted | supporting, remote, destination,
-                                compiler_seeds=seeds, compiler_only=supporting)
-    result = {'requested': len(wanted), 'restored': len(wanted & restored), 'source': index['source']}
-    if supporting:
-        result.update(supporting_compilers_requested=len(supporting),
-                      supporting_compilers_restored=len(supporting & (restored | seeds)))
     reports = {n for n in wanted if modules[n].report}
+    prerequisites = {d for n in reports for d in targets[n]['report_inputs'] if d in graph}
+    supporting = inventory.import_closure(graph, prerequisites) - wanted
+    compiled = set()
+    if kind != 'report':
+        compiled = restore_artifacts(root, modules, targets, index, wanted | supporting, remote, destination, 'compiler')
+    restored = set()
+    if kind != 'compiler' and reports:
+        try:
+            if load_reports is not None:
+                report_index, report_remote = load_reports()
+            restore_artifacts(root, modules, targets, report_index, reports, report_remote, destination, 'report',
+                              restored=restored)
+            if index.get('kind') is None:
+                restore_artifacts(root, modules, targets, index, reports - restored, remote, destination, 'report',
+                                  restored=restored)
+        except REPORT_READ_ERRORS as error:
+            if kind == 'report':
+                raise
+            report_error = str(error)
+    if kind == 'report':
+        return {'requested': len(reports), 'restored': len(restored), 'reports_requested': len(reports),
+                'reports_restored': len(restored), 'source': index['source']}
+    exact = wanted & compiled
+    if kind is None:
+        exact -= reports - restored
+    result = {'requested': len(wanted), 'restored': len(exact), 'source': index['source']}
+    if supporting:
+        result.update(supporting_compilers_requested=len(supporting), supporting_compilers_restored=len(supporting & compiled))
+    if reports or kind == 'compiler':
+        result.update(compiler_restored=len(wanted & compiled))
     if reports:
-        result.update(reports_requested=len(reports), reports_restored=len(reports & restored),
-                      compiler_restored=len(wanted & (restored | seeds)))
+        result.update(reports_requested=len(reports), reports_restored=len(restored))
+    if report_error is not None:
+        result.update(compiler_restored=len(wanted & compiled), report_error=report_error)
+        print('Module report restore failed: ' + report_error, file=sys.stderr)
     return result
+
+
+def validate_report_pair(index, compiler_index):
+    if (index.get('kind') != 'report' or index.get('compiler_version') != compiler_index['version']
+            or index['source'] != compiler_index['source'] or index['mathlib'] != compiler_index['mathlib']):
+        raise ValueError('report publication differs from compiler release')
+    owners = defaultdict(list)
+    for name, row in index['targets'].items():
+        compiler_row = compiler_index['targets'].get(name, {})
+        if (compiler_row.get('compiler_input', compiler_row.get('key')) != row['compiler_input']
+                or row['shard'] != compiler_row.get('shard')):
+            raise ValueError('report publication differs from compiler target: ' + name)
+        owners[row['shard']].append(name)
+    if owners.keys() != index['shards'].keys():
+        raise ValueError('report publication shard owners differ from targets')
+    for name, members in owners.items():
+        shard = index['shards'][name]
+        compiler_shard = compiler_index['shards'][name]
+        key = compiler_shard['key'] + '-report'
+        if (shard['key'] != key or shard['asset'] != key or shard.get('artifact_kind') != 'report'
+                or sorted(members) != shard['members'] or not set(members) <= set(compiler_shard['members'])
+                or shard['fingerprint'] != shard_fingerprint(index['mathlib'], index['targets'], members, 'report')):
+            raise ValueError('report shard differs from paired compiler shard: ' + name)
+
+
+def restore_published(root, index, names, remote, destination, kind=None, *, exact=False,
+                      report_remote=None, report_index=None):
+    from lean_module_remote import Remote
+    def load_reports():
+        reader, reports = report_remote, report_index
+        if reader is None:
+            reader = Remote(root, remote.deadline, kind='report')
+            reports = reader.published(index['version'] + '-report') if exact else reader.latest()
+            if reports is None and not exact and index.get('combined_report_version'):
+                mixed = remote.published(index['combined_report_version'])
+                if mixed is not None:
+                    if mixed.get('kind') is not None or mixed['mathlib'] != index['mathlib']:
+                        raise ValueError('ineligible historical combined report publication')
+                    return mixed, remote
+        if reports is not None:
+            version = reports['compiler_version']
+            paired = index if version == index['version'] else remote.published(version)
+            if paired is None:
+                raise ValueError('published compiler prerequisite for the selected report index is unavailable')
+            validate_report_pair(reports, paired)
+        return reports, reader
+
+    return restore(root, index, names, remote, destination, kind=kind, load_reports=load_reports)
 
 
 def fetch_published(root, names, deadline, *, refresh_stale, version=None):
     from lean_cache_release import receipt
     from lean_module_remote import Remote
     remote = Remote(root, deadline)
-    index = remote.latest(version)
+    require_report = bool(version and version.endswith('-report'))
+    reports = report_remote = None
+    if require_report:
+        report_remote = Remote(root, deadline, kind='report')
+        reports = report_remote.published(version)
+        if reports is None:
+            return 1
+        index = remote.published(reports['compiler_version'])
+    else:
+        index = remote.published(version) if version else remote.latest()
     if index is None:
         return None
     destination = root / inventory.PROJECT_BUILD
     if destination.is_symlink() or destination.parent.is_symlink():
         raise ValueError('unsafe local compiler build directory')
-    if not names and destination.is_dir() and any(destination.iterdir()) and not refresh_stale:
+    if not names and destination.is_dir() and any(destination.iterdir()) and not refresh_stale and not require_report:
         receipt('fetch', 'skipped', reason='local build already exists')
         return 0
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
         stage = Path(temporary)
         output = destination if names else stage / 'build'
-        stats = restore(root, index, names or None, remote, output)
+        if require_report:
+            stats = restore_published(root, index, names or None, remote, destination, 'report', exact=True,
+                                      report_remote=report_remote, report_index=reports)
+            complete = stats['restored'] == stats['requested']
+            receipt('fetch', 'scoped' if complete else 'miss', mode='report', producer_commit_sha=index['source'], **stats)
+            return 0 if complete else 1
+        stats = restore_published(root, index, names or None, remote, output, exact=version is not None)
         if not stats.get('compiler_restored', stats['restored']):
             receipt('fetch', 'miss', reason='no matching published compiler targets', **stats)
             return 1
@@ -711,6 +882,7 @@ def run():
     commands = parser.add_subparsers(dest='command', required=True)
     plan = commands.add_parser('plan')
     plan.add_argument('--base', type=Path)
+    plan.add_argument('--kind', choices=('compiler', 'report'), default='compiler')
     plan.add_argument('--legacy-checkpoints', action='store_true')
     plan.add_argument('--prepare-release', action='store_true', help='create the shared Release before starting its workers')
     plan.add_argument('--capacity', type=int, default=DEFAULT_CAPACITY)
@@ -723,8 +895,14 @@ def run():
     final = commands.add_parser('finish')
     final.add_argument('--plan', type=Path, required=True)
     final.add_argument('--output', type=Path, required=True)
+    final.add_argument('--stage-only', action='store_true')
+    promote = commands.add_parser('promote')
+    promote.add_argument('--kind', choices=('compiler', 'report'), required=True)
+    promote.add_argument('--version', required=True)
     get = commands.add_parser('restore')
     get.add_argument('--version')
+    get.add_argument('--staged', action='store_true')
+    get.add_argument('--kind', choices=('compiler', 'report'))
     roots = get.add_mutually_exclusive_group()
     roots.add_argument('--targets', nargs='*')
     roots.add_argument('--targets-file', type=Path)
@@ -733,25 +911,34 @@ def run():
     root = args.repository.resolve()
     if args.command == 'worker':
         plan = json.loads(args.plan.read_bytes())
-        remote = Remote(root, lane=args.lane, lanes=len(plan['lanes']))
-        print(json.dumps(work(root, plan, args.lane, remote, args.output)))
+        kind = plan['kind']
+        remote = Remote(root, lane=args.lane, lanes=len(plan['lanes']), kind=kind)
+        print(json.dumps(work(root, plan, args.lane, remote, args.output,
+                              compiler_remote=Remote(root) if kind == 'report' else None)))
         return 0
-    remote = Remote(root)
     if args.command == 'plan':
-        modules, targets = checkout_targets(root)
+        remote = Remote(root, kind=args.kind)
+        modules, targets = checkout_targets(root, kind=args.kind)
         base = json.loads(args.base.read_bytes()) if args.base else remote.latest()
         source = compiler.checkout(root)
+        compiler_index = None
+        if args.kind == 'report':
+            compiler_index = Remote(root).published(VERSION_PREFIX + source)
+            if not compiler_index:
+                raise ValueError('report publication requires a published compiler cache for ' + source)
+            targets = {n: r for n, r in targets.items() if 'report_inputs' in r}
         legacy = None
-        if args.legacy_checkpoints and not base:
+        if args.kind == 'compiler' and args.legacy_checkpoints and not base:
             try:
                 legacy = legacy_compiler_inputs(root, modules, targets, source)
             except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
                 print(f'Compiler checkpoints unavailable; continuing with Lake: {error}', file=sys.stderr)
         mathlib, mathlib_version = publication_mathlib(root)
         result = make_plan(source, mathlib, targets, base, remote, args.capacity, args.workers,
-                           mathlib_version=mathlib_version, legacy=legacy, prepare_release=args.prepare_release)
+                           mathlib_version=mathlib_version, legacy=legacy, prepare_release=args.prepare_release,
+                           kind=args.kind, compiler_index=compiler_index)
         if args.prepare_release and result['lanes']:
-            publisher()
+            publisher(args.kind)
         write(args.output, result)
         if path := os.environ.get('GITHUB_OUTPUT'):
             with open(path, 'a') as output:
@@ -762,16 +949,42 @@ def run():
         plan = json.loads(args.plan.read_bytes())
         if compiler.checkout(root) != plan['source']:
             raise ValueError('publisher checkout differs from plan')
-        write(args.output, finish(plan, remote))
+        write(args.output, finish(plan, Remote(root, kind=plan['kind']), stage_only=args.stage_only))
+    elif args.command == 'promote':
+        status = Remote(root, kind=args.kind).promote(args.version)
+        print(json.dumps({'version': args.version, 'status': status}))
     else:
+        if args.staged and not (args.kind and args.version):
+            parser.error('--staged requires --kind and --version')
+        if args.kind is None and args.version and args.version.endswith('-report'):
+            args.kind = 'report'
         roots = args.targets_file.read_text().split() if args.targets_file else args.targets
         if roots == []:
             print(json.dumps({'requested': 0, 'restored': 0}))
             return 0
-        index = remote.latest(args.version)
+        remote = Remote(root)
+        report_remote, reports = None, None
+        if args.kind == 'report':
+            report_remote = Remote(root, kind='report')
+            if args.staged:
+                reports = report_remote.staged_index(args.version)
+            else:
+                reports = report_remote.published(args.version) if args.version else report_remote.latest()
+            if reports is None:
+                return 3
+            index = remote.published(reports['compiler_version'])
+        else:
+            if args.staged:
+                index = remote.staged_index(args.version)
+            else:
+                index = remote.published(args.version) if args.version else remote.latest()
         if index is None:
             return 3
-        print(json.dumps(restore(root, index, roots, remote, args.destination or root / inventory.PROJECT_BUILD)))
+        stats = restore_published(root, index, roots, remote, args.destination or root / inventory.PROJECT_BUILD,
+                                  args.kind, exact=args.version is not None, report_remote=report_remote, report_index=reports)
+        print(json.dumps(stats))
+        if args.kind and stats['restored'] != stats['requested']:
+            return 1
     return 0
 
 

@@ -140,14 +140,14 @@ def use_known_projections(targets, snapshots):
                 targets[name] = alternate
 
 
-def materialize(root, names, inputs):
+def materialize(root, names, inputs, *, prebuilt=False):
     """Build the canonical report facets for these members and their compiler prerequisites."""
     names = sorted(set(names))
     if not names:
         return
     with tempfile.TemporaryDirectory(prefix='module-reports-') as directory:
         request = Path(directory) / 'members.json'
-        request.write_text(json.dumps(dict(reports=names, inputs=sorted(set(inputs).union(names)))))
+        request.write_text(json.dumps(dict(reports=names, inputs=sorted(set(inputs).union(names)), prebuilt=prebuilt)))
         subprocess.run(['bash', 'tools/scripts/worktree/lean-cache-run.sh', 'lake', '-d',
                         'tools/lean-inspector-reg', 'script', 'run', 'leanInspector/shardModuleReports',
                         str(request)], cwd=root, check=True)

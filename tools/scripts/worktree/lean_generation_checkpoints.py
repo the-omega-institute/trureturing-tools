@@ -14,13 +14,19 @@ from lean_generation_index import ConflictingArtifacts, validate
 from lean_generation_remote import GitHub, InvalidIndexBody, MissingCheckpoint
 
 
-def publisher():
+def publisher(kind=None):
     env = os.environ
     repo = env["GITHUB_REPOSITORY"]
+    if kind not in (None, "compiler", "report"):
+        raise ValueError("unknown publication kind")
+    workflow = "report-release-publish" if kind == "report" else "cache-release-publish"
+    events = {"workflow_dispatch", "schedule"}
+    if kind is not None:
+        events.add("workflow_run" if kind == "report" else "push")
     if (repo != host.REPO or env.get("GITHUB_REF") != "refs/heads/dev"
             or env.get("GITHUB_REF_PROTECTED") != "true"
-            or env.get("GITHUB_WORKFLOW_REF") != f"{repo}/.github/workflows/cache-release-publish.yml@refs/heads/dev"
-            or env.get("GITHUB_EVENT_NAME") not in {"workflow_dispatch", "schedule"}
+            or env.get("GITHUB_WORKFLOW_REF") != f"{repo}/.github/workflows/{workflow}.yml@refs/heads/dev"
+            or env.get("GITHUB_EVENT_NAME") not in events
             or env.get("STRATALINT_CACHE_WRITES") != "true"):
         raise ValueError("only the protected generation publisher can stage a checkpoint")
     return {"run": env["GITHUB_RUN_ID"], "attempt": env["GITHUB_RUN_ATTEMPT"]}
