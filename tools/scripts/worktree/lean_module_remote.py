@@ -665,32 +665,49 @@ class Remote:
         delay = max(0, self.next_progress - time.monotonic())
         time.sleep(min(delay, host.remaining(self.deadline)))
 
-    def clear_compiler_claims(self, source=None):
-        run = publisher('compiler')
-        prefix = 'tags/lean-unit-claims/' + (source + '/' if source else '')
-        updates = []
-        for entry in self.api('git/matching-refs/' + prefix):
-            ref = entry['ref'].removeprefix('refs/')
-            match = re.fullmatch(r'tags/lean-unit-claims/([0-9a-f]{40})/([0-9]+)/([0-9]+)/(?:[0-9]+|unit/[0-9a-f]{64}|' + UNIT_RECEIPT + ')', ref)
+    def compiler_claim_nodes(self, source, run):
+        prefix = 'refs/tags/lean-unit-claims/' + (source + '/' if source else '')
+        nodes = []
+        for entry in self.api('git/matching-refs/' + prefix.removeprefix('refs/')):
+            ref = entry['ref']
+            match = re.fullmatch(r'refs/tags/lean-unit-claims/([0-9a-f]{40})/([0-9]+)/([0-9]+)/(?:[0-9]+|unit/[0-9a-f]{64}|' + UNIT_RECEIPT + ')', ref)
             if not ref.startswith(prefix) or not match:
                 raise ValueError('unexpected compiler claim ref')
-            # The compiler workflow serializes all publishers. Preserve the current
-            # attempt when an exclusive planner collects claims from terminated runs.
+            # The exclusive planner preserves the live attempt while collecting terminated runs.
             if source is None and (match[2], match[3]) == (run['run'], run['attempt']):
                 continue
-            updates.append(dict(name=entry['ref'], beforeOid=entry['object']['sha'], afterOid='0' * 40))
-        if updates:
-            with self.http.request('https://api.github.com/repos/' + host.REPO) as response:
-                repository_id = json.load(response)['node_id']
-            query = 'mutation($input:UpdateRefsInput!) { updateRefs(input:$input) { clientMutationId } }'
-            for start in range(0, len(updates), 50):
-                variables = {'input': {'repositoryId': repository_id, 'refUpdates': updates[start:start + 50]}}
-                with self.http.request('https://api.github.com/graphql', method='POST',
-                                       headers={'Content-Type': 'application/json'},
-                                       payload=json_body({'query': query, 'variables': variables})) as response:
-                    result = json.load(response)
-                if result.get('errors') or result.get('data', {}).get('updateRefs') is None:
-                    raise ValueError('GitHub could not delete completed compiler claims: ' + str(result))
+            node = entry.get('node_id')
+            if not isinstance(node, str) or not node:
+                raise ValueError('missing compiler claim ref node ID: ' + ref)
+            nodes.append(node)
+        return nodes
+
+    def delete_compiler_claim_batch(self, nodes):
+        variables = {f'r{i}': {'refId': node, 'clientMutationId': f'r{i}'} for i, node in enumerate(nodes)}
+        parameters = ','.join(f'${alias}:DeleteRefInput!' for alias in variables)
+        fields = ' '.join(f'{alias}:deleteRef(input:${alias}){{clientMutationId}}' for alias in variables)
+        query = f'mutation({parameters}){{{fields}}}'
+        with self.http.request('https://api.github.com/graphql', method='POST',
+                               headers={'Content-Type': 'application/json'},
+                               payload=json_body({'query': query, 'variables': variables})) as response:
+            result = json.load(response)
+        expected = {alias: {'clientMutationId': alias} for alias in variables}
+        if result.get('errors') or result.get('data') != expected:
+            raise ValueError('GitHub could not confirm deletion of compiler claims: ' + str(result))
+
+    def clear_compiler_claims(self, source=None):
+        run = publisher('compiler')
+        for attempt in range(2):
+            nodes = self.compiler_claim_nodes(source, run)
+            try:
+                for start in range(0, len(nodes), 50):
+                    self.delete_compiler_claim_batch(nodes[start:start + 50])
+                return
+            except (host.GitHubCommandError, ValueError):
+                # GraphQL executes mutation aliases serially. A partial result or a lost
+                # response may leave only some refs to delete. Re-list before retrying.
+                if attempt:
+                    raise
 
     def staged_index(self, version):
         if not self.accepts_tag(version) or TAG.fullmatch(version)[3]:
