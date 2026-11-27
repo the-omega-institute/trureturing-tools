@@ -752,13 +752,17 @@ def validate_report_pair(index, compiler_index):
             raise ValueError('report shard differs from paired compiler shard: ' + name)
 
 
-def restore_published(root, index, names, remote, destination, kind=None, *, report_remote=None, report_index=None):
+def restore_published(root, index, names, remote, destination, kind=None, *, exact=False,
+                      report_remote=None, report_index=None):
     from lean_module_remote import Remote
     if report_remote is None and kind != 'compiler' and (root / 'lean-report-inputs.json').is_file():
         report_remote = Remote(root, remote.deadline, kind='report')
-        report_index = report_remote.published(VERSION_PREFIX + index['source'] + '-report')
+        report_index = report_remote.published(index['version'] + '-report') if exact else report_remote.latest()
     if report_index is not None:
-        validate_report_pair(report_index, index)
+        paired = index if report_index['compiler_version'] == index['version'] else remote.published(report_index['compiler_version'])
+        if paired is None:
+            raise ValueError('published compiler prerequisite for the selected report index is unavailable')
+        validate_report_pair(report_index, paired)
     return restore(root, index, names, remote, destination, kind=kind, report_index=report_index, report_remote=report_remote)
 
 
@@ -779,7 +783,7 @@ def fetch_published(root, names, deadline, *, refresh_stale, version=None):
     with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
         stage = Path(temporary)
         output = destination if names else stage / 'build'
-        stats = restore_published(root, index, names or None, remote, output)
+        stats = restore_published(root, index, names or None, remote, output, exact=version is not None)
         if not stats.get('compiler_restored', stats['restored']):
             receipt('fetch', 'miss', reason='no matching published compiler targets', **stats)
             return 1
@@ -888,7 +892,7 @@ def run():
         if index is None:
             return 3
         stats = restore_published(root, index, roots, remote, args.destination or root / inventory.PROJECT_BUILD,
-                                  args.kind, report_remote=report_remote, report_index=reports)
+                                  args.kind, exact=args.version is not None, report_remote=report_remote, report_index=reports)
         print(json.dumps(stats))
         if args.kind and stats['restored'] != stats['requested']:
             return 1

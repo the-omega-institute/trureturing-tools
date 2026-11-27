@@ -24,6 +24,7 @@ class MemoryRemote:
         self.indexes = {}
         self.rows = {}
         self.assets = {}
+        self.deadline = None
         self.layouts = {}
         self.publications = {}
         self.saves = []
@@ -289,6 +290,54 @@ class ModuleReleases(unittest.TestCase):
         self.assertTrue((fresh / 'lean-inspector/modules/D5.A.zip').is_file())
         self.assertFalse((fresh / 'lib/lean/D5/A.olean').exists())
 
+    def test_rolling_report_marker_can_lag_the_compiler_and_restore_only_matching_inputs(self):
+        import lean_module_remote
+        from lean_cache_release import report_selection
+        import lean_generation_facets as facets
+        from test_lean_module_shards import ShardCompilerTransport
+        (self.root / 'lean-report-inputs.json').write_text('{}')
+        selection = self.enterContext(patch.object(report_selection, 'Selection')).return_value
+        selection.modules.return_value = {n: 'D5/' + n[-1] + '.lean' for n in ('D5.A', 'D5.B')}
+        self.enterContext(patch.object(facets, 'utility_inputs', return_value={}))
+        first = self.plan()
+        self.workers(first)
+        compiler_a = cache.finish(first, self.remote)
+        modules, targets = cache.checkout_targets(self.root, kind='report')
+        selected = {n: r for n, r in targets.items() if 'report_inputs' in r}
+        report_remote = MemoryRemote()
+        plan = cache.make_plan(self.source, self.pin, selected, None, report_remote, cache.DEFAULT_CAPACITY,
+                               2, mathlib_version=self.version, kind='report', compiler_index=compiler_a)
+        self.remote.published = self.remote.latest
+        def produce(root, names, inputs, *, prebuilt):
+            for name in names:
+                ShardCompilerTransport.prepare_report(SimpleNamespace(root=root, build=root / PROJECT_BUILD,
+                                                                     modules=modules), name)
+        with patch.object(facets, 'materialize', side_effect=produce):
+            cache.work(self.root, plan, 0, report_remote, self.root / 'worker-A', compiler_remote=self.remote)
+        reports_a = cache.finish(plan, report_remote)
+        report_remote.published = report_remote.latest
+        report_remote.latest = lambda: reports_a
+
+        (self.root / 'D5/A.lean').write_text('def valueA := 67')
+        self.source = 'b' * 40
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        second = self.plan(compiler_a)
+        self.workers(second)
+        compiler_b = cache.finish(second, self.remote)
+        with patch.object(lean_module_remote, 'Remote', return_value=report_remote):
+            rolling = self.root / 'rolling'
+            result = cache.restore_published(self.root, compiler_b, None, self.remote, rolling)
+            self.assertEqual((result['compiler_restored'], result['reports_requested'], result['reports_restored']),
+                             (3, 2, 1))
+            self.assertTrue((rolling / 'lean-inspector/modules/D5.B.zip').is_file())
+            self.assertFalse((rolling / 'lean-inspector/modules/D5.A.zip').exists())
+            exact = cache.restore_published(self.root, compiler_b, None, self.remote, self.root / 'exact', exact=True)
+            self.assertEqual((exact['compiler_restored'], exact['reports_restored']), (3, 0))
+            bad = {**reports_a, 'compiler_version': compiler_b['version']}
+            report_remote.latest = lambda: bad
+            with self.assertRaisesRegex(ValueError, 'report publication differs'):
+                cache.restore_published(self.root, compiler_b, None, self.remote, self.root / 'mispaired')
+
     def test_report_cli_reads_the_explicit_report_and_paired_compiler_tags(self):
         import lean_module_remote
         compiler_remote, report_remote = MemoryRemote(), MemoryRemote()
@@ -306,7 +355,7 @@ class ModuleReleases(unittest.TestCase):
              patch.object(cache, 'restore_published', return_value={'requested': 1, 'restored': 1}) as restore:
             self.assertEqual(cache.run(), 0)
             restore.assert_called_once_with(self.root.resolve(), compiler, ['D5.A'], compiler_remote,
-                                            self.root.resolve() / PROJECT_BUILD, 'report', report_remote=report_remote,
+                                            self.root.resolve() / PROJECT_BUILD, 'report', exact=True, report_remote=report_remote,
                                             report_index=reports)
             restore.return_value = {'requested': 1, 'restored': 0}
             self.assertEqual(cache.run(), 1)
