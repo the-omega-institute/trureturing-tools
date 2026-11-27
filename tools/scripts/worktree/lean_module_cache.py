@@ -951,7 +951,8 @@ def run():
             raise ValueError('publisher checkout differs from plan')
         write(args.output, finish(plan, Remote(root, kind=plan['kind']), stage_only=args.stage_only))
     elif args.command == 'promote':
-        Remote(root, kind=args.kind).promote(args.version)
+        status = Remote(root, kind=args.kind).promote(args.version)
+        print(json.dumps({'version': args.version, 'status': status}))
     else:
         if args.staged and not (args.kind and args.version):
             parser.error('--staged requires --kind and --version')

@@ -159,6 +159,33 @@ class VersionedShards(unittest.TestCase):
         self.assertEqual(self.remote.current(), second['source'])
         self.assertEqual(self.remote.published(old['version']), old)
 
+    def test_late_promotion_of_an_unpublished_ancestor_is_superseded(self):
+        ancestor = self.plan('a' * 40)
+        old = dict(ancestor, shards={'Small': self.save(ancestor, b'old')})
+        self.remote.stage_index(old)
+        with patch.object(self.remote, 'present', side_effect=InterruptedError('metadata')):
+            with self.assertRaises(InterruptedError):
+                self.remote.promote(old['version'])
+        newer = self.plan('b' * 40, fingerprint='e')
+        current = dict(newer, shards={'Small': self.save(newer, b'new')})
+        self.remote.publish(current)
+        api = self.remote.api
+        def compare(path, *args, **fields):
+            if path.startswith('compare/'):
+                return {'status': 'behind', 'merge_base_commit': {'sha': old['source']}}
+            return api(path, *args, **fields)
+        with patch.object(self.remote, 'api', side_effect=compare):
+            self.assertEqual(self.remote.promote(old['version']), 'superseded')
+        self.assertIsNone(self.remote.published(old['version']))
+        self.assertEqual(self.remote.latest(), current)
+        def divergent(path, *args, **fields):
+            if path.startswith('compare/'):
+                return {'status': 'diverged', 'merge_base_commit': {'sha': 'f' * 40}}
+            return api(path, *args, **fields)
+        with patch.object(self.remote, 'api', side_effect=divergent), self.assertRaisesRegex(ValueError, 'divergent'):
+            self.remote.promote(old['version'])
+        self.assertEqual(self.remote.latest(), current)
+
     def test_independent_report_release_and_promotion(self):
         report = transport.Remote(self.root, kind='report')
         report.http = self.service

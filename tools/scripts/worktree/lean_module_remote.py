@@ -545,18 +545,21 @@ class Remote:
     def promote(self, version):
         publisher(self.kind)
         if self.published(version) is not None:
-            return
+            return 'published'
         index = self.staged_index(version)
         if index is None:
             raise ValueError('complete staged module index unavailable: ' + version)
-        if self.confirmed(index['shards']).keys() != index['shards'].keys():
-            raise ValueError('staged module index references an unavailable shard')
         source = index['source']
         current = self.current()
-        if current != source and current:
+        if current and current != source:
             comparison = self.api(f'compare/{current}...{source}?per_page=1')
-            if comparison['merge_base_commit']['sha'] != current:
-                raise ValueError('stale module cache publisher')
+            ancestor = comparison['merge_base_commit']['sha']
+            if ancestor == source and comparison.get('status') == 'behind':
+                return 'superseded'
+            if ancestor != current:
+                raise ValueError('divergent module publication cannot advance the marker')
+        if self.confirmed(index['shards']).keys() != index['shards'].keys():
+            raise ValueError('staged module index references an unavailable shard')
         if current and current != source:
             previous = self.latest(self.version(current))
             if previous.get('kind') or index.get('combined_report_version') == previous['version']:
@@ -569,3 +572,4 @@ class Remote:
             self.api('git/refs', 'POST', ref='refs/' + self.marker, sha=source)
         elif current != source:
             self.api('git/refs/' + self.marker, 'PATCH', sha=source, force=False)
+        return 'published'
