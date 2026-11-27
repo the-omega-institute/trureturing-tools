@@ -19,7 +19,7 @@ import lean_artifact_inventory as inventory
 import lean_compile_layers as compiler
 from lean_cache import publication_mathlib, seed_partitions
 from lean_generation_plan import digest, file_digest, module_config, write
-from lean_module_shards import DEFAULT_CAPACITY, lookup_shard, pack_shard, plan_shards, restore_shard
+from lean_module_shards import DEFAULT_CAPACITY, NAME, lookup_shard, pack_shard, plan_shards, restore_shard
 
 
 SCHEMA = 'lean-module-shards-v1'
@@ -346,11 +346,15 @@ def split_cold_reports(plan, existing, base, remote):
     # A child may itself have a measured byte split from an interrupted attempt.
     children = {child: plan['shards'][child] for layout in splits.values() for child in layout}
     plan = expanded(plan, remote.splits(dict(plan, shards=children)))
+    if base:
+        candidates = {n: r for n, r in matching(plan, base['shards']).items() if n not in existing}
+        existing.update(remote.confirmed(candidates))
     recover_partials(plan, existing, remote)
     return plan
 
 
-def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version, legacy=None):
+def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version, legacy=None,
+              prepare_release=False):
     if workers < 1 or workers > 256:
         raise ValueError('worker count must be within the Actions matrix limit')
     previous = base['shards'] if base else {}
@@ -363,8 +367,19 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
             if name in sizes:
                 sizes[name] = row.get('module_sizes', {}).get(name, average)
     boundaries = {n: r['members'] for n, r in previous.items()}
-    if base and base['source'] == source and targets.keys() == base['targets'].keys():
+    version = VERSION_PREFIX + source
+    finished = base is not None and base['source'] == source and targets.keys() == base['targets'].keys()
+    checkpoint = None if finished else remote.publication_layout(version)
+    if finished:
         layout = boundaries
+    elif checkpoint is not None:
+        layout = checkpoint['groups']
+        if (checkpoint['version'] != version or checkpoint['mathlib_version'] != mathlib_version
+                or checkpoint['fingerprint'] != shard_fingerprint(mathlib, targets, targets)
+                or any(not NAME.fullmatch(name) or not isinstance(members, list) or not members
+                       for name, members in layout.items())
+                or sorted(n for members in layout.values() for n in members) != sorted(targets)):
+            raise ValueError('module publication layout differs from checkout')
     else:
         layout = plan_shards(sizes, capacity, previous=boundaries)
     planned = {}
@@ -374,15 +389,24 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
         for n in members:
             targets[n]['shard'] = name
     plan = {'schema': SCHEMA, 'source': source, 'mathlib': mathlib, 'targets': targets,
-            'shards': planned, 'mathlib_version': mathlib_version, 'version': VERSION_PREFIX + source, 'capacity': capacity}
+            'shards': planned, 'mathlib_version': mathlib_version, 'version': version, 'capacity': capacity}
     plan['base_version'] = base['version'] if base else None
-    plan = expanded(plan, remote.splits(plan)) if planned.keys() - matching(plan, previous).keys() else plan
+    if checkpoint is not None or planned.keys() - matching(plan, previous).keys():
+        plan = expanded(plan, remote.splits(plan))
     existing = remote.confirmed(matching(plan, previous))
     recover_partials(plan, existing, remote)
-    plan = split_cold_reports(plan, existing, base, remote)
+    if checkpoint is None and not finished:
+        plan = split_cold_reports(plan, existing, base, remote)
     planned = plan['shards']
     plan['inherited'] = existing
     missing = sorted(planned.keys() - existing.keys(), key=lambda s: (-sum(sizes[n] for n in planned[s]['members']), s))
+    if prepare_release and missing and checkpoint is None and not finished:
+        # Workers address immutable assets by group name. Keep the first coordinates across base advances.
+        remote.save_publication_layout(version, {
+            'version': version, 'mathlib_version': mathlib_version,
+            'fingerprint': shard_fingerprint(mathlib, targets, targets),
+            'groups': {name: row['members'] for name, row in planned.items()},
+        })
     lanes = [[] for _ in range(min(len(missing), workers))]
     loads = [0] * len(lanes)
     for name in missing:
@@ -688,10 +712,9 @@ def run():
                 print(f'Compiler checkpoints unavailable; continuing with Lake: {error}', file=sys.stderr)
         mathlib, mathlib_version = publication_mathlib(root)
         result = make_plan(source, mathlib, targets, base, remote, args.capacity, args.workers,
-                           mathlib_version=mathlib_version, legacy=legacy)
+                           mathlib_version=mathlib_version, legacy=legacy, prepare_release=args.prepare_release)
         if args.prepare_release and result['lanes']:
             publisher()
-            remote.catalog(result['version'], refresh=True, create=True)
         write(args.output, result)
         if path := os.environ.get('GITHUB_OUTPUT'):
             with open(path, 'a') as output:

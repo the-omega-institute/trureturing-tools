@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
+import lean_module_cache as cache
 import lean_module_remote as transport
 
 
@@ -75,7 +76,7 @@ class Service:
         payload = path.read_bytes()
         name = params['name'][0]
         if any(a['name'] == name for a in release['assets']):
-            raise AssertionError('duplicate upload')
+            raise transport.host.GitHubCommandError(1, ['gh'], stderr='HTTP 422: already_exists')
         assert 'label' not in params
         asset = {'name': name, 'label': None, 'digest': 'sha256:' + hashlib.sha256(payload).hexdigest(),
                  'id': self.uploads + 1, 'size': len(payload), 'state': 'uploaded'}
@@ -137,6 +138,13 @@ class VersionedShards(unittest.TestCase):
             self.remote.inventory.clear()
         return saved
 
+    def marker(self, version, filename, contents):
+        path = self.root / filename
+        data = transport.json_body(contents)
+        path.write_bytes(data)
+        self.remote.stage(version, filename, path, hashlib.sha256(data).hexdigest())
+        return next(a for a in self.service.releases[version]['assets'] if a['name'] == filename)
+
     def test_two_versions_stable_key_fallback_and_interrupted_sibling(self):
         plan = self.plan('a'*40)
         self.assertIsNone(self.remote.latest())
@@ -178,6 +186,124 @@ class VersionedShards(unittest.TestCase):
             self.remote.publish(index)
             self.assertEqual(self.remote.latest(), index)
             self.assertNotIn((shard['version'], 'index.json'), self.service.files)
+
+    def test_measured_marker_follows_its_owner_when_cold_boundaries_move(self):
+        members = [f'D5.A.X{i:03}' for i in range(250)]
+        inputs = {n: {'key': n, 'deps': [], 'report_inputs': []} for n in [*members, 'D5.B']}
+        fp = cache.shard_fingerprint('abcd', inputs, members)
+        layout = {n: [n] for n in members}
+        legacy = self.plan('a' * 40)['version']
+        self.marker(legacy, 'split-' + fp + '.json', {'group': 'D5', 'fingerprint': fp, 'layout': layout})
+        def plan():
+            return cache.make_plan('b' * 40, 'abcd', inputs, None, self.remote,
+                                   cache.DEFAULT_CAPACITY, 2, mathlib_version='v1')
+        initial = plan()
+        self.assertEqual(initial['shards']['D5.A']['members'], members)
+        self.remote.save_split(initial, 'D5.A', layout)
+        self.assertEqual(set(plan()['shards']), {'D5', *members})
+
+        qualified = transport.split_filename('D5.A', fp)
+        for field, value in [('group', 'D5'), ('fingerprint', '0' * 64), ('layout', {'D5.A': members[:-1]})]:
+            with self.subTest(field=field):
+                bad = {'group': 'D5.A', 'fingerprint': fp, 'layout': layout, field: value}
+                version = self.plan('c' * 40)['version']
+                self.service.releases.pop(version, None)
+                self.remote.inventory.clear()
+                self.marker(version, qualified, bad)
+                with self.assertRaisesRegex(ValueError, 'split (members|group) differ'):
+                    self.remote.splits(dict(initial, version=version))
+
+    def test_cold_child_inherits_only_a_confirmed_published_base_shard(self):
+        self.remote.tags = lambda current, base: [current]
+        def plan(source, inputs, base=None):
+            return cache.make_plan(source * 40, 'abcd', inputs, base, self.remote,
+                                   cache.DEFAULT_CAPACITY, 2, mathlib_version='v1')
+        stable = {'D5.Stable': {'key': 'stable', 'deps': [], 'report_inputs': []}}
+        first = plan('a', stable)
+        self.save(first, b'stable')
+        base = cache.finish(first, self.remote)
+        extra = {f'D5.New.X{i:03}': {'key': str(i), 'deps': [], 'report_inputs': []} for i in range(251)}
+        inputs = stable | extra
+        next_plan = plan('b', inputs, base)
+        self.assertEqual(next_plan['inherited'], base['shards'])
+        self.assertNotIn('D5', [n for lane in next_plan['lanes'] for n in lane])
+        self.service.releases[base['version']]['assets'].remove(next(
+            row for row in self.service.releases[base['version']]['assets'] if row['name'] == base['shards']['D5']['asset']))
+        self.remote.inventory.clear()
+        missing = plan('b', inputs, base)
+        self.assertEqual(missing['inherited'], {})
+        self.assertIn('D5', [n for lane in missing['lanes'] for n in lane])
+
+    def test_same_source_resumes_immutable_groups_after_the_base_advances(self):
+        self.remote.tags = lambda current, base: [current]
+        source = 'c' * 40
+        inputs = {n: {'key': n, 'deps': [], 'report_inputs': []} for n in
+                  [*(f'D5.A.{branch}.X{i:03}' for branch in ('Left', 'Right') for i in range(125)), 'D5.B']}
+        def plan(revision, inputs, base, *, capacity=cache.DEFAULT_CAPACITY, prepare=False):
+            return cache.make_plan(revision, 'abcd', inputs, base, self.remote, capacity, 2,
+                                   mathlib_version='v1', prepare_release=prepare)
+        def save(plan, name):
+            return self.save(dict(plan, shards={name: plan['shards'][name]}), name.encode())
+        # The original published base covers only a different report.
+        old = plan('a' * 40, {'Old': {'key': 'old', 'deps': []}}, None)
+        save(old, 'Old')
+        base = cache.finish(old, self.remote)
+        dry = plan(source, inputs, base)
+        self.assertNotIn(dry['version'], self.service.releases)
+        first = plan(source, inputs, base, prepare=True)
+        self.assertEqual(first, dry)
+        self.assertEqual(set(first['shards']), {'D5', 'D5.A'})
+        self.assertEqual(first['shards']['D5']['members'], ['D5.B'])
+        completed = save(first, 'D5')
+        # The next published ancestor covers 250 reports with different shard boundaries.
+        warm = {n: row for n, row in inputs.items() if n != 'D5.B'}
+        newer = plan('b' * 40, warm, base, capacity=125 * cache.DEFAULT_MODULE_BYTES)
+        self.assertNotEqual(newer['shards'].keys(), first['shards'].keys())
+        for name in newer['shards']:
+            save(newer, name)
+        advanced = cache.finish(newer, self.remote)
+        retry = plan(source, inputs, advanced, prepare=True)
+        self.assertEqual(retry['shards'], first['shards'])
+        self.assertEqual(retry['inherited'], {'D5': completed})
+        self.assertEqual(retry['lanes'], [['D5.A']])
+        self.assertEqual(retry['base_version'], advanced['version'])
+        with tempfile.TemporaryDirectory() as dest, patch.object(cache, 'restore_shard',
+                side_effect=lambda archive, row, names, *args, **kw: set(names)):
+            recovered = cache.restore_matching(self.root, {}, inputs, self.remote.latest(retry['base_version']),
+                                               set(warm), self.remote, Path(dest))
+        self.assertEqual(recovered, set(warm))
+        save(retry, 'D5.A')
+        index = cache.finish(retry, self.remote)
+        self.assertEqual(cache.finish(first, self.remote), index)
+        self.assertEqual(self.remote.latest(), index)
+        self.assertEqual(index['shards']['D5'], completed)
+
+    def test_identical_planners_share_the_first_layout_and_workers_can_split_it(self):
+        source = 'a' * 40
+        inputs = {n: {'key': n, 'deps': []} for n in ('D5.A', 'D5.B')}
+        start = Barrier(2)
+        def prepare(_):
+            remote = transport.Remote(self.root)
+            remote.http = self.service
+            remote.tags = lambda current, base: [current]
+            save = remote.save_publication_layout
+            def together(version, coordinates):
+                start.wait(timeout=5)
+                save(version, coordinates)
+            remote.save_publication_layout = together
+            return cache.make_plan(source, 'abcd', inputs, None, remote, cache.DEFAULT_CAPACITY,
+                                   2, mathlib_version='v1', prepare_release=True)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = pool.map(prepare, range(2))
+        self.assertEqual(first, second)
+        self.assertEqual(self.service.uploads, 1)
+        coordinates = self.service.files[first['version'], transport.LAYOUT]
+        self.remote.save_split(first, 'D5', {n: [n] for n in inputs})
+        retry = cache.make_plan(source, 'abcd', inputs, None, self.remote, cache.DEFAULT_CAPACITY,
+                                2, mathlib_version='v1', prepare_release=True)
+        self.assertEqual(set(retry['shards']), set(inputs))
+        self.assertEqual(self.service.files[first['version'], transport.LAYOUT], coordinates)
+        self.assertEqual(self.service.uploads, 2)
 
     def test_planner_owns_primary_and_parallel_workers_own_sparse_overflow(self):
         version = transport.PREFIX + 'a' * 40
@@ -255,8 +381,9 @@ class VersionedShards(unittest.TestCase):
         plan['targets'] = {n: {'key': n, 'shard': n} for n in members}
         fingerprint = shard_fingerprint(plan['mathlib'], plan['targets'], members)
         plan['shards']['D5'].update(fingerprint=fingerprint, members=members)
-        self.remote.save_split(plan, 'D5', {n: [n] for n in members})
-        asset = self.service.releases[plan['version']]['assets'][0]
+        asset = self.marker(plan['version'], 'split-' + fingerprint + '.json', {
+            'group': 'D5', 'fingerprint': fingerprint, 'layout': {n: [n] for n in members},
+        })
         asset['label'] = fingerprint
         rows = {}
         for n in members:

@@ -25,6 +25,7 @@ class MemoryRemote:
         self.rows = {}
         self.assets = {}
         self.layouts = {}
+        self.publications = {}
         self.saves = []
         self.fail = None
 
@@ -47,12 +48,18 @@ class MemoryRemote:
         self.saves.append(name)
         return row
 
+    def publication_layout(self, version):
+        return self.publications.get(version)
+
+    def save_publication_layout(self, version, layout):
+        assert self.publications.setdefault(version, layout) == layout
+
     def splits(self, plan):
-        return {n: self.layouts[r['fingerprint']] for n, r in plan['shards'].items() if r['fingerprint'] in self.layouts}
+        return {n: self.layouts[n, r['fingerprint']] for n, r in plan['shards'].items() if (n, r['fingerprint']) in self.layouts}
 
     def save_split(self, plan, name, layout):
         fingerprint = plan['shards'][name]['fingerprint']
-        assert self.layouts.setdefault(fingerprint, layout) == layout
+        assert self.layouts.setdefault((name, fingerprint), layout) == layout
 
     def download(self, row, output):
         output.write_bytes(self.assets[row['version'], row['asset']])
