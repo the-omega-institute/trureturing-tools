@@ -370,10 +370,8 @@ class ModuleReleases(unittest.TestCase):
         self.assertEqual(self.compiled, [['D5.C']])
         self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(owner))
 
-    def test_child_visible_while_parent_exists_only_at_its_overflow_address(self):
+    def test_evicted_parent_with_visible_child_rebuilds_from_checkout(self):
         import lean_module_dag as dag
-        import lean_module_remote as transport
-        from test_lean_module_remote import Service
         (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
         (self.root / 'D5/C.lean').write_text('import D5.B\ndef valueC := valueB+1\n')
         with patch.object(dag, 'UNIT_LIMIT', 1):
@@ -384,34 +382,40 @@ class ModuleReleases(unittest.TestCase):
         self.remote.fail = c
         with self.assertRaises(InterruptedError):
             cache.work(self.root, plan, 0, self.remote, self.root / 'first')
-        row = self.remote.rows[a]
-        service = Service()
-        reader = transport.Remote(self.root)
-        reader.http = service
-        reader.actions = lambda *args: False
-        primary = f'{plan["version"]}-part-{row["part"]}'
-        with patch.object(transport, 'publisher', return_value={}):
-            reader.catalog(primary, create=True)
-            service.releases[primary]['assets'].append(dict(name=row['asset'], state='starter', size=0))
-            reader.inventory.clear()
-            archive = self.root / 'parent.gz'
-            archive.write_bytes(self.remote.assets[row['version'], row['asset']])
-            saved = reader.save(dict(plan, shards=units), a, archive, row)
-        self.assertEqual(saved['version'], f'{plan["version"]}-part-{row["part"]+1}')
+        del self.remote.rows[a]
         self.remote.queues.clear()
         self.remote.fail = None
         self.compiled.clear()
         shutil.rmtree(self.root / PROJECT_BUILD)
-        download = self.remote.download
-        def restore(row, output):
-            (reader.download if row['version'] == saved['version'] else download)(row, output)
-        with patch.object(self.remote, 'compiler_progress', return_value={b: self.remote.rows[b]}), \
-             patch.object(self.remote, 'retry_checkpoint', wraps=reader.retry_checkpoint) as probe, \
-             patch.object(self.remote, 'download', side_effect=restore):
+        result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
+        self.assertEqual(result['compiled_modules'], 2)
+        self.assertEqual(self.compiled, [['D5.A'], ['D5.C']])
+        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(owner))
+
+    def test_warm_seed_evicted_after_planning_rebuilds_before_publication(self):
+        from lean_module_remote import CompilerCacheMiss
+        first = self.dag_plan()
+        self.remote.fail = 'D5'
+        with self.assertRaises(InterruptedError):
+            self.workers(first)
+        self.remote.fail = None
+        retry = self.dag_plan()
+        self.assertFalse(retry['compiler_dag']['units'])
+        self.compiled.clear()
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        with patch.object(self.remote, 'download', side_effect=CompilerCacheMiss('evicted')):
+            result = cache.work(self.root, retry, 0, self.remote, self.root / 'retry')
+        self.assertEqual(result['compiled_modules'], 3)
+        self.assertEqual(set(cache.finish(retry, self.remote)['targets']), set(retry['targets']))
+
+    def test_evicted_claimed_queue_cannot_stall_publication(self):
+        import lean_module_dag as dag
+        plan = self.dag_plan()
+        with patch.object(dag, 'MAX_IDLE_SECONDS', 0), \
+             patch.object(self.remote, 'claim_compiler_queue', return_value=False):
             result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
-        self.assertEqual([call.args[1] for call in probe.call_args_list], [a])
-        self.assertEqual(result['compiled_modules'], 1)
-        self.assertEqual(self.compiled, [['D5.C']])
+        self.assertEqual(result['compiled_modules'], 3)
+        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(plan['targets']))
 
     def test_retry_recovers_uploads_omitted_by_both_inventories(self):
         plan = self.dag_plan()

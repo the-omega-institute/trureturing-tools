@@ -2,6 +2,7 @@
 
 import base64
 from collections import defaultdict
+from dataclasses import replace
 from graphlib import TopologicalSorter
 import math
 import os
@@ -21,6 +22,7 @@ from lean_release_index import valid_digest
 UNIT_LIMIT = 32
 BASIS = {'OmegaInit', 'OmegaMathlib'}
 QUEUE_HANDOFF_COST = 5
+MAX_IDLE_SECONDS = 600
 
 
 def unit_key(mathlib, inputs):
@@ -194,7 +196,6 @@ def worker_modules(root, dag):
 
 def prepare(plan, base, remote, workers, prepare_release, modules, root):
     from lean_module_cache import BACKEND_READER, partial_index
-    from lean_module_remote import UNIT_PART_START
     targets = plan['targets']
     checked_base = dict(base, shards=remote.confirmed(base['shards'])) if base else None
     recovered = remote.compiler_seeds(plan)
@@ -241,9 +242,6 @@ def prepare(plan, base, remote, workers, prepare_release, modules, root):
     # before Lake can consume the intermediary's restored artifact.
     ancestors = {}
     successors = defaultdict(list)
-    first_part = UNIT_PART_START + int(digest(sorted(units))[:9], 16) * 100000
-    for i, key in enumerate(sorted(units)):
-        units[key]['part'] = first_part + i // 600 * 8
     # Groups were emitted in topological order. Compress transitive edges while
     # preserving cold dependencies reached through any number of warm modules.
     for members in groups:
@@ -279,7 +277,8 @@ def prepare(plan, base, remote, workers, prepare_release, modules, root):
 
 def compile_units(root, plan, lane, remote, modules, output):
     import lean_module_cache as cache
-    from lean_module_shards import pack_shard, restore_shard
+    from lean_module_remote import CompilerCacheMiss
+    from lean_module_shards import checked_shard_files, pack_shard, restore_shard
     dag = plan['compiler_dag']
     units = dag['units']
     run = os.environ.get('GITHUB_RUN_ID')
@@ -298,6 +297,8 @@ def compile_units(root, plan, lane, remote, modules, output):
         seed_members[address].add(n)
 
     def install(names):
+        nonlocal common_prepared
+        rebuild = set()
         needed = defaultdict(set)
         for n in names - installed:
             needed[owners[n]].add(n)
@@ -305,13 +306,20 @@ def compile_units(root, plan, lane, remote, modules, output):
             path = Path(stage) / 'compiler.tar.gz'
             for key, wanted in needed.items():
                 row = rows[key]
+                if row is None:
+                    rebuild.update(wanted)
+                    continue
                 if 'public_digest' in row:
                     row = rows[key] = remote.resolve_checkpoint(row)
                 # A warm physical shard may serve many small DAG units. Install its
                 # other matching members during this download while space permits.
                 if cache.shutil.disk_usage(root).free > 6 * 1024**3:
                     wanted.update(seed_members[key] - installed)
-                remote.download(row, path)
+                try:
+                    remote.download(row, path)
+                except CompilerCacheMiss:
+                    rebuild.update(wanted)
+                    continue
                 if row['asset'].startswith('compiler-unit-'):
                     with path.open('rb') as stream:
                         header = stream.read(75)
@@ -322,6 +330,14 @@ def compile_units(root, plan, lane, remote, modules, output):
                     raise ValueError('compiler dependency could not be installed: ' + min(wanted - restored))
                 cache.materialize_shared(destination, modules, restored)
                 installed.update(restored)
+        if rebuild:
+            print(f'Rebuilding {len(rebuild)} unavailable compiler checkpoint members from source', file=sys.stderr)
+            cache.compiler.compile_roots(root, modules, sorted(rebuild))
+            common_prepared = cache.compile_omega_outputs(root, modules, rebuild, common_prepared)
+            selected = {n: replace(modules[n], report=False) for n in rebuild}
+            checked_shard_files(root, selected, 'compiler', verify_compilers=True)
+            installed.update(rebuild)
+        return len(rebuild)
 
     pending = set(units)
     compiled = 0
@@ -330,12 +346,14 @@ def compile_units(root, plan, lane, remote, modules, output):
 
     persisted = set()
     awaiting_metadata = set()
-    next_probe = {}
+    last_progress = time.monotonic()
 
     def observed(key, row):
+        nonlocal last_progress
+        last_progress = time.monotonic()
         rows[key] = row
-        owners.update(dict.fromkeys(row['members'], key))
-        seed_members[key].update(row['members'])
+        owners.update(dict.fromkeys(units[key]['members'], key))
+        seed_members[key].update(units[key]['members'])
         persisted.add(key)
         ready.discard(key)
         if remaining[key]:
@@ -348,8 +366,7 @@ def compile_units(root, plan, lane, remote, modules, output):
                     awaiting_metadata.add(dep)
                     ready.discard(dep)
                     parents.extend(units[dep]['deps'])
-        # Part catalogs are independent snapshots. Hold an observed child until
-        # all of its prerequisites can also be located by this worker.
+        # A child becomes schedulable after each parent has an archive or a local rebuild route.
         settled = [] if remaining[key] else [key]
         while settled:
             finished = settled.pop()
@@ -384,21 +401,23 @@ def compile_units(root, plan, lane, remote, modules, output):
         key = next((candidate for candidate in ordered if remote.claim_compiler_queue(
             plan, units[candidate]['queue'], lane, candidate)), None)
         if key is None:
-            # A visible child proves the producer finished its predecessors. Their
-            # assets can be in overflow while both listings omit the originals.
-            now = time.monotonic()
-            roots = (k for k in awaiting_metadata - persisted if not remaining[k])
-            missing_rows = sorted(roots, key=lambda k: (next_probe.get(k, 0), k))
-            recovered = False
-            for parent in missing_rows[:4]:
-                if next_probe.get(parent, 0) > now:
-                    break
-                next_probe[parent] = now + 300
-                if row := remote.retry_checkpoint(task_plan, parent):
-                    observed(parent, row)
-                    recovered = True
-            if recovered:
+            # A visible child proves its ancestors finished. If the parent archive
+            # was evicted, its verified sources can supply the consumer directly.
+            missing_parents = {k for k in awaiting_metadata - persisted if not remaining[k]}
+            if missing_parents:
+                for parent in missing_parents:
+                    observed(parent, remote.retry_checkpoint(task_plan, parent))
                 continue
+            if time.monotonic() - last_progress >= MAX_IDLE_SECONDS:
+                # Every outstanding root is claimed elsewhere. Cache eviction can
+                # erase the last evidence of a completed queue. Finish this lane's
+                # physical shards locally without stealing the producer's claims.
+                print('Compiler checkpoints unavailable for outstanding queues; building assigned shards locally',
+                      file=sys.stderr)
+                for missing_key in pending - persisted:
+                    rows[missing_key] = None
+                    owners.update(dict.fromkeys(units[missing_key]['members'], missing_key))
+                break
             remote.wait_compiler_progress(plan)
             refresh = True
             continue
@@ -408,7 +427,7 @@ def compile_units(root, plan, lane, remote, modules, output):
                 observed(key, saved)
                 continue
         members = set(units[key]['members'])
-        install(decode_scope(units[key]['restore'], dag['names']))
+        compiled += install(decode_scope(units[key]['restore'], dag['names']))
         missing = members
         if legacy:
             candidates = {n for n in members if not modules[n].extra_builds}

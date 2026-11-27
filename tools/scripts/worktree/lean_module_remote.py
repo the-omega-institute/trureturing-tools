@@ -2,7 +2,6 @@
 
 from collections import Counter
 from functools import cache
-import gzip
 import hashlib
 from itertools import chain
 import json
@@ -31,7 +30,13 @@ PROMOTED = 'published.json'
 TAG = re.compile(r'lean-modules-([0-9a-f]{40})(-report)?(?:-part-([2-9]|[1-9][0-9]+))?')
 CAPACITY = 900
 UNIT_PART_START = 10000000
-PUBLIC_PROGRESS_SECONDS = 15
+ACTIONS_CACHE = 'actions-cache'
+UNIT_ASSET = re.compile(r'compiler-unit-([0-9a-f]{64})\.tar\.gz')
+UNIT_CATALOG = re.compile(r'compiler-units-([0-9a-f]{64})\.json')
+
+
+class CompilerCacheMiss(FileNotFoundError):
+    """The exact compiler cache entry was evicted after discovery."""
 
 
 def json_body(value):
@@ -112,9 +117,7 @@ class Remote:
         self.http = GitHubHTTP(self.deadline)
         self.next_job_check = 0
         self.progress_interval = 60
-        self.public_pages = {}
-        self.next_inventory_check = 0
-        self.public_resume = 0
+        self.unit_entries = {}
         self.next_progress = 0
         self.queue_claims = {}
         self.inventory = {}
@@ -242,6 +245,41 @@ class Remote:
             print(f'Actions cache {operation} unavailable for {key} (exit {result.returncode})', file=sys.stderr)
         return result.returncode == 0
 
+    def compiler_cache(self, operation, kind, *args):
+        cmd = ['node', self.root / '.github/actions/lean-cache-shards/run.mjs',
+               'compiler-cache-' + operation, kind, *args]
+        # Inventory is metadata. Archives can take longer on a throttled runner.
+        budget = 120 if operation == 'list' else min(1800, 120 + int(args[2]) / 524288)
+        result = subprocess.run(cmd, cwd=self.root, timeout=min(budget, host.remaining(self.deadline)))
+        if result.returncode == 4 and operation == 'get':
+            return False
+        result.check_returncode()
+        return True
+
+    def cache_entries(self, kind):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'entries.json'
+            self.compiler_cache('list', kind, path.resolve())
+            entries = read(path)
+        if not isinstance(entries, list):
+            raise ValueError('invalid compiler cache inventory')
+        rows = {}
+        for entry in entries:
+            key, sha, size = entry['id'], entry['sha256'], entry['bytes']
+            if not valid_digest(key) or not valid_digest(sha) or type(size) is not int or size <= 0:
+                raise ValueError('invalid compiler cache address')
+            if kind == 'catalog' and (key != sha or size > MAX_INDEX):
+                raise ValueError('invalid compiler cache catalog')
+            # Multiple verified builds may have different archive bytes for the same inputs.
+            rows.setdefault(key, dict(version=ACTIONS_CACHE, sha256=sha, bytes=size))
+        return rows
+
+    def get_compiler_cache(self, kind, key, row, path):
+        if not self.compiler_cache('get', kind, key, row['sha256'], str(row['bytes']), path.resolve()):
+            raise CompilerCacheMiss(key)
+        if path.stat().st_size != row['bytes'] or host.archive_sha(path, self.deadline) != row['sha256']:
+            raise ValueError('compiler cache payload differs from its address: ' + key)
+
     def fetch(self, tag, asset, path):
         digest = (asset.get('digest') or '').removeprefix('sha256:')
         if asset.get('state') != 'uploaded' or not valid_digest(digest):
@@ -264,6 +302,11 @@ class Remote:
 
     def download(self, row, path):
         digest = row['sha256']
+        if row['version'] == ACTIONS_CACHE:
+            if not UNIT_ASSET.fullmatch(row['asset']) or row['asset'] != f'compiler-unit-{row["fingerprint"]}.tar.gz':
+                raise ValueError('invalid compiler cache unit identity')
+            self.get_compiler_cache('unit', row['fingerprint'], row, path)
+            return
         if (self.actions('get', row['key'], digest, path) and path.is_file()
                 and path.stat().st_size == row['bytes'] and host.archive_sha(path, self.deadline) == digest):
             return
@@ -274,14 +317,14 @@ class Remote:
             raise ValueError('versioned shard metadata differs from index: ' + row['asset'])
         self.fetch(row['version'], asset, path)
 
-    def stage(self, version, name, path, digest, *, unit_part=None):
+    def stage(self, version, name, path, digest):
+        if UNIT_ASSET.fullmatch(name) or UNIT_CATALOG.fullmatch(name):
+            raise ValueError('temporary compiler units belong in Actions cache')
         publisher(self.kind)
         primary_metadata = name in (INDEX, LAYOUT, PROMOTED, COMPILER_PLAN)
         # The planner owns the shared Release. Each worker alone creates its overflow parts.
         first_overflow = 2 + (self.lane or 0)
         parts = chain((1,), range(first_overflow, first_overflow + 9998 * self.lanes, self.lanes))
-        if unit_part is not None:
-            parts = range(unit_part, unit_part + 8)
         for part in parts:
             tag = version if part == 1 else f'{version}-part-{part}'
             catalog = self.catalog(tag, create=self.lane is None or part != 1)
@@ -414,18 +457,37 @@ class Remote:
         publisher(self.kind)
         if path.stat().st_size != row['bytes'] or host.archive_sha(path, self.deadline) != row['sha256']:
             raise ValueError('local shard differs from its advertised payload')
-        tag, _ = self.stage(plan['version'], row['asset'], path, row['sha256'], unit_part=row.get('part'))
+        if match := UNIT_ASSET.fullmatch(row['asset']):
+            if self.kind != 'compiler' or match[1] != name or name != row['fingerprint']:
+                raise ValueError('invalid compiler unit identity')
+            self.compiler_cache('put', 'unit', name, row['sha256'], str(row['bytes']), path.resolve())
+            saved = dict(row, version=ACTIONS_CACHE)
+            self.unit_entries[name] = dict(version=ACTIONS_CACHE, bytes=row['bytes'], sha256=row['sha256'])
+            return saved
+        tag, _ = self.stage(plan['version'], row['asset'], path, row['sha256'])
         self.actions('put', row['key'], row['sha256'], path)
         return {**row, 'version': tag}
 
     def compiler_seeds(self, plan):
         from lean_module_dag import recovery_index
         catalogs, assets = [], {}
+        for key, row in self.cache_entries('unit').items():
+            asset = dict(digest='sha256:' + row['sha256'], size=row['bytes'], state='uploaded')
+            assets[f'compiler-unit-{key}.tar.gz'] = ACTIONS_CACHE, asset
+        if assets:
+            with tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / 'catalog.json'
+                for key, row in self.cache_entries('catalog').items():
+                    try:
+                        self.get_compiler_cache('catalog', key, row, path)
+                    except CompilerCacheMiss:
+                        continue
+                    catalogs.append(read(path))
         for tag, entries in self.candidates(dict(plan, source_only=False), include_units=True):
             for name, asset in entries.items():
-                if re.fullmatch(r'compiler-unit-[0-9a-f]{64}\.tar\.gz', name) and asset['state'] == 'uploaded':
+                if UNIT_ASSET.fullmatch(name) and asset['state'] == 'uploaded':
                     assets.setdefault(name, (tag, asset))
-                if re.fullmatch(r'compiler-units-[0-9a-f]{64}\.json', name) and asset['state'] == 'uploaded':
+                if UNIT_CATALOG.fullmatch(name) and asset['state'] == 'uploaded':
                     if not 0 < asset['size'] <= MAX_INDEX or name[15:-5] != asset['digest'].removeprefix('sha256:'):
                         raise ValueError('invalid compiler unit catalog')
                     with tempfile.TemporaryDirectory() as temporary:
@@ -435,6 +497,9 @@ class Remote:
         return recovery_index(plan, catalogs, assets)
 
     def save_compiler_catalog(self, version, catalog):
+        if self.kind != 'compiler' or not self.accepts_tag(version):
+            raise ValueError('invalid compiler catalog version')
+        publisher('compiler')
         data = json_body(catalog)
         if len(data) > MAX_INDEX:
             raise ValueError('compiler unit catalog exceeds release metadata limit')
@@ -442,99 +507,24 @@ class Remote:
         with tempfile.TemporaryDirectory() as stage:
             path = Path(stage) / 'catalog.json'
             path.write_bytes(data)
-            self.stage(version, 'compiler-units-' + sha + '.json', path, sha)
-
-    def indexed_compiler_progress(self, plan, pending):
-        result = {}
-        parts = {}
-        for key in pending:
-            row = plan['shards'][key]
-            parts.setdefault(row['part'], []).append(key)
-        for part, keys in parts.items():
-            for offset in range(8):
-                tag = f'{plan["version"]}-part-{part + offset}'
-                catalog = self.catalog(tag, refresh=True)
-                if not catalog:
-                    break
-                retry = []
-                for key in keys:
-                    row = plan['shards'][key]
-                    asset = catalog[1].get(row['asset'])
-                    if asset and asset['state'] == 'starter':
-                        retry.append(key)
-                    if not asset or asset['state'] != 'uploaded':
-                        continue
-                    sha = (asset.get('digest') or '').removeprefix('sha256:')
-                    if not valid_digest(sha) or asset['size'] <= 0:
-                        raise ValueError('invalid completed compiler checkpoint')
-                    result[key] = dict(row, version=tag, bytes=asset['size'], sha256=sha)
-                keys = retry
-                if not keys:
-                    break
-        return result
-
-    def public_compiler_part(self, tag):
-        previous_etag, previous_names = self.public_pages.get(tag, (None, {}))
-        headers = {'Accept-Encoding': 'gzip'}
-        if previous_etag:
-            headers['If-None-Match'] = previous_etag
-        url = f'https://github.com/{host.REPO}/releases/expanded_assets/{tag}'
-        try:
-            with self.http.request(url, headers=headers, accept='text/html', authenticate=False) as response:
-                stream = gzip.GzipFile(fileobj=response) if response.headers.get('Content-Encoding') == 'gzip' else response
-                body = stream.read(8 * 1024**2 + 1)
-                if len(body) > 8 * 1024**2:
-                    raise ValueError('compiler asset listing exceeded byte limit')
-                etag = response.headers.get('ETag')
-        except host.GitHubCommandError as error:
-            if (error.stderr or '').startswith('HTTP 304:'):
-                return previous_names
-            if missing(error):
-                return {}
-            raise
-        prefix = f'/{host.REPO}/releases/download/{tag}/'.encode()
-        names = {}
-        for item in body.split(b'</li>'):
-            link = re.search(rb'href="' + re.escape(prefix) + rb'(compiler-unit-[0-9a-f]{64}\.tar\.gz)"', item)
-            if link:
-                sha = re.search(rb'value="sha256:([0-9a-f]{64})"', item)
-                if not sha:
-                    raise ValueError('compiler download listing has no digest')
-                names[link[1].decode()] = sha[1].decode()
-        self.public_pages[tag] = etag, names
-        return names
+            self.compiler_cache('put', 'catalog', sha, sha, str(len(data)), path.resolve())
 
     def compiler_progress(self, plan, pending):
-        parts = {}
-        for key in pending:
-            row = plan['shards'][key]
-            parts.setdefault(row['part'], {})[row['asset']] = key
-        now = time.monotonic()
-        result = {}
-        if now >= self.public_resume:
-            try:
-                for part, expected in parts.items():
-                    tag = f'{plan["version"]}-part-{part}'
-                    inventory = self.public_compiler_part(tag)
-                    for name in expected.keys() & inventory.keys():
-                        key = expected[name]
-                        result[key] = dict(plan['shards'][key], version=tag, public_digest=inventory[name])
-            except (ValueError, OSError, EOFError, host.GitHubCommandError) as error:
-                print(f'Public compiler progress unavailable, using release metadata: {error}', file=sys.stderr)
-                self.public_resume = now + 300
-        # Public pages use conditional requests without repository API credentials.
-        # A bounded authoritative reconciliation also finds interrupted-upload overflow.
-        if now >= self.next_inventory_check:
-            result.update(self.indexed_compiler_progress(plan, pending - result.keys()))
-            self.next_inventory_check = now + max(60, 9 * len(plan['lanes']) * len(parts))
-        self.progress_interval = PUBLIC_PROGRESS_SECONDS
-        if now < self.public_resume:
-            self.progress_interval = max(1, min(self.public_resume, self.next_inventory_check) - now)
-        self.next_progress = now + self.progress_interval
-        return result
+        if time.monotonic() >= self.next_progress:
+            self.unit_entries = self.cache_entries('unit')
+            # Share the per-repository GitHub API budget across all live runner lanes.
+            pages = 1 + len(self.unit_entries) // 100
+            self.progress_interval = max(15, min(300, len(plan['lanes']) * pages * 2))
+            self.next_progress = time.monotonic() + self.progress_interval
+        return {k: dict(plan['shards'][k], **self.unit_entries[k]) for k in pending & self.unit_entries.keys()}
 
     def retry_checkpoint(self, plan, key):
         row = plan['shards'][key]
+        if key in self.unit_entries:
+            return dict(row, **self.unit_entries[key])
+        if 'part' not in row:
+            return None
+        # Old run plans addressed interrupted uploads by their Release part.
         # A fixed download address can become available before both inventories.
         # An interrupted name can overflow into a deterministic sibling part.
         for offset in range(8):
