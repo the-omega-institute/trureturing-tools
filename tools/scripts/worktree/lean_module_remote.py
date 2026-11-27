@@ -24,7 +24,8 @@ PREFIX = 'lean-modules-'
 MARKER = 'heads/lean-modules-published'
 INDEX = 'index.json'
 LAYOUT = 'publication-layout.json'
-TAG = re.compile(r'lean-modules-([0-9a-f]{40})(?:-part-([2-9]|[1-9][0-9]+))?')
+PROMOTED = 'published.json'
+TAG = re.compile(r'lean-modules-([0-9a-f]{40})(-report)?(?:-part-([2-9]|[1-9][0-9]+))?')
 CAPACITY = 900
 
 
@@ -52,11 +53,12 @@ def release_page(index, checkout_version=None):
         else:
             historical[owner] += 1
         # Historical indexes can address assets by their original mathlib commit.
-        prefix = row['asset'].removesuffix('-' + name + '.tar.gz')
+        prefix = row['asset'].removesuffix('-report').removesuffix('-' + name + '.tar.gz')
         if re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?', prefix):
             version = prefix
 
-    title = 'Lean 编译缓存' + (f' · mathlib {version}' if version else '') + ' · ' + source[:8]
+    product = 'Lean 模块报告' if index.get('kind') == 'report' else 'Lean 编译缓存'
+    title = product + (f' · mathlib {version}' if version else '') + ' · ' + source[:8]
     index_url = f'{repo}/releases/download/{tag}/{INDEX}'
     lines = [f'[下载完整索引（index.json）]({index_url}) · [查看源码（{source[:8]}）]({repo}/tree/{source})', '',
              f'覆盖 **{len(index["targets"]):,}** 个模块，共 **{len(shards):,}** 个分片。'
@@ -73,7 +75,7 @@ def release_page(index, checkout_version=None):
         lines.extend(['', '### 历史分片来源', '', '| Release | 复用分片数 |', '| --- | ---: |'])
         for owner, count in historical.most_common(16):
             parts = TAG.fullmatch(owner)
-            label = parts[1][:8] + (f' / part {parts[2]}' if parts[2] else '')
+            label = parts[1][:8] + (f' / part {parts[3]}' if parts[3] else '')
             lines.append(f'| [{label}]({repo}/releases/tag/{owner}) | {count:,} |')
         if len(historical) > 16:
             lines.extend(['', f'其余 {len(historical) - 16:,} 个来源见[完整索引]({index_url})。'])
@@ -90,9 +92,14 @@ def missing(error):
 
 
 class Remote:
-    def __init__(self, root, deadline=None, *, lane=None, lanes=1):
+    def __init__(self, root, deadline=None, *, lane=None, lanes=1, kind='compiler'):
         if lane is not None and not 0 <= lane < lanes <= 256:
             raise ValueError('invalid module Release lane')
+        if kind not in ('compiler', 'report'):
+            raise ValueError('invalid module Release kind')
+        self.kind = kind
+        self.suffix = '-report' if kind == 'report' else ''
+        self.marker = MARKER + self.suffix
         self.lane = lane
         self.lanes = lanes
         self.root = root
@@ -101,15 +108,22 @@ class Remote:
         self.inventory = {}
         self.release_pages = {}
 
+    def accepts_tag(self, tag):
+        match = TAG.fullmatch(tag)
+        return match is not None and (match[2] or '') == self.suffix
+
+    def version(self, source):
+        return PREFIX + source + self.suffix
+
     def current(self):
         try:
-            ref = json.loads(host.gh(self.deadline, 'api', 'repos/' + host.REPO + '/git/ref/' + MARKER))
+            ref = json.loads(host.gh(self.deadline, 'api', 'repos/' + host.REPO + '/git/ref/' + self.marker))
         except host.GitHubCommandError as error:
             if missing(error):
                 return None
             raise
         source = ref['object']['sha']
-        if ref['ref'] != 'refs/' + MARKER or not re.fullmatch('[0-9a-f]{40}', source):
+        if ref['ref'] != 'refs/' + self.marker or not re.fullmatch('[0-9a-f]{40}', source):
             raise ValueError('invalid published module cache ref')
         return source
 
@@ -118,7 +132,7 @@ class Remote:
                              headers={'Content-Type': 'application/json'} if fields else None)
 
     def catalog(self, tag, *, refresh=False, create=False):
-        if not TAG.fullmatch(tag):
+        if not self.accepts_tag(tag):
             raise ValueError('invalid module cache release tag')
         if tag in self.inventory and not refresh and (self.inventory[tag] or not create):
             return self.inventory[tag]
@@ -180,7 +194,7 @@ class Remote:
                 tag = row['name']
                 if tag == base:
                     return tuple(seen)
-                if TAG.fullmatch(tag) and tag not in seen:
+                if self.accepts_tag(tag) and tag not in seen:
                     seen.append(tag)
             if not refs['pageInfo']['hasNextPage']:
                 return tuple(seen)
@@ -192,7 +206,7 @@ class Remote:
         prefix = 'tags/' + plan['version'] + '-part-'
         for row in self.api('git/matching-refs/' + prefix):
             tag = row['ref'].removeprefix('refs/tags/')
-            if TAG.fullmatch(tag) and tag.startswith(plan['version'] + '-part-') and tag not in tags:
+            if self.accepts_tag(tag) and tag.startswith(plan['version'] + '-part-') and tag not in tags:
                 tags.append(tag)
         for tag in tags:
             entry = self.catalog(tag, refresh=tag.startswith(plan['version']))
@@ -246,8 +260,8 @@ class Remote:
         self.fetch(row['version'], asset, path)
 
     def stage(self, version, name, path, digest):
-        publisher()
-        primary_metadata = name in (INDEX, LAYOUT)
+        publisher(self.kind)
+        primary_metadata = name in (INDEX, LAYOUT, PROMOTED)
         # The planner owns the shared Release. Each worker alone creates its overflow parts.
         first_overflow = 2 + (self.lane or 0)
         for part in chain((1,), range(first_overflow, first_overflow + 9998 * self.lanes, self.lanes)):
@@ -295,8 +309,8 @@ class Remote:
             source = self.current()
             if source is None:
                 return None
-            version = PREFIX + source
-        if not re.fullmatch(PREFIX + '[0-9a-f]{40}', version):
+            version = self.version(source)
+        if not self.accepts_tag(version) or TAG.fullmatch(version)[3]:
             raise ValueError('invalid module cache version')
         catalog = self.catalog(version)
         asset = catalog[1].get(INDEX) if catalog else None
@@ -311,9 +325,38 @@ class Remote:
                 self.fetch(version, asset, path)
             data = read(path)
         if (data['schema'] != 'lean-module-shards-v1' or data['version'] != version
-                or data['source'] != TAG.fullmatch(version)[1]):
+                or data['source'] != TAG.fullmatch(version)[1]
+                or data.get('kind', 'compiler') != self.kind):
             raise ValueError('module index identity differs from its version')
         return data
+
+    def published(self, version):
+        """Read a promoted source after the rolling marker has already advanced."""
+        if not self.accepts_tag(version) or TAG.fullmatch(version)[3]:
+            raise ValueError('invalid requested publication version')
+        current = self.current()
+        if not current:
+            return None
+        if version == self.version(current):
+            return self.latest(version)
+        catalog = self.catalog(version, refresh=True)
+        promotion = catalog[1].get(PROMOTED) if catalog else None
+        index = catalog[1].get(INDEX) if catalog else None
+        if not index or not promotion or promotion['state'] != 'uploaded':
+            return None
+        evidence = json_body({'index_digest': index['digest'], 'version': version})
+        if promotion['digest'] != 'sha256:' + hashlib.sha256(evidence).hexdigest():
+            raise ValueError('module promotion differs from release index')
+        return self.latest(version)
+
+    def record_promotion(self, index):
+        data = json_body(index)
+        evidence = json_body({'index_digest': 'sha256:' + hashlib.sha256(data).hexdigest(),
+                              'version': index['version']})
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / PROMOTED
+            path.write_bytes(evidence)
+            self.stage(index['version'], PROMOTED, path, hashlib.sha256(evidence).hexdigest())
 
     def matches_checkpoint(self, tag, asset, fingerprint):
         if asset.get('label'):
@@ -329,6 +372,8 @@ class Remote:
         expected = {}
         for name, row in plan['shards'].items():
             expected[row['asset']] = (name, row)
+            if self.kind == 'report':
+                continue
             legacy_key = plan['mathlib'] + '-' + name
             expected.setdefault(legacy_key + '.tar.gz', (name, dict(row, key=legacy_key, asset=legacy_key + '.tar.gz')))
         result = {}
@@ -346,9 +391,9 @@ class Remote:
         return result
 
     def save(self, plan, name, path, row):
-        if not TAG.fullmatch(plan['version']) or plan['shards'][name]['fingerprint'] != row['fingerprint']:
+        if not self.accepts_tag(plan['version']) or plan['shards'][name]['fingerprint'] != row['fingerprint']:
             raise ValueError('shard does not belong to its plan')
-        publisher()
+        publisher(self.kind)
         if path.stat().st_size != row['bytes'] or host.archive_sha(path, self.deadline) != row['sha256']:
             raise ValueError('local shard differs from its advertised payload')
         tag, _ = self.stage(plan['version'], row['asset'], path, row['sha256'])
@@ -473,9 +518,9 @@ class Remote:
             self.clear_label(catalog[1].get(INDEX), digest, len(data), digest)
 
     def publish(self, index):
-        publisher()
+        publisher(self.kind)
         source = index['source']
-        if index['version'] != PREFIX + source or not re.fullmatch('[0-9a-f]{40}', source):
+        if index['version'] != self.version(source) or not re.fullmatch('[0-9a-f]{40}', source):
             raise ValueError('invalid module version for publication')
         self.inventory.clear()
         if self.confirmed(index['shards']).keys() != index['shards'].keys():
@@ -493,16 +538,20 @@ class Remote:
             version, asset = self.stage(index['version'], INDEX, path, digest)
             readback = Path(stage) / 'readback'
             self.fetch(version, asset, readback)
-            key = 'lean-module-index-' + source
+            key = 'lean-module-index-' + source + self.suffix
             self.actions('put', key, digest, path)
         if current and current != source:
-            previous = self.latest(PREFIX + current)
+            previous = self.latest(self.version(current))
+            if previous.get('kind'):
+                self.record_promotion(previous)
             self.clear_indexed_labels(previous, local_only=True)
             self.present(previous)
         self.present(index)
         if current is None:
-            self.api('git/refs', 'POST', ref='refs/' + MARKER, sha=source)
+            self.api('git/refs', 'POST', ref='refs/' + self.marker, sha=source)
         elif current != source:
-            self.api('git/refs/' + MARKER, 'PATCH', sha=source, force=False)
+            self.api('git/refs/' + self.marker, 'PATCH', sha=source, force=False)
+        if index.get('kind'):
+            self.record_promotion(index)
         # A legacy partial can lose its label once readers can recover it from the complete index.
         self.clear_indexed_labels(index)

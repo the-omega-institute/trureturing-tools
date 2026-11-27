@@ -163,12 +163,12 @@ class ModuleReleases(unittest.TestCase):
 
     def plan(self, base=None, capacity=cache.DEFAULT_CAPACITY):
         _, targets = cache.checkout_targets(self.root)
-        return cache.make_plan(self.source, self.pin, targets, base, self.remote, capacity, 2, mathlib_version=self.version)
+        return cache.make_plan(self.source, self.pin, targets, base, self.remote, capacity, 2, mathlib_version=self.version, kind='compiler')
 
     def workers(self, plan):
         return [cache.work(self.root, plan, i, self.remote, self.root / 'receipts') for i in range(len(plan['lanes']))]
 
-    def test_reports_share_the_target_identity_and_compile_only_seeds(self):
+    def test_compiler_and_report_inputs_restore_independently(self):
         from lean_cache_release import report_selection
         import lean_generation_facets as facets
 
@@ -181,14 +181,15 @@ class ModuleReleases(unittest.TestCase):
         utility = {'modulePath': 'D5/A.lean', 'claimModule': 'D5.B'}
         self.enterContext(patch.object(facets, 'utility_inputs', return_value={'D5/A.lean': utility}))
 
-        modules, with_reports = cache.checkout_targets(self.root)
+        with patch.object(report_selection, 'Selection', side_effect=AssertionError('compiler read report settings')):
+            _, compiler_only = cache.checkout_targets(self.root)
+        modules, with_reports = cache.checkout_targets(self.root, kind='report')
         self.assertTrue(modules['D5.A'].report)
         self.assertEqual(sorted(with_reports['D5.A']['report_inputs']), ['D5.A', 'D5.B'])
         self.assertEqual(index['targets']['D5.A']['key'], with_reports['D5.A']['compiler_input'])
         self.assertNotEqual(index['targets']['D5.A']['key'], with_reports['D5.A']['key'])
-        # The old reader cannot open a mixed namespace archive, even for an ordinary sibling.
-        self.assertNotEqual(index['targets']['D5.C']['key'], with_reports['D5.C']['key'])
-        self.assertEqual(index['targets']['D5.C']['key'], with_reports['D5.C']['compiler_input'])
+        self.assertEqual(index['targets']['D5.C']['key'], with_reports['D5.C']['key'])
+        self.assertEqual(index['targets']['D5.A']['key'], compiler_only['D5.A']['key'])
         destination = self.root / 'restored'
         result = cache.restore(self.root, index, ['D5.C'], self.remote, destination)
         self.assertEqual((result['requested'], result['restored'], result['compiler_restored']), (2, 1, 2))
@@ -215,14 +216,102 @@ class ModuleReleases(unittest.TestCase):
             self.assertEqual((cold['reports_restored'], cold['compiler_restored']), (0, 1))
 
         (self.root / 'D5/B.lean').write_text('def valueB := 8')
-        _, changed = cache.checkout_targets(self.root)
+        _, changed = cache.checkout_targets(self.root, kind='report')
         self.assertNotEqual(changed['D5.A']['key'], with_reports['D5.A']['key'])
         self.assertEqual(changed['D5.A']['compiler_input'], with_reports['D5.A']['compiler_input'])
         self.assertEqual(changed['D5.C']['key'], with_reports['D5.C']['key'])
         with patch.object(report_selection, 'REPORT_FORMAT', 'changed'):
-            _, new_format = cache.checkout_targets(self.root)
+            _, new_format = cache.checkout_targets(self.root, kind='report')
         self.assertNotEqual(new_format['D5.A']['key'], changed['D5.A']['key'])
         self.assertEqual(new_format['D5.B']['key'], changed['D5.B']['key'])
+
+    def test_reports_publish_and_retry_from_compiler_only_artifacts(self):
+        from lean_cache_release import report_selection
+        import lean_generation_facets as facets
+        from test_lean_module_shards import ShardCompilerTransport
+        (self.root / 'lean-report-inputs.json').write_text('{}')
+        selection = self.enterContext(patch.object(report_selection, 'Selection')).return_value
+        selection.modules.return_value = {'D5.A': 'D5/A.lean'}
+        self.enterContext(patch.object(facets, 'utility_inputs', return_value={}))
+        with patch.object(facets, 'materialize', side_effect=AssertionError('compiler extracted a report')):
+            original = self.plan()
+            self.workers(original)
+            compiler_index = cache.finish(original, self.remote)
+        selection.modules.assert_not_called()
+        self.assertEqual(compiler_index['kind'], 'compiler')
+        report_remote = MemoryRemote()
+        modules, targets = cache.checkout_targets(self.root, kind='report')
+        selected = {n: r for n, r in targets.items() if 'report_inputs' in r}
+        def plan():
+            return cache.make_plan(self.source, self.pin, selected, None, report_remote, cache.DEFAULT_CAPACITY,
+                                   2, mathlib_version=self.version, kind='report', compiler_index=compiler_index)
+        reports = plan()
+        self.assertEqual(reports['version'], original['version'] + '-report')
+        expected = compiler_index['shards']['D5']['key'] + '-report'
+        self.assertEqual(reports['shards']['D5']['key'], expected)
+        self.assertEqual(reports['shards']['D5']['asset'], expected)
+        self.assertNotEqual(reports['shards']['D5']['fingerprint'], compiler_index['shards']['D5']['fingerprint'])
+        self.assertFalse(report_remote.indexes)
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        def produce(root, names, inputs, *, prebuilt):
+            self.assertTrue(prebuilt)
+            self.assertEqual(set(inputs), {'D5.A'})
+            self.assertTrue((root / PROJECT_BUILD / 'lib/lean/D5/A.olean').is_file())
+            for name in names:
+                # Generate the signed report bundle and its actual Lake hash/trace.
+                ShardCompilerTransport.prepare_report(SimpleNamespace(root=root, build=root / PROJECT_BUILD,
+                                                                     modules=modules), name)
+        self.remote.published = self.remote.latest
+        with patch.object(cache.compiler, 'compile_roots', side_effect=AssertionError('report compiled project modules')):
+            report_remote.fail = 'D5'
+            with patch.object(facets, 'materialize', side_effect=produce):
+                with self.assertRaises(InterruptedError):
+                    cache.work(self.root, reports, 0, report_remote, self.root / 'report-worker', compiler_remote=self.remote)
+            self.assertEqual(self.remote.latest(original['version']), compiler_index)
+            fresh = self.root / 'consumer-before-reports'
+            self.assertEqual(cache.restore(self.root, compiler_index, ['D5.A'], self.remote, fresh)['compiler_restored'], 1)
+            report_remote.fail = None
+            shutil.rmtree(self.root / PROJECT_BUILD)
+            with patch.object(facets, 'materialize', side_effect=produce):
+                retry = plan()
+                result = cache.work(self.root, retry, 0, report_remote, self.root / 'report-worker', compiler_remote=self.remote)
+            self.assertEqual(result['compiled_modules'], 0)
+            self.assertEqual(result['prepared_reports'], 1)
+        index = cache.finish(retry, report_remote)
+        self.assertEqual(index['compiler_version'], compiler_index['version'])
+        self.assertEqual(index['kind'], 'report')
+        self.assertEqual(index['shards']['D5']['key'], expected)
+        self.assertEqual(plan()['lanes'], [])
+        fresh = self.root / 'report-only'
+        result = cache.restore(self.root, compiler_index, ['D5.A'], self.remote, fresh, kind='report',
+                               report_index=index, report_remote=report_remote)
+        self.assertEqual(result['reports_restored'], 1)
+        self.assertTrue((fresh / 'lean-inspector/modules/D5.A.zip').is_file())
+        self.assertFalse((fresh / 'lib/lean/D5/A.olean').exists())
+
+    def test_report_cli_reads_the_explicit_report_and_paired_compiler_tags(self):
+        import lean_module_remote
+        compiler_remote, report_remote = MemoryRemote(), MemoryRemote()
+        compiler_tag = cache.VERSION_PREFIX + self.source
+        report_tag = compiler_tag + '-report'
+        compiler = {'version': compiler_tag}
+        reports = {'compiler_version': compiler_tag}
+        compiler_remote.published = lambda version: compiler if version == compiler_tag else self.fail(version)
+        report_remote.published = lambda version: reports if version == report_tag else self.fail(version)
+        def remote(root, *, kind='compiler'):
+            return report_remote if kind == 'report' else compiler_remote
+        args = ['test', '--repository', str(self.root), 'restore', '--kind', 'report', '--version', report_tag,
+                '--targets', 'D5.A']
+        with patch.object(lean_module_remote, 'Remote', side_effect=remote), patch.object(cache.sys, 'argv', args), \
+             patch.object(cache, 'restore_published', return_value={'requested': 1, 'restored': 1}) as restore:
+            self.assertEqual(cache.run(), 0)
+            restore.assert_called_once_with(self.root.resolve(), compiler, ['D5.A'], compiler_remote,
+                                            self.root.resolve() / PROJECT_BUILD, 'report', report_remote=report_remote,
+                                            report_index=reports)
+            restore.return_value = {'requested': 1, 'restored': 0}
+            self.assertEqual(cache.run(), 1)
+            report_remote.published = lambda version: None
+            self.assertEqual(cache.run(), 3)
 
     def test_incremental_releases_and_scoped_consumers(self):
         plan = self.plan()
@@ -386,24 +475,24 @@ def main : IO Unit := do
                 crossed_row = dict(row, sha256=hashlib.sha256(payload).hexdigest(), bytes=len(payload))
                 fresh = self.root / 'unrestorable'
                 with self.assertRaisesRegex(ValueError, 'artifact differs from its Lake trace'):
-                    restore_shard(crossed_archive, crossed_row, [name], modules, fresh, root=self.root)
+                    restore_shard(crossed_archive, crossed_row, [name], modules, fresh, root=self.root, kind='compiler')
                 self.assertFalse(fresh.exists())
 
         # A module with a different backend inventory cannot consume this member.
         crossed = {name: replace(modules[name], extra_builds=tuple(reversed(modules[name].extra_builds)))}
         with self.assertRaisesRegex(ValueError, 'build path differs'):
-            restore_shard(archive, row, [name], crossed, self.root / 'crossed', root=self.root)
+            restore_shard(archive, row, [name], crossed, self.root / 'crossed', root=self.root, kind='compiler')
         conflict = self.root / 'conflict'
         conflicting = conflict / paths[1]
         conflicting.parent.mkdir(parents=True)
         conflicting.write_bytes(b'local strict artifact')
-        self.assertEqual(restore_shard(archive, row, [name], modules, conflict, root=self.root), set())
+        self.assertEqual(restore_shard(archive, row, [name], modules, conflict, root=self.root, kind='compiler'), set())
         self.assertEqual(conflicting.read_bytes(), b'local strict artifact')
         self.assertFalse((conflict / paths[0]).exists())
         self.assertFalse((conflict / paths[2]).exists())
         official_only = {name: replace(modules[name], extra_builds=())}
         with self.assertRaisesRegex(ValueError, 'build path differs'):
-            restore_shard(archive, row, [name], official_only, self.root / 'legacy')
+            restore_shard(archive, row, [name], official_only, self.root / 'legacy', kind='compiler')
         legacy = self.root / 'legacy.tar.gz'
         legacy_row = pack_shard(self.root, official_only, [name], legacy, 'a' * 64)
         with self.assertRaisesRegex(ValueError, 'build path differs'):

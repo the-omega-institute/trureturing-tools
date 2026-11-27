@@ -603,7 +603,10 @@ script shardModuleReports args do
       | throw <| IO.userError s!"unknown report compiler input {name}"
     return mod
   runBuild (cfg := {outLv := .error}) do
-    let compiled := mixModuleJobs (← modules.mapM (·.leanArts.fetch))
+    let compiled ← if (request.getObjValAs? Bool "prebuilt").toOption == some true then
+      pure (mixModuleJobs (← modules.mapM fun mod => prebuilt mod.leanArts.fetch))
+    else
+      pure (mixModuleJobs (← modules.mapM (·.leanArts.fetch)))
     return (compiled.add (← reportInspector.fetch) |>.add (← inputDiscovery.fetch))
   let _ ← runBuild (cfg := {outLv := .error}) do
     let config ← (← fetch <| ws.root.facet `reportInputData).await

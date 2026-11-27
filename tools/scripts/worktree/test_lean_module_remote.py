@@ -147,6 +147,40 @@ class VersionedShards(unittest.TestCase):
             self.remote.inventory.clear()
         return saved
 
+    def test_independent_report_release_and_promotion(self):
+        report = transport.Remote(self.root, kind='report')
+        report.http = self.service
+        reports = []
+        report.current = lambda: reports[-1] if reports else None
+        def save_ref(path, method='GET', **fields):
+            if path.startswith('git/refs'):
+                self.assertEqual(fields.get('ref', 'refs/' + report.marker), 'refs/heads/lean-modules-published-report')
+                reports.append(fields['sha'])
+            return self.service.api(path, method=method, payload=transport.json_body(fields))
+        report.api = save_ref
+        a = 'a' * 40
+        b = 'b' * 40
+        def index(source):
+            return dict(schema='lean-module-shards-v1', kind='report', source=source, mathlib='abc',
+                        version=report.version(source), compiler_version=self.remote.version(source),
+                        targets={}, shards={})
+        first = index(a)
+        self.assertIsNone(report.published(first['version']))
+        self.assertFalse(self.remote.accepts_tag(first['version']))
+        self.assertFalse(report.accepts_tag(first['compiler_version']))
+        report.publish(first)
+        self.assertEqual(report.published(first['version']), first)
+        second = index(b)
+        raw = transport.json_body(second)
+        file = self.root / 'staged'
+        file.write_bytes(raw)
+        report.stage(second['version'], transport.INDEX, file, hashlib.sha256(raw).hexdigest())
+        self.assertIsNone(report.published(second['version']))
+        report.publish(second)
+        self.assertEqual(report.published(first['version']), first)
+        self.assertEqual(report.published(second['version']), second)
+        self.assertEqual(reports, [a, b])
+
     def marker(self, version, filename, contents):
         path = self.root / filename
         data = transport.json_body(contents)
@@ -346,8 +380,8 @@ class VersionedShards(unittest.TestCase):
         self.assertEqual((retry['shards'], retry['base_version']), (original['shards'], base['version']))
         with tempfile.TemporaryDirectory() as dest, patch.object(cache, 'restore_shard',
                 side_effect=lambda archive, row, members, *args, **kw: set(members)):
-            self.assertEqual(cache.restore_matching(self.root, {}, inputs, self.remote.latest(retry['base_version']),
-                                                    set(inputs), self.remote, Path(dest)), set(warm))
+            self.assertEqual(cache.restore_artifacts(self.root, {}, inputs, self.remote.latest(retry['base_version']),
+                                                     set(inputs), self.remote, Path(dest), 'compiler'), set(warm))
         empty_retry = plan('e', inputs, newer, prepare=True)
         self.assertEqual(empty_retry['shards'], no_base['shards'])
         self.assertIsNone(empty_retry['base_version'])
