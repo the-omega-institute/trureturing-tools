@@ -15,32 +15,9 @@ import unittest
 from unittest.mock import patch
 
 import lean_module_cache as cache
-from lean_module_dag import assign_queues
+from lean_module_dag import assigned_units, worker_modules
 from lean_artifact_inventory import Module, PROJECT_BUILD
 from lean_module_shards import pack_shard, restore_shard
-
-
-class CompilerQueuePlanning(unittest.TestCase):
-    def test_dependency_handoff_balances_chains_and_wide_fanout(self):
-        paths = {
-            'producer': (3, [], 2),
-            'independent': (1, [], 1),
-            'left': (2, ['producer'], 10),
-            'right': (2, ['producer'], 1),
-            'join': (1, ['left', 'right'], 1),
-        }
-        def run(workers):
-            units = {key: dict(rank=rank, deps=deps, members=range(count))
-                     for key, (rank, deps, count) in paths.items()}
-            assign_queues(units, workers)
-            return {key: unit['queue'] for key, unit in units.items()}
-
-        queues = run(2)
-        self.assertNotEqual(queues['independent'], queues['producer'])
-        self.assertEqual(queues['left'], queues['producer'])
-        self.assertNotEqual(queues['right'], queues['left'])
-        self.assertEqual(queues['join'], queues['left'])
-        self.assertEqual(set(run(1).values()), {0})
 
 
 class MemoryRemote:
@@ -54,8 +31,6 @@ class MemoryRemote:
         self.saves = []
         self.fail = None
         self.catalogs = []
-        self.claims = {}
-        self.completed = {}
 
     def confirmed(self, rows):
         return rows
@@ -76,25 +51,11 @@ class MemoryRemote:
                   for (tag, name), data in self.assets.items()}
         return recovery_index(plan, self.catalogs, assets)
 
-    def compiler_progress(self, plan, pending):
-        return {k: r for k, r in (self.rows | self.completed).items() if k in pending}
-
-    def retry_checkpoint(self, plan, key):
-        return self.rows.get(key)
-
-    def claim_compiler_unit(self, plan, lane, ordered):
-        return next((k for k in ordered if self.claims.setdefault((plan['source'], k), lane) == lane), None)
-
-    def complete_compiler_unit(self, plan, lane, key, row):
-        assert self.claims[plan['source'], key] == lane
-        self.completed[key] = row
-
-    def wait_compiler_progress(self, plan):
-        raise AssertionError('a single live worker must make progress')
-
     def save(self, plan, name, path, row):
         if self.fail == name:
             raise InterruptedError(name)
+        if row['asset'].startswith('compiler-unit-'):
+            row = dict(row, version='actions-cache')
         key = row['version'], row['asset']
         assert key not in self.assets
         self.assets[key] = path.read_bytes()
@@ -220,7 +181,18 @@ class ModuleReleases(unittest.TestCase):
         return cache.make_plan(self.source, self.pin, targets, base, self.remote, capacity, 2, mathlib_version=self.version, kind='compiler')
 
     def workers(self, plan):
-        return [cache.work(self.root, plan, i, self.remote, self.root / 'receipts') for i in range(len(plan['lanes']))]
+        receipts = None
+        compiled = 0
+        if 'compiler_dag' in plan:
+            units = plan['compiler_dag']['units']
+            keys = sorted(units, key=lambda k: -units[k]['rank'])
+            _, _, compiled, receipts = assigned_units(self.root, plan, keys, {}, self.remote,
+                                                       worker_modules(self.root, plan['compiler_dag']), self.root/'units')
+        results = [cache.work(self.root, plan, i, self.remote, self.root/'receipts', receipts=receipts)
+                   for i in range(len(plan['lanes']))]
+        if compiled:
+            results[0]['compiled_modules'] += compiled
+        return results
 
     def dag_plan(self, workers=2, base=None):
         modules, targets = cache.checkout_targets(self.root)
@@ -246,168 +218,100 @@ class ModuleReleases(unittest.TestCase):
         restore = dag['units'][owner['D5.C']]['restore']
         self.assertEqual(decode_scope(restore, dag['names']), {'D5.A', 'D5.B'})
 
-    def test_diamond_single_runner_retry_split_from_fresh_worktree(self):
-        # Two cold branches share A. The last runner starts before either of the others.
+    def test_assigned_diamond_across_jobs_uses_only_its_receipts(self):
+        from lean_module_remote import CompilerCacheMiss
         (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
         (self.root / 'D5/D.lean').write_text('import D5.B\nimport D5.C\ndef valueD := valueB+valueC\n')
         self.modules['D5.D'] = Module('trureturing', Path('D5/D.lean'), Path('.'))
         plan = self.dag_plan(workers=3)
-        units = plan['compiler_dag']['units']
+        dag = plan['compiler_dag']
+        units = dag['units']
         own = {n: k for k, row in units.items() for n in row['members']}
-        self.assertEqual(set(units[own['D5.D']]['deps']), {own['D5.B'], own['D5.C']})
-        self.assertEqual(units[own['D5.B']]['deps'], [own['D5.A']])
-        self.assertEqual(units[own['D5.C']]['deps'], [own['D5.A']])
-        self.remote.fail = own['D5.D']
-        from contextlib import ExitStack
-        import lean_module_dag as dag
-        with ExitStack() as guards:
-            for target, name in ((cache, 'checkout_targets'), (dag, 'TopologicalSorter'),
-                                 (cache.compiler, 'terminal'), (cache.inventory, 'import_closure')):
-                guards.enter_context(patch.object(target, name, side_effect=AssertionError('worker reanalyzed DAG')))
-            with self.assertRaises(InterruptedError):
-                cache.work(self.root, plan, 2, self.remote, self.root / 'receipts')
-        self.assertNotIn('D5', self.remote.saves)
-        with self.assertRaisesRegex(ValueError, 'planned shards unavailable'):
-            cache.finish(plan, self.remote)
-        self.compiled.clear()
-        self.remote.fail = None
-        self.remote.claims.clear()
-        shutil.rmtree(self.root / PROJECT_BUILD)
-        # An Actions failed-job retry reuses the original plan artifact.
-        self.assertEqual(cache.work(self.root, plan, 0, self.remote, self.root / 'retry')['compiled_modules'], 1)
-        self.assertEqual(self.compiled, [['D5.D']])
-        index = cache.finish(plan, self.remote)
-        destination = self.root / 'restored'
-        self.assertEqual(cache.restore(self.root, index, ['D5.D'], self.remote, destination,
-                                       kind='compiler')['restored'], 4)
-        self.assertEqual(set(index['shards']), {'D5'})
-        self.assertEqual(set(self.dag_plan(base=index)['lanes']), set())
-
-    def test_simultaneous_workers_publish_each_diamond_module_once(self):
-        self.run_diamond(staggered=False)
-
-    def test_late_worker_joins_natural_fanout_after_first_worker_starts_a_branch(self):
-        self.run_diamond(staggered=True)
-
-    def run_diamond(self, *, staggered):
-        from concurrent.futures import ThreadPoolExecutor
-        from threading import Barrier, Condition, Event
-        from time import monotonic
-        (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
-        (self.root / 'D5/D.lean').write_text('import D5.B\nimport D5.C\ndef valueD := valueB+valueC\n')
-        self.modules['D5.D'] = Module('trureturing', Path('D5/D.lean'), Path('.'))
-        plan = self.dag_plan(workers=2)
-        queues = {n: u['queue'] for u in plan['compiler_dag']['units'].values() for n in u['members']}
-        self.assertNotEqual(queues['D5.B'], queues['D5.C'])
-        # A persisted plan may assign simultaneous branches to one queue.
-        for unit in plan['compiler_dag']['units'].values():
-            unit['queue'] = queues['D5.A']
-            unit['part'] = 10000000
-        branch_started = Event()
-        condition = Condition()
-        branches = Barrier(2, timeout=20)
-        ready = Barrier(2, timeout=20)
-        checkouts = [self.root / 'runner0', self.root / 'runner1']
-        for root in checkouts:
-            root.mkdir()
-            for f in ('lakefile.toml', 'lake-manifest.json', 'lean-toolchain'):
-                shutil.copyfile(self.root / f, root / f)
-            shutil.copytree(self.root / 'D5', root / 'D5')
-        build_calls = []
-
-        def compile_at(root, modules, roots):
-            build_calls.extend(roots)
-            if roots in (['D5.B'], ['D5.C']):
-                branch_started.set()
-                branches.wait()
-            subprocess.run(['lake', 'build', *['+' + n + ':leanArts' for n in roots]],
-                           cwd=root, check=True, capture_output=True)
-
-        def save(plan, key, path, row):
-            with condition:
-                result = MemoryRemote.save(self.remote, plan, key, path, row)
-                condition.notify_all()
-                return result
-
-        def run_lane(lane):
-            if staggered:
-                if lane == queues['D5.A']:
-                    self.assertTrue(branch_started.wait(timeout=20))
-            else:
-                ready.wait()
-            return cache.work(checkouts[lane], plan, lane, self.remote, checkouts[lane] / 'receipts')
-
-        deadline = monotonic() + 35
-        def wait(plan):
-            if monotonic() > deadline:
-                raise AssertionError('ready compiler queues stalled')
-            with condition:
-                condition.wait(timeout=0.05)
-
-        with patch.object(cache.compiler, 'compile_roots', side_effect=compile_at), \
-             patch.object(self.remote, 'save', side_effect=save), \
-             patch.object(self.remote, 'wait_compiler_progress', side_effect=wait), \
-             ThreadPoolExecutor(max_workers=2) as runners:
-            results = list(runners.map(run_lane, (1, 0)))
-        self.assertCountEqual(build_calls, ['D5.A', 'D5.B', 'D5.C', 'D5.D'])
-        self.assertEqual(sum(row['compiled_modules'] for row in results), 4)
-        self.assertEqual(set(cache.finish(plan, self.remote)['shards']), {'D5'})
-
-    def test_checkpoints_seen_child_first_release_descendants_after_ancestors(self):
-        from collections import deque
-        import lean_module_dag as dag
-        (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
-        (self.root / 'D5/C.lean').write_text('import D5.B\ndef valueC := valueB+1\n')
-        with patch.object(dag, 'UNIT_LIMIT', 1):
-            plan = self.dag_plan(workers=2)
-        owner = {n: k for k, unit in plan['compiler_dag']['units'].items() for n in unit['members']}
-        self.remote.fail = owner['D5.C']
-        with self.assertRaises(InterruptedError):
-            cache.work(self.root, plan, 0, self.remote, self.root / 'first')
-        a, b = owner['D5.A'], owner['D5.B']
-        observed = deque([{b: self.remote.rows[b]}, {a: self.remote.rows[a]}])
-        self.compiled.clear()
-        self.remote.fail = None
-        shutil.rmtree(self.root / PROJECT_BUILD)
-        self.remote.claims.clear()
-        self.remote.claims[plan['source'], a] = 1
-
-        with patch.object(self.remote, 'compiler_progress', side_effect=lambda *args: observed.popleft() if observed else {}), \
-             patch.object(self.remote, 'wait_compiler_progress', return_value=None):
-            result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
-        self.assertEqual(result['compiled_modules'], 1)
-        self.assertEqual(self.compiled, [['D5.C']])
-        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(owner))
-
-    def test_evicted_parent_with_visible_child_rebuilds_from_checkout(self):
-        import lean_module_dag as dag
-        (self.root / 'D5/B.lean').write_text('import D5.A\ndef valueB := valueA+2\n')
-        (self.root / 'D5/C.lean').write_text('import D5.B\ndef valueC := valueB+1\n')
-        with patch.object(dag, 'UNIT_LIMIT', 1):
-            plan = self.dag_plan(workers=2)
-        units = plan['compiler_dag']['units']
-        owner = {n: k for k, unit in units.items() for n in unit['members']}
-        a, b, c = (owner['D5.' + n] for n in 'ABC')
-        self.remote.fail = c
-        with self.assertRaises(InterruptedError):
-            cache.work(self.root, plan, 0, self.remote, self.root / 'first')
-        evicted = self.remote.rows.pop(a)
-        del self.remote.assets[evicted['version'], evicted['asset']]
-        self.remote.claims.clear()
-        self.remote.fail = None
-        self.compiled.clear()
-        shutil.rmtree(self.root / PROJECT_BUILD)
-        from lean_module_remote import CompilerCacheMiss
+        a, b, c, d = (own['D5.' + n] for n in 'ABCD')
+        self.assertEqual(set(units[d]['deps']), {b,c})
+        # Persisted queue/part metadata has no bearing on explicit assignments.
+        for unit in units.values():
+            unit.update(queue=17, part=10000000)
+        def job(keys, receipts):
+            built = self.root / PROJECT_BUILD
+            if built.exists():
+                shutil.rmtree(built)
+            return assigned_units(self.root, plan, keys, receipts, self.remote, worker_modules(self.root, dag),
+                                  self.root/'units')[3]
+        with self.assertRaisesRegex(ValueError, 'prerequisite'):
+            job([d], {})
+        receipt_a = job([a], {})
+        self.assertEqual(set(receipt_a), {a})
+        with self.assertRaisesRegex(ValueError, 'receipt differs'):
+            job([b], {a: dict(receipt_a[a], members=['D5.D'])})
+        siblings = job([b,c], receipt_a)
+        self.assertEqual(set(siblings), {b,c})
+        received = {**receipt_a, **siblings}
+        # A is no longer present in the cache when D needs its transitive imports.
         download = self.remote.download
         def get(row, path):
-            if row['asset'] == evicted['asset']:
+            if row['fingerprint'] == a:
                 raise CompilerCacheMiss(a)
             download(row, path)
         with patch.object(self.remote, 'download', side_effect=get):
-            result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
-        self.assertEqual(result['compiled_modules'], 2)
-        self.assertEqual(self.compiled, [['D5.A'], ['D5.C']])
-        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(owner))
+            final = job([d], received)
+        self.assertEqual(set(final), {d})
+        self.assertEqual(set(cache.pending_compiler_shards(plan, self.remote)['units']), set(units))
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        cache.work(self.root, plan, 0, self.remote, self.root/'assembled', receipts={**received, **final})
+        self.assertEqual(cache.pending_compiler_shards(plan, self.remote), dict(lanes=[], units=[], lane_units={}))
+        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(own))
+
+    def test_compiler_unit_and_assembly_cli_share_exact_receipts(self):
+        import lean_module_remote as transport
+        plan = self.dag_plan()
+        root = self.root
+        cache.write(root/'plan.json', plan)
+        def invoke(op, *args):
+            argv = ['cache', '--repository', str(root), op, '--plan', str(root/'plan.json'), *map(str,args)]
+            with patch.object(cache.sys, 'argv', argv), patch.object(transport, 'Remote', return_value=self.remote):
+                self.assertEqual(cache.run(), 0)
+        invoke('compiler-pending-shards', '--output', root/'missing.json', '--resume-plan', root/'run.json')
+        pending = json.loads((root/'missing.json').read_text())
+        self.assertEqual(pending['lanes'], [0])
+        self.assertEqual(set(pending['lane_units']['0']), set(pending['units']))
+        cache.write(root/'assignment.json', sorted(pending['units'], key=lambda k: -plan['compiler_dag']['units'][k]['rank']))
+        cache.write(root/'input.json', {})
+        invoke('compiler-units', '--assignment', root/'assignment.json', '--receipts', root/'input.json',
+               '--output', root/'receipt.json')
+        receipts = json.loads((root/'receipt.json').read_text())
+        self.assertEqual(set(receipts), set(pending['units']))
+        shutil.rmtree(root / PROJECT_BUILD)
+        invoke('worker', '--lane', 0, '--receipts', root/'receipt.json', '--output', root/'lane')
+        self.assertGreater(json.loads((root/'lane/worker.json').read_text())['saved_shards'], 0)
+
+    def test_resume_plan_uses_completed_physical_shard_after_cache_eviction(self):
+        import lean_module_dag as dag
+        with patch.object(dag, 'UNIT_LIMIT', 1):
+            plan = self.dag_plan(workers=2)
+        units = plan['compiler_dag']['units']
+        own = {n: k for k, u in units.items() for n in u['members']}
+        # An interrupted run split its initial D5 shard and finished just A.
+        self.remote.save_split(plan, 'D5', {n:[n] for n in own})
+        scoped = cache.expanded(plan, self.remote.splits(plan))
+        n = 'D5.A'
+        self.lake('build', '+D5.A:leanArts')
+        archive = self.root/'part.gz'
+        shard = scoped['shards'][n]
+        packed = pack_shard(self.root, self.modules, {n}, archive, shard['fingerprint'], kind='compiler')
+        self.remote.save(scoped, n, archive, dict(shard, **packed, version=plan['version']))
+        runfile = self.root/'resumed.json'
+        pending = cache.pending_compiler_shards(plan, self.remote, resume_plan=runfile)
+        self.assertEqual(set(pending['units']), {own['D5.B'],own['D5.C']})
+        resumed = json.loads(runfile.read_text())
+        rdag = resumed['compiler_dag']
+        self.assertEqual(set(rdag['seeds']['owners']), {n})
+        self.assertFalse(rdag['units'][own['D5.C']]['deps'])
+        shutil.rmtree(self.root / PROJECT_BUILD)
+        self.compiled.clear()
+        self.workers(resumed)
+        self.assertNotIn(n, [name for roots in self.compiled for name in roots])
+        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(own))
 
     def test_warm_seed_evicted_after_planning_rebuilds_before_publication(self):
         from lean_module_remote import CompilerCacheMiss
@@ -421,7 +325,7 @@ class ModuleReleases(unittest.TestCase):
         self.compiled.clear()
         shutil.rmtree(self.root / PROJECT_BUILD)
         with patch.object(self.remote, 'download', side_effect=CompilerCacheMiss('evicted')):
-            result = cache.work(self.root, retry, 0, self.remote, self.root / 'retry')
+            result = cache.work(self.root, retry, 0, self.remote, self.root / 'retry', receipts={})
         self.assertEqual(result['compiled_modules'], 3)
         self.assertEqual(set(cache.finish(retry, self.remote)['targets']), set(retry['targets']))
 
@@ -460,46 +364,6 @@ class ModuleReleases(unittest.TestCase):
         self.assertTrue(sibling.is_file())
         self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(plan['targets']))
 
-    def test_slow_claimed_unit_stays_owned_until_its_producer_finishes(self):
-        plan = self.dag_plan()
-        self.remote.fail = 'D5'
-        with self.assertRaises(InterruptedError):
-            self.workers(plan)
-        durable = self.remote.rows.copy()
-        self.remote.rows.clear()
-        self.remote.completed.clear()
-        self.remote.fail = None
-        self.compiled.clear()
-        shutil.rmtree(self.root / PROJECT_BUILD)
-        clock = [0]
-        def wait(_):
-            self.assertEqual(self.compiled, [])
-            clock[0] += 3600
-            if clock[0] == 7200:
-                self.remote.completed.update(durable)
-        with patch.object(self.remote, 'claim_compiler_unit', return_value=None), \
-             patch('time.monotonic', side_effect=lambda: clock[0]), \
-             patch.object(self.remote, 'wait_compiler_progress', side_effect=wait) as waiting:
-            result = cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
-        self.assertEqual(waiting.call_count, 2)
-        self.assertEqual(result['compiled_modules'], 0)
-        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(plan['targets']))
-
-    def test_retry_recovers_uploads_omitted_by_both_inventories(self):
-        plan = self.dag_plan()
-        self.remote.fail = 'D5'
-        with self.assertRaises(InterruptedError):
-            self.workers(plan)
-        self.remote.claims.clear()
-        self.remote.fail = None
-        self.compiled.clear()
-        shutil.rmtree(self.root / PROJECT_BUILD)
-        with patch.dict(os.environ, GITHUB_RUN_ATTEMPT='2'), \
-             patch.object(self.remote, 'compiler_progress', return_value={}):
-            cache.work(self.root, plan, 0, self.remote, self.root / 'retry')
-        self.assertEqual(self.compiled, [])
-        self.assertEqual(set(cache.finish(plan, self.remote)['targets']), {'D5.A', 'D5.B', 'D5.C'})
-
     def test_dag_adopts_available_first_publication_frames(self):
         plan = self.dag_plan(workers=1)
         self.lake('build', '+D5.A:leanArts')
@@ -525,7 +389,7 @@ class ModuleReleases(unittest.TestCase):
                 stream.write(bytes([last ^ 1]))
         with patch.object(cache.compiler, 'compile_roots', side_effect=corrupt):
             with self.assertRaisesRegex(ValueError, 'artifact differs from its Lake trace'):
-                cache.work(self.root, plan, 0, self.remote, self.root / 'receipts')
+                self.workers(plan)
         self.assertEqual(self.remote.saves, [])
 
     def test_exact_compiler_verifier_uses_the_frozen_source_plan_on_cold_and_warm_releases(self):
