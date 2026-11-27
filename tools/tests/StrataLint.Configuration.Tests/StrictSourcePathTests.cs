@@ -8,6 +8,10 @@ namespace StrataLint.Configuration.Tests;
 public sealed class StrictSourcePathTests
 {
     [Theory]
+    [InlineData("OmegaMathlib.lean", "OmegaMathlib.lean", true)]
+    [InlineData("OmegaMathlib/**/*.lean", "OmegaMathlib/Data/Nat/Choose/Basic.lean", true)]
+    [InlineData("OmegaMathlib/**", "OmegaMathlib/Data/Basic.olean", false)]
+    [InlineData("OmegaMathlibExtra/**/*.lean", "OmegaMathlibExtra/Data/Basic.lean", false)]
     [InlineData("strict/**/*.lean", "strict/OmegaInit.lean", true)]
     [InlineData("strict/**/*.lean", "strict/OmegaMathlib/Logic/Function/Defs.lean", true)]
     [InlineData("strict/**/*.lean", "strict/OmegaInit/Prelude.md", false)]
@@ -48,7 +52,8 @@ public sealed class StrictSourcePathTests
             artifact_id = "none"
             runtime_disposition = "committed-source"
             """ + "\n";
-        const string nextEntry = "[[files]]\npattern = \"tools/**\"";
+        var nextEntry = string.CompareOrdinal(pattern, "Papers/**") < 0
+            ? "[[files]]\npattern = \"Papers/**\"" : "[[files]]\npattern = \"tools/**\"";
         var manifest = TestFileMap.Canonical.Replace(nextEntry, entry + nextEntry, StringComparison.Ordinal);
         return PolicyLoadAssert.Accepted(RepositoryPolicyLoader.Load(
             Encoding.UTF8.GetBytes(manifest), Encoding.UTF8.GetBytes(TestFileMap.Domains))).Policy;
