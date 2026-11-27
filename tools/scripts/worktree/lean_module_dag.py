@@ -6,6 +6,8 @@ from graphlib import TopologicalSorter
 import math
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import zlib
 
@@ -16,6 +18,7 @@ from lean_release_index import valid_digest
 
 UNIT_LIMIT = 32
 BASIS = {'OmegaInit', 'OmegaMathlib'}
+QUEUE_HANDOFF_COST = 5
 
 
 def unit_key(mathlib, inputs):
@@ -25,6 +28,23 @@ def unit_key(mathlib, inputs):
 def unit_row(key, members):
     asset = 'compiler-unit-' + key + '.tar.gz'
     return dict(key=asset, asset=asset, fingerprint=key, members=sorted(members), artifact_kind='compiler')
+
+
+def assign_queues(units, count):
+    """List-schedule in module units, charging a transfer between distinct queues."""
+    available = [0] * count
+    finish = {}
+    for key in sorted(units, key=lambda k: (-units[k]['rank'], k)):
+        unit = units[key]
+        def start(queue):
+            ready = available[queue]
+            for dep in unit['deps']:
+                handoff = QUEUE_HANDOFF_COST if units[dep]['queue'] != queue else 0
+                ready = max(ready, finish[dep] + handoff)
+            return ready
+        begins, _, queue = min((start(q), available[q], q) for q in range(count))
+        unit['queue'] = queue
+        finish[key] = available[queue] = begins + len(unit['members'])
 
 
 def group_units(graph, cold, basis, workers, cold_edges):
@@ -128,7 +148,7 @@ def module_snapshot(root, modules, targets):
     for n in targets:
         module = modules[n]
         metadata[n] = [module.package, str(module.source), str(module.build),
-                       list(map(str, module.extra_builds)), module.conditional_backends]
+                       list(map(str, module.extra_builds)), module.conditional_backends, list(map(str, module.shared_builds)), module.plugin_input]
     pin = Path('Meta/tools-release.json')
     files = set()
     if (root / pin).is_file():
@@ -155,12 +175,13 @@ def worker_modules(root, dag):
         path = root / name
         if path.is_symlink() or file_digest(path) != expected:
             raise ValueError('compiler input differs from plan: ' + name)
-    return {n: Module(package, Path(source), Path(build), tuple(map(Path, extra)), conditional_backends=conditional)
-            for n, (package, source, build, extra, conditional) in dag['modules'].items()}
+    return {n: Module(package, Path(source), Path(build), tuple(map(Path, extra)), conditional_backends=conditional,
+                      shared_builds=tuple(map(Path, shared)), plugin_input=plugin)
+            for n, (package, source, build, extra, conditional, shared, plugin) in dag['modules'].items()}
 
 
 def prepare(plan, base, remote, workers, prepare_release, modules, root):
-    from lean_module_cache import partial_index
+    from lean_module_cache import BACKEND_READER, partial_index
     from lean_module_remote import UNIT_PART_START
     targets = plan['targets']
     checked_base = dict(base, shards=remote.confirmed(base['shards'])) if base else None
@@ -168,6 +189,9 @@ def prepare(plan, base, remote, workers, prepare_release, modules, root):
     seeds = matching_seeds(targets, [partial_index(plan, plan['inherited']), checked_base, recovered])
     cold = targets.keys() - seeds['owners'].keys()
     graph = {n: set(t['deps']) for n, t in targets.items()}
+    for n in targets:
+        if modules[n].conditional_backends:
+            graph[n].add(BACKEND_READER)
     facade_consumers = {n for n in targets if len(modules[n].extra_builds) == 2}
     basis = {n for n in targets if n.partition('.')[0] in BASIS} if facade_consumers else set()
     # Common facade generation reads all official and strict basis interfaces.
@@ -207,7 +231,7 @@ def prepare(plan, base, remote, workers, prepare_release, modules, root):
     successors = defaultdict(list)
     first_part = UNIT_PART_START + int(digest(sorted(units))[:9], 16) * 100000
     for i, key in enumerate(sorted(units)):
-        units[key].update(part=first_part + i // 600 * 8, queue=i % (4 * workers))
+        units[key]['part'] = first_part + i // 600 * 8
     # Groups were emitted in topological order. Compress transitive edges while
     # preserving cold dependencies reached through any number of warm modules.
     for members in groups:
@@ -231,6 +255,7 @@ def prepare(plan, base, remote, workers, prepare_release, modules, root):
     for key in reversed([owner[m[0]] for m in groups]):
         units[key]['next'] = sorted(successors[key])
         units[key]['rank'] = 1 + max((units[k]['rank'] for k in successors[key]), default=0)
+    assign_queues(units, workers)
     plan['compiler_dag'] = dict(seeds=seeds, units=units, names=names,
                                 **module_snapshot(root, modules, targets))
     if catalog['units'] and prepare_release:
@@ -250,6 +275,10 @@ def compile_units(root, plan, lane, remote, modules, output):
     installed = set()
     destination = root / cache.inventory.PROJECT_BUILD
     common_prepared = False
+    legacy = plan.get('legacy')
+    if legacy:
+        from lean_generation_checkpoints import remote_for
+        legacy_remote = remote_for(root)
     seed_members = defaultdict(set)
     for n, address in owners.items():
         seed_members[address].add(n)
@@ -262,6 +291,8 @@ def compile_units(root, plan, lane, remote, modules, output):
             path = Path(stage) / 'compiler.tar.gz'
             for key, wanted in needed.items():
                 row = rows[key]
+                if 'public_digest' in row:
+                    row = rows[key] = remote.resolve_checkpoint(row)
                 # A warm physical shard may serve many small DAG units. Install its
                 # other matching members during this download while space permits.
                 if cache.shutil.disk_usage(root).free > 6 * 1024**3:
@@ -275,6 +306,7 @@ def compile_units(root, plan, lane, remote, modules, output):
                 restored = restore_shard(path, row, wanted, modules, destination, root=root, kind='compiler')
                 if wanted != restored:
                     raise ValueError('compiler dependency could not be installed: ' + min(wanted - restored))
+                cache.materialize_shared(destination, modules, restored)
                 installed.update(restored)
 
     pending = set(units)
@@ -326,7 +358,10 @@ def compile_units(root, plan, lane, remote, modules, output):
             candidates = {}
             for candidate in ordered:
                 candidates.setdefault(units[candidate]['queue'], candidate)
-            for queue, candidate in candidates.items():
+            # Prefer the planned lane's queue. Earlier single-worker startups
+            # may still claim any ready queue when that lane has not started.
+            for queue in sorted(candidates, key=lambda q: q != lane):
+                candidate = candidates[queue]
                 if remote.claim_compiler_queue(plan, queue, lane):
                     held.add(queue)
                     key = candidate
@@ -337,8 +372,20 @@ def compile_units(root, plan, lane, remote, modules, output):
             continue
         members = set(units[key]['members'])
         install(decode_scope(units[key]['restore'], dag['names']))
-        cache.compiler.compile_roots(root, modules, units[key]['roots'])
-        common_prepared = cache.compile_omega_outputs(root, modules, members, common_prepared)
+        missing = members
+        if legacy:
+            candidates = {n for n in members if not modules[n].extra_builds}
+            try:
+                recovered = cache.restore_legacy(legacy_remote, legacy, candidates, destination)
+                cache.materialize_shared(destination, modules, recovered)
+                missing = members - recovered
+            except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
+                print(f'Compiler seed unavailable; continuing with Lake: {error}', file=sys.stderr)
+                legacy = None
+        if missing:
+            roots = units[key]['roots'] if missing == members else sorted(missing)
+            cache.compiler.compile_roots(root, modules, roots)
+            common_prepared = cache.compile_omega_outputs(root, modules, missing, common_prepared, prepared_reader=True)
         with tempfile.TemporaryDirectory(dir=output) as stage:
             archive = Path(stage) / 'unit.tar.gz'
             data = pack_shard(root, modules, members, archive, key, kind='compiler')
@@ -346,7 +393,7 @@ def compile_units(root, plan, lane, remote, modules, output):
             rows[key] = remote.save(task_plan, key, archive, row)
         installed.update(members)
         observed(key, rows[key])
-        compiled += len(members)
+        compiled += len(missing)
         if cache.shutil.disk_usage(root).free < 4 * 1024**3:
             for n in installed:
                 for path in cache.inventory.lean_artifact_paths(n, modules[n]):

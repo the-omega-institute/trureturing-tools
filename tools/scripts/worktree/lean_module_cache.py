@@ -36,6 +36,7 @@ OMEGA_ROOTS = OMEGA_LIBRARIES | {'OmegaChecks'}
 OMEGA_OVERLAYS = ('omega-strict', 'omega-common')
 OMEGA_CHECKS = Path('src/OmegaChecks')
 OMEGA_CERTIFICATE = 'OmegaChecks.Interface.Equations'
+BACKEND_READER = 'OmegaBuild.Plan'
 
 
 def namespace(name):
@@ -68,6 +69,12 @@ def omega_build_plan(root, modules, graph):
         strict_modules[name] = replace(modules[name], source=source)
     strict_graph = dict(graph)
     strict_graph.update(inventory.project_imports(root, strict_modules, sources=sorted(basis)))
+    plugin = inventory.INIT_PLUGIN
+    plugin_inputs = inventory.import_closure(graph, {plugin}) if plugin in graph else set()
+    if plugin_inputs:
+        for name in basis:
+            if namespace(name) == 'OmegaInit':
+                strict_graph[name] = strict_graph[name] | {plugin}
     # The command is a Lean elaborator. Its import makes selection possible;
     # only the official compiled metadata can say that it was actually invoked.
     command = 'OmegaBuild.Commands'
@@ -75,17 +82,24 @@ def omega_build_plan(root, modules, graph):
     for name in TopologicalSorter(graph).static_order():
         if graph[name] & may_select:
             may_select.add(name)
-    touched = {}
+    strict = set()
     for name in TopologicalSorter(strict_graph).static_order():
-        touched[name] = namespace(name) in OMEGA_LIBRARIES or name == command or any(touched[dep] for dep in strict_graph[name])
-    # The strict check builds all Omega library and check modules. The dual
-    # compilation also builds every downstream consumer and its local imports.
-    consumers = {n for n in strict_graph if touched[n] and namespace(n) not in {'OmegaChecks', 'OmegaBuild'}}
-    strict = inventory.import_closure(strict_graph, consumers | omega_roots(root, modules))
-    clients = {n for n in strict_graph if n.startswith('OmegaChecks.Portable.') and touched[n]}
-    common_roots = basis | clients | ({OMEGA_CERTIFICATE} & graph.keys())
-    common = inventory.import_closure(strict_graph, common_roots) | inventory.import_closure(graph, common_roots)
-    strict.update(common)
+        if namespace(name) == 'OmegaInit' or strict_graph[name] & strict:
+            strict.add(name)
+    clients = {n for n in strict if n.startswith('OmegaChecks.Portable.')}
+    common_roots = (basis | clients | {OMEGA_CERTIFICATE}) & strict
+    common_scope = inventory.import_closure(strict_graph, common_roots) | inventory.import_closure(graph, common_roots)
+    common = strict & common_scope
+    strict_scope = inventory.import_closure(strict_graph, strict)
+    augmented = dict(modules)
+    for name in plugin_inputs:
+        augmented[name] = replace(modules[name], plugin_input=True)
+    for name in (strict_scope | common_scope) - strict:
+        module = modules[name]
+        if module.package in ('trureturing', 'reg', 'leanInspectorInterface'):
+            shared = tuple(omega_build_dir(module, backend) for backend, scope in
+                           zip(OMEGA_OVERLAYS, (strict_scope, common_scope), strict=True) if name in scope)
+            augmented[name] = replace(augmented[name], shared_builds=shared)
 
     # The overlay owns the entire root configuration and, for a Reg request,
     # the actual Reg and interface package configurations. Bind their settings
@@ -106,12 +120,11 @@ def omega_build_plan(root, modules, graph):
     # Follow its own imports even when none of the released modules imports it.
     conditional_modules = (strict & may_select) - {command}
     if conditional_modules:
-        reader = compiler.scoped_imports(root, modules, {'OmegaBuild.Plan'})
+        reader = inventory.import_closure(graph, {BACKEND_READER})
         selection_inputs = digest([
             file_digest(root / OMEGA_CHECKS / 'portable.py'),
             [(name, file_digest(root / modules[name].source)) for name in sorted(reader)],
         ])
-    augmented = dict(modules)
     inputs = {}
     for name in strict:
         module = modules[name]
@@ -127,6 +140,35 @@ def omega_build_plan(root, modules, graph):
         augmented[name] = replace(module, extra_builds=tuple(builds), conditional_backends=conditional)
         inputs[name] = values
     return augmented, {n: graph[n] | (strict_graph[n] if n in strict else set()) for n in graph}, inputs
+
+
+def materialize_shared(build, modules, names):
+    """Give each overlay the verified ordinary outputs of its unchanged prerequisites."""
+    from lean_cache_release import has_unsafe_parent
+    for name in names:
+        module = modules[name]
+        if not module.shared_builds:
+            continue
+        for artifact in inventory.lean_artifact_paths(name, module):
+            source = build / artifact
+            if not source.is_file():
+                continue
+            if source.is_symlink() or has_unsafe_parent(build, artifact):
+                raise ValueError(f'unsafe ordinary compiler output: {artifact}')
+            for overlay in module.shared_builds:
+                relative = overlay / artifact.relative_to(module.build)
+                target = build / relative
+                if target.is_symlink() or has_unsafe_parent(build, relative):
+                    raise ValueError(f'unsafe shared compiler output: {relative}')
+                target.parent.mkdir(parents=True, exist_ok=True)
+                # Replace atomically. An overlay may be left over from an older checkout.
+                with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as staged:
+                    path = Path(staged.name)
+                try:
+                    shutil.copy2(source, path)
+                    os.replace(path, target)
+                finally:
+                    path.unlink(missing_ok=True)
 
 
 def build_omega_targets(root, lake, modules, names):
@@ -155,7 +197,14 @@ def prepare_common_facades(root, modules, strict_lake, portable):
             os.replace(staged.name, target)
 
 
-def compile_omega_outputs(root, modules, names, common_prepared):
+def compile_omega_outputs(root, modules, names, common_prepared, *, prepared_reader=False):
+    native = sorted(n for n in names if modules[n].plugin_input)
+    if native:
+        facets = [f'+{n}:c.o.export' for n in native]
+        if inventory.INIT_PLUGIN in native:
+            facets.append(inventory.INIT_PLUGIN + ':shared')
+        subprocess.run(['lake', 'build', *facets], cwd=root, check=True)
+    materialize_shared(root / inventory.PROJECT_BUILD, modules, names)
     strict = {n for n in names if modules[n].extra_builds}
     if not strict:
         return common_prepared
@@ -172,7 +221,9 @@ def compile_omega_outputs(root, modules, names, common_prepared):
             batch = candidates[offset:offset + 128]
             lake, _ = strict_lake.lake_layout(False, any(modules[n].package != 'trureturing' for n in batch))
             search_path = portable.output(*lake, 'env', 'printenv', 'LEAN_PATH').strip()
-            skipped = portable.backend_plan(search_path, batch)['mathlibOnly']
+            selection = (portable.backend_plan(search_path, batch, prepared=True) if prepared_reader
+                         else portable.backend_plan(search_path, batch))
+            skipped = selection['mathlibOnly']
             for name in skipped:
                 modules[name] = replace(modules[name], extra_builds=())
             strict.difference_update(skipped)
@@ -203,6 +254,8 @@ def compiler_environment(root):
 def checkout_targets(root, *, kind='compiler', requested=None, restore_only=False, scope_roots=None):
     modules = inventory.workspace_modules(root)
     roots = inventory.release_roots(modules) | omega_roots(root, modules)
+    if omega_enabled(root) and BACKEND_READER in modules:
+        roots.add(BACKEND_READER)
     registry = 'LeanInformationAudit.TemplateEnrollment'
     if registry in modules:
         roots.add(registry)
@@ -270,6 +323,8 @@ def checkout_targets(root, *, kind='compiler', requested=None, restore_only=Fals
         source = file_digest(root / module.source)
         inputs = [environment, module.package, pins[module.package], str(module.source), str(module.build),
                   module_config(configs[module.package], name), source, [(d, targets[d]['key']) for d in dependencies]]
+        if module.plugin_input:
+            inputs.append(['Lake plugin native outputs', sorted(str(p) for p in inventory.plugin_outputs(name, module))])
         if name in omega_inputs:
             inputs.extend(omega_inputs[name])
         key = digest(inputs)
@@ -547,7 +602,10 @@ def restore_artifacts(root, modules, targets, index, names, remote, destination,
                 if not set(members) <= set(row['members']) or row.get('artifact_kind') != index.get('kind'):
                     raise ValueError('shard content differs from publication index')
                 remote.download(row, archive)
-                restored.update(restore_shard(archive, row, members, modules, destination, root=root, kind=kind))
+                added = restore_shard(archive, row, members, modules, destination, root=root, kind=kind)
+                if kind == 'compiler':
+                    materialize_shared(destination, modules, added)
+                restored.update(added)
     return restored
 
 
@@ -623,7 +681,7 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
     compiled = uploaded = 0
     common_prepared = False
     legacy = plan.get('legacy')
-    if legacy:
+    if legacy and 'compiler_dag' not in plan:
         from lean_generation_checkpoints import remote_for
         old_remote = remote_for(root)
     dag_install = None
@@ -666,7 +724,10 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
                                                    remote, destination, 'compiler'))
             if legacy:
                 try:
-                    installed.update(restore_legacy(old_remote, legacy, {n for n in scope - installed if not modules[n].extra_builds}, destination))
+                    candidates = {n for n in scope - installed if not modules[n].extra_builds}
+                    recovered = restore_legacy(old_remote, legacy, candidates, destination)
+                    materialize_shared(destination, modules, recovered)
+                    installed.update(recovered)
                 except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
                     print(f'Compiler seed unavailable; continuing with Lake: {error}', file=sys.stderr)
                     legacy = None

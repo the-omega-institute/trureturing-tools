@@ -83,7 +83,20 @@ class Service:
             return {'merge_base_commit': {'sha': self.ref}}
         raise ValueError(path)
 
-    def request(self, url, *, method, path=None):
+    def request(self, url, *, method='GET', path=None, headers=None, accept=None, authenticate=True):
+        if '/releases/expanded_assets/' in url:
+            assert method == 'GET' and not authenticate and accept == 'text/html'
+            tag = urlsplit(url).path.split('/')[-1]
+            assets = self.releases.get(tag, {}).get('assets', [])
+            body = ''.join(f'<li><a href="/{transport.host.REPO}/releases/download/{tag}/{a["name"]}"></a>'
+                           f'<clipboard-copy value="{a["digest"]}"></clipboard-copy></li>'
+                           for a in assets if a['state'] == 'uploaded').encode()
+            etag = '"' + hashlib.sha256(body).hexdigest() + '"'
+            if headers.get('If-None-Match') == etag:
+                raise transport.host.GitHubCommandError(1, ['GET'], stderr='HTTP 304: ')
+            response = io.BytesIO(gzip.compress(body))
+            response.headers = {'ETag': etag, 'Content-Encoding': 'gzip'}
+            return response
         if method == 'DELETE' and '/git/refs/tags/' in url:
             del self.claims[url.split('/git/refs/')[1]]
             return io.BytesIO(b'')
@@ -203,6 +216,26 @@ class VersionedShards(unittest.TestCase):
             self.assertEqual(len(self.service.claims), 1)
             retry.clear_compiler_claims(plan['source'])
             self.assertEqual(self.service.claims, {})
+
+    def test_public_part_notifies_between_api_audits_and_revalidates_digest(self):
+        from lean_module_dag import unit_key, unit_row
+        plan = self.plan('a' * 40)
+        key = unit_key(plan['mathlib'], {'Small': 'input'})
+        row = dict(unit_row(key, ['Small']), part=transport.UNIT_PART_START)
+        plan.update(shards={key: row}, lanes=[[] for _ in range(20)])
+        self.remote.next_inventory_check = float('inf')
+        with patch.object(self.remote, 'indexed_compiler_progress', side_effect=AssertionError('REST poll')):
+            self.assertEqual(self.remote.compiler_progress(plan, {key}), {})
+            path = self.root / 'unit.gz'
+            path.write_bytes(b'compressed')
+            sha = hashlib.sha256(path.read_bytes()).hexdigest()
+            saved = self.remote.save(plan, key, path, dict(row, sha256=sha, bytes=path.stat().st_size))
+            observed = self.remote.compiler_progress(plan, {key})[key]
+            self.assertEqual(self.remote.compiler_progress(plan, {key})[key], observed)
+            self.assertEqual(self.remote.progress_interval, transport.PUBLIC_PROGRESS_SECONDS)
+            self.assertEqual(self.remote.resolve_checkpoint(observed)['bytes'], saved['bytes'])
+            with self.assertRaisesRegex(ValueError, 'differs'):
+                self.remote.resolve_checkpoint(dict(observed, public_digest='a' * 64))
 
     def test_compiler_unit_subsets_overflow_discovery_and_interrupted_upload(self):
         from lean_module_dag import unit_key, unit_row

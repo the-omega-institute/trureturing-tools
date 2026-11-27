@@ -15,8 +15,32 @@ import unittest
 from unittest.mock import patch
 
 import lean_module_cache as cache
+from lean_module_dag import assign_queues
 from lean_artifact_inventory import Module, PROJECT_BUILD
 from lean_module_shards import pack_shard, restore_shard
+
+
+class CompilerQueuePlanning(unittest.TestCase):
+    def test_dependency_handoff_balances_chains_and_wide_fanout(self):
+        paths = {
+            'producer': (3, [], 2),
+            'independent': (1, [], 1),
+            'left': (2, ['producer'], 10),
+            'right': (2, ['producer'], 1),
+            'join': (1, ['left', 'right'], 1),
+        }
+        def run(workers):
+            units = {key: dict(rank=rank, deps=deps, members=range(count))
+                     for key, (rank, deps, count) in paths.items()}
+            assign_queues(units, workers)
+            return {key: unit['queue'] for key, unit in units.items()}
+
+        queues = run(2)
+        self.assertNotEqual(queues['independent'], queues['producer'])
+        self.assertEqual(queues['left'], queues['producer'])
+        self.assertNotEqual(queues['right'], queues['left'])
+        self.assertEqual(queues['join'], queues['left'])
+        self.assertEqual(set(run(1).values()), {0})
 
 
 class MemoryRemote:
@@ -191,10 +215,10 @@ class ModuleReleases(unittest.TestCase):
         return [cache.work(self.root, plan, i, self.remote, self.root / 'receipts') for i in range(len(plan['lanes']))]
 
     def dag_plan(self, workers=2, base=None):
-        _, targets = cache.checkout_targets(self.root)
+        modules, targets = cache.checkout_targets(self.root)
         return cache.make_plan(self.source, self.pin, targets, base, self.remote, cache.DEFAULT_CAPACITY,
                                workers, mathlib_version=self.version, kind='compiler', compiler_dag=True,
-                               prepare_release=True, modules=self.modules, root=self.root)
+                               prepare_release=True, modules=modules, root=self.root)
 
     def test_static_plan_keeps_cold_ancestor_below_a_warm_intermediary(self):
         from lean_module_dag import decode_scope
@@ -259,6 +283,9 @@ class ModuleReleases(unittest.TestCase):
         (self.root / 'D5/D.lean').write_text('import D5.B\nimport D5.C\ndef valueD := valueB+valueC\n')
         self.modules['D5.D'] = Module('trureturing', Path('D5/D.lean'), Path('.'))
         plan = self.dag_plan(workers=2)
+        # Force an actual inter-runner handoff in this four-module execution fixture.
+        for row in plan['compiler_dag']['units'].values():
+            row['queue'] = int('D5.C' in row['members'])
         condition = Condition()
         branches = Barrier(2, timeout=20)
         ready = Barrier(2, timeout=20)
@@ -321,8 +348,9 @@ class ModuleReleases(unittest.TestCase):
         shutil.rmtree(self.root / PROJECT_BUILD)
         self.remote.queues.clear()
 
+        # The other runner owns the queue while A and B become visible out of order.
         def claim(plan, queue, lane):
-            return not observed or queue == plan['compiler_dag']['units'][owner['D5.C']]['queue']
+            return not observed
 
         with patch.object(self.remote, 'compiler_progress', side_effect=lambda *args: observed.popleft()), \
              patch.object(self.remote, 'wait_compiler_progress', return_value=None), \
@@ -331,6 +359,19 @@ class ModuleReleases(unittest.TestCase):
         self.assertEqual(result['compiled_modules'], 1)
         self.assertEqual(self.compiled, [['D5.C']])
         self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(owner))
+
+    def test_dag_adopts_available_first_publication_frames(self):
+        plan = self.dag_plan(workers=1)
+        self.lake('build', '+D5.A:leanArts')
+        plan['legacy'] = {'targets': {'D5.A': {}}}
+        def restore(remote, index, names, destination):
+            return names & index['targets'].keys()
+        with patch('lean_generation_checkpoints.remote_for', return_value=object()), \
+             patch.object(cache, 'restore_legacy', side_effect=restore):
+            result = self.workers(plan)
+        self.assertEqual(sum(r['compiled_modules'] for r in result), 2)
+        self.assertCountEqual([n for call in self.compiled for n in call], ['D5.B', 'D5.C'])
+        self.assertEqual(len(cache.finish(plan, self.remote)['targets']), 3)
 
     def test_cross_source_reuses_matching_member_of_interrupted_unit(self):
         # A and B fit in one unit. A later edit invalidates B while A and its consumer C still match.
@@ -727,6 +768,58 @@ def main : IO Unit := do
             'strict_lake': strict_api, 'portable': portable_api}[name]))
         return portable_api
 
+    def test_strict_foundation_restores_the_ordinary_native_plugin(self):
+        from lean_artifact_inventory import plugin_outputs
+
+        self.omega_fixture()
+        plugin = cache.inventory.INIT_PLUGIN
+        helpers = {plugin + '.Layout', plugin + '.Proofs'}
+        names = helpers | {plugin}
+        for name in sorted(names):
+            source = Path('src', *name.split('.')).with_suffix('.lean')
+            self.modules[name] = Module('trureturing', source, Path('.'))
+            path = self.root / source
+            path.parent.mkdir(exist_ok=True, parents=True)
+            path.write_text(('import ' + '\nimport '.join(sorted(helpers)) + '\n') if name == plugin
+                            else 'namespace ' + name + '\ndef value : Nat := 1\nend ' + name + '\n')
+        with self.cfg.open('a') as file:
+            file.write(f'\n[[lean_lib]]\nname = "{plugin}"\nsrcDir="src"\n')
+        modules, original = cache.checkout_targets(self.root)
+        self.assertIn(plugin, original['OmegaInit']['deps'])
+        self.assertEqual(set(original[plugin]['deps']), helpers)
+        for n in names:
+            self.assertEqual(modules[n].extra_builds, ())
+            self.assertTrue(modules[n].plugin_input)
+        archive = self.root / 'plugin.tar.gz'
+        cache.compile_omega_outputs(self.root, modules, names, False)
+        descriptor = pack_shard(self.root, modules, names, archive, 'c'*64, kind='compiler')
+        with tempfile.TemporaryDirectory() as tmp:
+            other = Path(tmp) / 'checkout'
+            shutil.copytree(self.root, other, ignore=shutil.ignore_patterns('.lake', '*.tar.gz'))
+            dest = other / PROJECT_BUILD
+            self.assertEqual(restore_shard(archive, descriptor, names, modules, dest,
+                                           root=other, kind='compiler'), names)
+            cache.materialize_shared(dest, modules, names)
+            config = other / 'strict-plugin.toml'
+            text = (other / 'lakefile.toml').read_text().replace('name = "OmegaInit"\n',
+                f'name = "OmegaInit"\nneeds=["{plugin}:shared"]\nplugins=["{plugin}:shared"]\n')
+            config.write_text('buildDir=".lake/build/omega-strict"\n' + text)
+            subprocess.run(['lake', '-f', config, '--no-build', 'build', plugin + ':shared'], cwd=other, check=True)
+            built = subprocess.run(['lake', '-f', config, 'build', '+OmegaInit:olean'], cwd=other,
+                                   check=True, capture_output=True, text=True)
+            self.assertNotIn('Built ' + plugin, built.stdout + built.stderr)
+        path, = [p for p in plugin_outputs(plugin, modules[plugin]) if p.parent.name == 'lib']
+        (self.root / PROJECT_BUILD / path).write_bytes(b'invalid native plugin')
+        with self.assertRaisesRegex(ValueError, 'differs from its Lake trace'):
+            pack_shard(self.root, modules, names, archive, 'c'*64, kind='compiler')
+        helper = modules[plugin + '.Layout'].source
+        with (self.root / helper).open('a') as source:
+            source.write('def extraPluginLayout := 2\n')
+        _, updated = cache.checkout_targets(self.root)
+        for name in (plugin + '.Layout', plugin, 'OmegaInit', 'OmegaMathlib', 'D5.A'):
+            self.assertNotEqual(original[name]['key'], updated[name]['key'], name)
+        self.assertEqual(original['D5.B']['key'], updated['D5.B']['key'])
+
     def test_omega_backends_share_module_identity_and_restore_together(self):
         self.omega_fixture()
         strict = self.root / 'strict'
@@ -850,6 +943,37 @@ def main : IO Unit := do
         (checks / 'strict_lake.py').write_text('# changed strict configuration\n')
         self.assertTrue({'OmegaInit', 'OmegaMathlib', 'D5.A', 'D5.C'} <= changed())
 
+    def test_strict_uses_the_omegainit_family_and_shares_ordinary_prerequisites(self):
+        self.omega_fixture()
+        leaf = 'OmegaInit.Leaf'
+        path = Path('src/OmegaInit/Leaf.lean')
+        for directory, value in [('src', 3), ('strict', 4)]:
+            source = self.root / directory / 'OmegaInit/Leaf.lean'
+            source.parent.mkdir(exist_ok=True)
+            source.write_text(f'def leafValue := {value}\n')
+        self.modules[leaf] = Module('trureturing', path, Path('.'))
+        (self.root / 'D5/A.lean').write_text('import OmegaInit.Leaf\nimport D5.B\ndef valueA := leafValue+valueB\n')
+        plan = self.dag_plan(workers=2)
+        dag = plan['compiler_dag']
+        from lean_module_dag import worker_modules
+        modules = worker_modules(self.root, dag)
+        self.assertEqual(modules['D5.A'].extra_builds, (Path('omega-strict'),))
+        self.assertEqual(modules['D5.C'].extra_builds, (Path('omega-strict'),))
+        ordinary = modules['D5.B']
+        self.assertEqual(ordinary.extra_builds, ())
+        self.assertEqual(ordinary.shared_builds, (Path('omega-strict'),))
+        self.workers(plan)
+        index = cache.finish(plan, self.remote)
+        build = self.root / PROJECT_BUILD
+        shutil.rmtree(build)
+        cache.restore(self.root, index, ['D5.C'], self.remote, build, kind='compiler')
+        official = build / 'lib/lean/D5/B.trace'
+        shared = build / 'omega-strict/lib/lean/D5/B.trace'
+        self.assertEqual(official.read_bytes(), shared.read_bytes())
+        config = self.root / '.lake/omega-strict.toml'
+        self.lake('-f', str(config), '--no-build', 'build', '+D5.C:olean')
+        self.assertFalse((build / 'omega-common/lib/lean/D5/B.olean').exists())
+
     def test_compiled_backend_selection_survives_scoped_cache_and_marker_removal(self):
         api = self.omega_fixture()
         with self.cfg.open('a') as config:
@@ -884,7 +1008,7 @@ def main : IO Unit := do
         self.assertFalse(read)
         self.workers(plan)
         index = cache.finish(plan, self.remote)
-        self.assertEqual(read, set(reasons) | {'D5.B'})
+        self.assertEqual(read, set(reasons))
         build = self.root / PROJECT_BUILD
         shutil.rmtree(build)
         read.clear()
@@ -897,13 +1021,14 @@ def main : IO Unit := do
             self.assertTrue((build / base).is_file())
             self.assertFalse((build / 'omega-strict' / base).exists())
             self.assertFalse((build / 'omega-common' / base).exists())
-        self.assertTrue((build / 'omega-strict/lib/lean/D5/B.olean').is_file())
+        self.assertFalse((build / 'omega-strict/lib/lean/D5/B.olean').exists())
         for filename in ('src/OmegaBuild/Plan.lean', 'src/OmegaBuild/Parts.lean', 'src/OmegaChecks/portable.py'):
             reader_file = self.root / filename
             original = reader_file.read_bytes()
             reader_file.write_bytes(original + b'\n')
             changed = self.plan(index)
-            for name in set(reasons) | {'D5.B'}:
+            self.assertEqual(changed['targets']['D5.B']['key'], plan['targets']['D5.B']['key'])
+            for name in reasons:
                 self.assertNotEqual(changed['targets'][name]['key'], plan['targets'][name]['key'])
             stale = self.root / ('stale-' + reader_file.name)
             cache.restore(self.root, index, ['D5.C'], self.remote, stale)

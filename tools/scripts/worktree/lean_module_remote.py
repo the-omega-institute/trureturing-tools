@@ -2,6 +2,7 @@
 
 from collections import Counter
 from functools import cache
+import gzip
 import hashlib
 from itertools import chain
 import json
@@ -30,6 +31,7 @@ PROMOTED = 'published.json'
 TAG = re.compile(r'lean-modules-([0-9a-f]{40})(-report)?(?:-part-([2-9]|[1-9][0-9]+))?')
 CAPACITY = 900
 UNIT_PART_START = 10000000
+PUBLIC_PROGRESS_SECONDS = 15
 
 
 def json_body(value):
@@ -111,6 +113,9 @@ class Remote:
         self.busy_claims = set()
         self.next_job_check = 0
         self.progress_interval = 60
+        self.public_pages = {}
+        self.next_inventory_check = 0
+        self.public_resume = 0
         self.next_progress = 0
         self.queue_claims = {}
         self.next_claim_read = 0
@@ -441,7 +446,7 @@ class Remote:
             path.write_bytes(data)
             self.stage(version, 'compiler-units-' + sha + '.json', path, sha)
 
-    def compiler_progress(self, plan, pending):
+    def indexed_compiler_progress(self, plan, pending):
         result = {}
         parts = {}
         for key in pending:
@@ -468,11 +473,81 @@ class Remote:
                 keys = retry
                 if not keys:
                     break
-        # Rush-hour waits must leave the shared repository API budget for writes.
-        # A worker with locally ready jobs continues without refreshing these catalogs.
-        self.progress_interval = max(60, 9 * len(plan['lanes']) * len(parts))
-        self.next_progress = time.monotonic() + self.progress_interval
         return result
+
+    def public_compiler_part(self, tag):
+        previous_etag, previous_names = self.public_pages.get(tag, (None, {}))
+        headers = {'Accept-Encoding': 'gzip'}
+        if previous_etag:
+            headers['If-None-Match'] = previous_etag
+        url = f'https://github.com/{host.REPO}/releases/expanded_assets/{tag}'
+        try:
+            with self.http.request(url, headers=headers, accept='text/html', authenticate=False) as response:
+                stream = gzip.GzipFile(fileobj=response) if response.headers.get('Content-Encoding') == 'gzip' else response
+                body = stream.read(8 * 1024**2 + 1)
+                if len(body) > 8 * 1024**2:
+                    raise ValueError('compiler asset listing exceeded byte limit')
+                etag = response.headers.get('ETag')
+        except host.GitHubCommandError as error:
+            if (error.stderr or '').startswith('HTTP 304:'):
+                return previous_names
+            if missing(error):
+                return {}
+            raise
+        prefix = f'/{host.REPO}/releases/download/{tag}/'.encode()
+        names = {}
+        for item in body.split(b'</li>'):
+            link = re.search(rb'href="' + re.escape(prefix) + rb'(compiler-unit-[0-9a-f]{64}\.tar\.gz)"', item)
+            if link:
+                sha = re.search(rb'value="sha256:([0-9a-f]{64})"', item)
+                if not sha:
+                    raise ValueError('compiler download listing has no digest')
+                names[link[1].decode()] = sha[1].decode()
+        self.public_pages[tag] = etag, names
+        return names
+
+    def compiler_progress(self, plan, pending):
+        parts = {}
+        for key in pending:
+            row = plan['shards'][key]
+            parts.setdefault(row['part'], {})[row['asset']] = key
+        now = time.monotonic()
+        result = {}
+        if now >= self.public_resume:
+            try:
+                for part, expected in parts.items():
+                    tag = f'{plan["version"]}-part-{part}'
+                    inventory = self.public_compiler_part(tag)
+                    for name in expected.keys() & inventory.keys():
+                        key = expected[name]
+                        result[key] = dict(plan['shards'][key], version=tag, public_digest=inventory[name])
+            except (ValueError, OSError, EOFError, host.GitHubCommandError) as error:
+                print(f'Public compiler progress unavailable, using release metadata: {error}', file=sys.stderr)
+                self.public_resume = now + 300
+        # Public pages use conditional requests without repository API credentials.
+        # A bounded authoritative reconciliation also finds interrupted-upload overflow.
+        if now >= self.next_inventory_check:
+            result.update(self.indexed_compiler_progress(plan, pending - result.keys()))
+            self.next_inventory_check = now + max(60, 9 * len(plan['lanes']) * len(parts))
+        self.progress_interval = PUBLIC_PROGRESS_SECONDS
+        if now < self.public_resume:
+            self.progress_interval = max(1, min(self.public_resume, self.next_inventory_check) - now)
+        self.next_progress = now + self.progress_interval
+        return result
+
+    def resolve_checkpoint(self, row):
+        if not row.get('public_digest'):
+            return row
+        tag = row['version']
+        catalog = self.catalog(tag)
+        asset = catalog[1].get(row['asset']) if catalog else None
+        if not asset or asset['state'] != 'uploaded':
+            catalog = self.catalog(tag, refresh=True)
+            asset = catalog[1].get(row['asset']) if catalog else None
+        if (not asset or asset['state'] != 'uploaded' or asset['size'] <= 0
+                or asset['digest'] != 'sha256:' + row['public_digest']):
+            raise ValueError('compiler progress differs from immutable release metadata')
+        return dict(row, bytes=asset['size'], sha256=row['public_digest'])
 
     @cache
     def claim_identity(self, source, lane):

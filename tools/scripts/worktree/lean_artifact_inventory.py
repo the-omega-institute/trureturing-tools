@@ -10,6 +10,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import sys
 import subprocess
 import tarfile
 import tomllib
@@ -17,6 +18,7 @@ import tomllib
 
 # The inspector packages share a source directory. The reg inspector owns the
 # test and analysis roots declared in its separate Lake workspace.
+INIT_PLUGIN = "OmegaChecks.InitCompiler"
 PROJECT_BUILD = Path(".lake/build")
 INSPECTOR = Path("tools/lean-inspector")
 REG_INSPECTOR = Path("tools/lean-inspector-reg")
@@ -36,6 +38,8 @@ class Module:
     report: bool = False
     report_utility: dict | None = field(default=None, compare=False, hash=False)
     conditional_backends: bool = False
+    shared_builds: tuple[Path, ...] = ()
+    plugin_input: bool = False
 
 
 @dataclass(frozen=True)
@@ -205,11 +209,26 @@ def compiler_variants(module):
     return [Module(module.package, module.source, build) for build in (module.build, *module.extra_builds)]
 
 
+def plugin_outputs(name, module):
+    if not module.plugin_input:
+        return set()
+    outputs = {compiler_path(name, module, "ir", "c.o.export")}
+    if name == INIT_PLUGIN:
+        suffix = "dylib" if sys.platform == "darwin" else "so"
+        outputs.add(PurePosixPath(module.build, "lib", "libtrureturing_OmegaChecks_InitCompiler." + suffix))
+    return outputs
+
+
+def plugin_paths(name, module):
+    return {path.with_name(path.name + suffix) for path in plugin_outputs(name, module)
+            for suffix in ("", ".hash", ".trace")}
+
+
 def lean_artifact_paths(name, module):
     if module.extra_builds:
         return set().union(*(lean_artifact_paths(name, variant) for variant in compiler_variants(module)))
     relative = PurePosixPath(*name.split("."))
-    output = set()
+    output = plugin_paths(name, module)
     for location, suffixes in (("lib/lean", LEAN_SUFFIXES), ("ir", ("c", "bc"))):
         stem = PurePosixPath(module.build, location, relative)
         for suffix in suffixes:
