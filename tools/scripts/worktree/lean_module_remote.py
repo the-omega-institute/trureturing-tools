@@ -23,12 +23,18 @@ from lean_release_index import valid_digest
 PREFIX = 'lean-modules-'
 MARKER = 'heads/lean-modules-published'
 INDEX = 'index.json'
+LAYOUT = 'publication-layout.json'
 TAG = re.compile(r'lean-modules-([0-9a-f]{40})(?:-part-([2-9]|[1-9][0-9]+))?')
 CAPACITY = 900
 
 
 def json_body(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+
+
+def split_filename(group, fingerprint):
+    identity = hashlib.sha256(json_body([group, fingerprint])).hexdigest()
+    return 'split-' + identity + '.json'
 
 
 def release_page(index, checkout_version=None):
@@ -182,7 +188,7 @@ class Remote:
 
     def candidates(self, plan):
         # Current-version writes by sibling jobs may have happened since planning.
-        tags = list(self.tags(plan['version'], plan.get('base_version')))
+        tags = [plan['version']] if plan.get('source_only') else list(self.tags(plan['version'], plan.get('base_version')))
         prefix = 'tags/' + plan['version'] + '-part-'
         for row in self.api('git/matching-refs/' + prefix):
             tag = row['ref'].removeprefix('refs/tags/')
@@ -239,8 +245,9 @@ class Remote:
             raise ValueError('versioned shard metadata differs from index: ' + row['asset'])
         self.fetch(row['version'], asset, path)
 
-    def stage(self, version, name, path, digest, *, index=False):
+    def stage(self, version, name, path, digest):
         publisher()
+        primary_metadata = name in (INDEX, LAYOUT)
         # The planner owns the shared Release. Each worker alone creates its overflow parts.
         first_overflow = 2 + (self.lane or 0)
         for part in chain((1,), range(first_overflow, first_overflow + 9998 * self.lanes, self.lanes)):
@@ -250,7 +257,7 @@ class Remote:
                 raise ValueError('planner did not prepare module Release: ' + tag)
             release, assets = catalog
             existing = assets.get(name)
-            if not existing and not index and len(assets) >= CAPACITY:
+            if not existing and not primary_metadata and len(assets) >= CAPACITY:
                 continue
             if not existing:
                 params = urlencode({'name': name})
@@ -261,21 +268,21 @@ class Remote:
                 except host.GitHubCommandError:
                     _, assets = self.catalog(tag, refresh=True)
                     existing = assets.get(name)
-                    if not existing and not index and len(assets) >= CAPACITY:
+                    if not existing and not primary_metadata and len(assets) >= CAPACITY:
                         continue
                     if not existing:
                         raise
             if existing['state'] == 'starter':
-                if not index:
+                if not primary_metadata:
                     continue
-                # Only the exclusive finalizer writes index.json; recover an interrupted empty reservation.
-                if existing['size'] or existing['name'] != INDEX:
-                    raise ValueError('invalid incomplete module index')
+                # The exclusive planner and finalizer can recover their own interrupted reservations.
+                if existing['size'] or existing['name'] != name:
+                    raise ValueError('invalid incomplete module Release metadata: ' + name)
                 url = f'https://api.github.com/repos/{host.REPO}/releases/assets/{existing["id"]}'
                 with self.http.request(url, method='DELETE'):
                     pass
-                assets.pop(INDEX)
-                return self.stage(version, name, path, digest, index=True)
+                assets.pop(name)
+                return self.stage(version, name, path, digest)
             if (existing['state'] != 'uploaded' or existing['digest'] != 'sha256:' + digest
                     or existing['size'] != path.stat().st_size):
                 raise ValueError('immutable Release asset conflicts: ' + name)
@@ -348,12 +355,43 @@ class Remote:
         self.actions('put', row['key'], row['sha256'], path)
         return {**row, 'version': tag}
 
+    def staged_index(self, version):
+        catalog = self.catalog(version, refresh=True)
+        asset = catalog[1].get(INDEX) if catalog else None
+        if asset and asset['state'] == 'uploaded':
+            return self.latest(version)
+        return None
+
+    def publication_layout(self, version):
+        catalog = self.catalog(version)
+        asset = catalog[1].get(LAYOUT) if catalog else None
+        if not asset or (asset['state'] == 'starter' and asset['size'] == 0):
+            return None
+        if not 0 < asset['size'] <= MAX_INDEX:
+            raise ValueError('invalid module publication layout size')
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / LAYOUT
+            self.fetch(version, asset, path)
+            return read(path)
+
+    def save_publication_layout(self, version, layout):
+        data = json_body(layout)
+        if len(data) > MAX_INDEX:
+            raise ValueError('invalid module publication layout size')
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / LAYOUT
+            path.write_bytes(data)
+            self.stage(version, LAYOUT, path, hashlib.sha256(data).hexdigest())
+
     def splits(self, plan):
         result = {}
-        expected = {'split-' + row['fingerprint'] + '.json': name for name, row in plan['shards'].items()}
+        expected = {}
+        for group, row in plan['shards'].items():
+            expected[split_filename(group, row['fingerprint'])] = (group, True)
+            expected['split-' + row['fingerprint'] + '.json'] = (group, False)
         for tag, assets in self.candidates(plan):
-            for filename in expected.keys() & assets.keys():
-                group = expected[filename]
+            for filename in sorted(expected.keys() & assets.keys(), key=lambda key: not expected[key][1]):
+                group, qualified = expected[filename]
                 if group in result:
                     continue
                 asset = assets[filename]
@@ -365,9 +403,14 @@ class Remote:
                     self.fetch(tag, asset, path)
                     split = read(path)
                 contents = [name for members in split['layout'].values() for name in members]
-                if (split['fingerprint'] != fingerprint or split['group'] != group
-                        or sorted(contents) != sorted(plan['shards'][group]['members'])):
+                if split['fingerprint'] != fingerprint or sorted(contents) != sorted(plan['shards'][group]['members']):
                     raise ValueError('split members differ from planned shard')
+                if split['group'] != group:
+                    owner = split['group']
+                    if qualified or not all(n == owner or n.startswith(owner + '.') for n in contents):
+                        raise ValueError('split group differs from its address')
+                    # Historical filenames identified members only. A new boundary may own the same members.
+                    continue
                 result[group] = split['layout']
         return result
 
@@ -377,7 +420,7 @@ class Remote:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'split.json'
             path.write_bytes(data)
-            self.stage(plan['version'], 'split-' + fingerprint + '.json', path, hashlib.sha256(data).hexdigest())
+            self.stage(plan['version'], split_filename(group, fingerprint), path, hashlib.sha256(data).hexdigest())
 
     def clear_label(self, asset, fingerprint, size, digest):
         if (not asset or asset.get('label') != fingerprint or asset.get('state') != 'uploaded'
@@ -447,7 +490,7 @@ class Remote:
         with tempfile.TemporaryDirectory() as stage:
             path = Path(stage) / INDEX
             path.write_bytes(data)
-            version, asset = self.stage(index['version'], INDEX, path, digest, index=True)
+            version, asset = self.stage(index['version'], INDEX, path, digest)
             readback = Path(stage) / 'readback'
             self.fetch(version, asset, readback)
             key = 'lean-module-index-' + source
