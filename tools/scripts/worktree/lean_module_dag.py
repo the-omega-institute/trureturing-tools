@@ -11,7 +11,6 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import time
 import zlib
 
 import lean_compile_layers as compiler
@@ -22,7 +21,6 @@ from lean_release_index import safe_path, valid_digest
 UNIT_LIMIT = 32
 BASIS = {'OmegaInit', 'OmegaMathlib'}
 QUEUE_HANDOFF_COST = 5
-MAX_IDLE_SECONDS = 600
 
 
 def unit_key(mathlib, inputs):
@@ -307,9 +305,6 @@ def compile_units(root, plan, lane, remote, modules, output):
             path = Path(stage) / 'compiler.tar.gz'
             for key, wanted in needed.items():
                 row = rows[key]
-                if row is None:
-                    rebuild.update(wanted)
-                    continue
                 if 'public_digest' in row:
                     row = rows[key] = remote.resolve_checkpoint(row)
                 # A warm physical shard may serve many small DAG units. Install its
@@ -354,28 +349,14 @@ def compile_units(root, plan, lane, remote, modules, output):
     ready = {key for key, count in remaining.items() if not count}
 
     persisted = set()
-    awaiting_metadata = set()
-    last_progress = time.monotonic()
 
     def observed(key, row):
-        nonlocal last_progress
-        last_progress = time.monotonic()
         rows[key] = row
         owners.update(dict.fromkeys(units[key]['members'], key))
         seed_members[key].update(units[key]['members'])
         persisted.add(key)
         ready.discard(key)
-        if remaining[key]:
-            # Publishing a unit required its missing ancestors to have completed.
-            # Let their catalog entries arrive, even on a fresh attempt with no claims.
-            parents = list(units[key]['deps'])
-            while parents:
-                dep = parents.pop()
-                if dep in pending and dep not in persisted and dep not in awaiting_metadata:
-                    awaiting_metadata.add(dep)
-                    ready.discard(dep)
-                    parents.extend(units[dep]['deps'])
-        # A child becomes schedulable after each parent has an archive or a local rebuild route.
+        # A cached child may come from a different partition; settle the actual plan's parents first.
         settled = [] if remaining[key] else [key]
         while settled:
             finished = settled.pop()
@@ -385,54 +366,28 @@ def compile_units(root, plan, lane, remote, modules, output):
                 if not remaining[child]:
                     if child in persisted:
                         settled.append(child)
-                    elif child not in awaiting_metadata:
+                    else:
                         ready.add(child)
 
     task_plan = dict(plan, shards=units)
     output.mkdir(parents=True, exist_ok=True)
-    refresh = True
+    # Within each rank and preferred queue, start different lanes at different
+    # points on the sorted fingerprint ring to spread simultaneous claims.
+    pivot = f'{(lane << 256) // len(plan["lanes"]):064x}'
     while pending:
-        discovered = remote.compiler_progress(task_plan, pending - persisted) if refresh else {}
-        refresh = False
-        for key, row in discovered.items():
+        for key, row in remote.compiler_progress(task_plan, pending - persisted).items():
             observed(key, row)
         if not pending:
             break
-        ordered = sorted(ready, key=lambda k: (-units[k]['rank'], k))
-        # Spread simultaneous claim attempts across equally urgent work.
-        if ordered:
-            top = [k for k in ordered if units[k]['rank'] == units[ordered[0]]['rank']]
-            offset = lane % len(top)
-            ordered[:len(top)] = top[offset:] + top[:offset]
-        # The planned lane uses its own queue cheaply. A borrowed queue admits
-        # distinct units concurrently, so a later arrival can still help.
-        ordered.sort(key=lambda k: units[k]['queue'] != lane)
-        key = next((candidate for candidate in ordered if remote.claim_compiler_queue(
-            plan, units[candidate]['queue'], lane, candidate)), None)
+        ordered = sorted(ready, key=lambda k: (-units[k]['rank'], units[k]['queue'] != lane, k < pivot, k))
+        key = remote.claim_compiler_unit(plan, lane, ordered)
         if key is None:
-            # A visible child proves its ancestors finished. If the parent archive
-            # was evicted, its verified sources can supply the consumer directly.
-            missing_parents = {k for k in awaiting_metadata - persisted if not remaining[k]}
-            if missing_parents:
-                for parent in missing_parents:
-                    observed(parent, remote.retry_checkpoint(task_plan, parent))
-                continue
-            if time.monotonic() - last_progress >= MAX_IDLE_SECONDS:
-                # Every outstanding root is claimed elsewhere. Cache eviction can
-                # erase the last evidence of a completed queue. Finish this lane's
-                # physical shards locally without stealing the producer's claims.
-                print('Compiler checkpoints unavailable for outstanding queues; building assigned shards locally',
-                      file=sys.stderr)
-                for missing_key in pending - persisted:
-                    rows[missing_key] = None
-                    owners.update(dict.fromkeys(units[missing_key]['members'], missing_key))
-                break
             remote.wait_compiler_progress(plan)
-            refresh = True
             continue
-        if retry:
+        if retry or 'part' not in units[key]:
             saved = remote.retry_checkpoint(task_plan, key)
             if saved:
+                remote.complete_compiler_unit(plan, lane, key, saved)
                 observed(key, saved)
                 continue
         members = set(units[key]['members'])
@@ -456,6 +411,7 @@ def compile_units(root, plan, lane, remote, modules, output):
             data = pack_shard(root, modules, members, archive, key, kind='compiler', verify_compilers=True)
             row = dict(units[key], bytes=data['bytes'], sha256=data['sha256'], version=plan['version'])
             rows[key] = remote.save(task_plan, key, archive, row)
+        remote.complete_compiler_unit(plan, lane, key, rows[key])
         installed.update(members)
         observed(key, rows[key])
         compiled += len(missing)
