@@ -32,6 +32,9 @@ CAPACITY = 900
 UNIT_PART_START = 10000000
 ACTIONS_CACHE = 'actions-cache'
 UNIT_ASSET = re.compile(r'compiler-unit-([0-9a-f]{64})\.tar\.gz')
+CLAIM_GC_SECONDS = 30
+CLAIM_GC_LIMIT = 2048
+CLAIM_GC_BATCH = 128
 UNIT_RECEIPT = r'done/([0-9a-f]{64})/([0-9a-f]{64})-([1-9][0-9]{0,15})(?:-part-([1-9][0-9]*))?'
 UNIT_CATALOG = re.compile(r'compiler-units-([0-9a-f]{64})\.json')
 
@@ -665,49 +668,68 @@ class Remote:
         delay = max(0, self.next_progress - time.monotonic())
         time.sleep(min(delay, host.remaining(self.deadline)))
 
-    def compiler_claim_nodes(self, source, run):
+    def compiler_claims_for_cleanup(self, source, run, deadline):
+        if source is not None and not re.fullmatch('[0-9a-f]{40}', source):
+            raise ValueError('invalid compiler cleanup source')
+        if not all(isinstance(run.get(k), str) and re.fullmatch('[0-9]+', run[k]) for k in ('run', 'attempt')):
+            raise ValueError('invalid compiler cleanup attempt')
         prefix = 'refs/tags/lean-unit-claims/' + (source + '/' if source else '')
-        nodes = []
-        for entry in self.api('git/matching-refs/' + prefix.removeprefix('refs/')):
-            ref = entry['ref']
-            match = re.fullmatch(r'refs/tags/lean-unit-claims/([0-9a-f]{40})/([0-9]+)/([0-9]+)/(?:[0-9]+|unit/[0-9a-f]{64}|' + UNIT_RECEIPT + ')', ref)
-            if not ref.startswith(prefix) or not match:
+        path = 'repos/' + host.REPO + '/git/matching-refs/' + prefix.removeprefix('refs/')
+        entries = json.loads(host.gh(deadline, 'api', path))
+        claims = []
+        if not isinstance(entries, list):
+            raise ValueError('invalid compiler claim inventory')
+        for entry in entries:
+            ref = entry.get('ref') if isinstance(entry, dict) else None
+            if not isinstance(ref, str):
                 raise ValueError('unexpected compiler claim ref')
-            # The exclusive planner preserves the live attempt while collecting terminated runs.
+            match = re.fullmatch(r'refs/tags/lean-unit-claims/([0-9a-f]{40})/([0-9]+)/([0-9]+)/(?:[0-9]+|unit/[0-9a-f]{64}|' + UNIT_RECEIPT + ')', ref)
+            if not match or not ref.startswith(prefix):
+                raise ValueError('unexpected compiler claim ref')
             if source is None and (match[2], match[3]) == (run['run'], run['attempt']):
                 continue
             node = entry.get('node_id')
-            if not isinstance(node, str) or not node:
-                raise ValueError('missing compiler claim ref node ID: ' + ref)
-            nodes.append(node)
-        return nodes
+            obj = entry.get('object')
+            oid = obj.get('sha') if isinstance(obj, dict) else None
+            if not isinstance(node, str) or not node or not isinstance(oid, str) or not re.fullmatch('[0-9a-f]{40}', oid):
+                raise ValueError('invalid compiler claim node or target: ' + ref)
+            claims.append((int(match[2]), int(match[3]), ref, oid))
+        # The planner drains older attempts first even as new publications add claims.
+        return [(ref, oid) for _, _, ref, oid in sorted(claims)]
 
-    def delete_compiler_claim_batch(self, nodes):
-        variables = {f'r{i}': {'refId': node, 'clientMutationId': f'r{i}'} for i, node in enumerate(nodes)}
-        parameters = ','.join(f'${alias}:DeleteRefInput!' for alias in variables)
-        fields = ' '.join(f'{alias}:deleteRef(input:${alias}){{clientMutationId}}' for alias in variables)
-        query = f'mutation({parameters}){{{fields}}}'
-        with self.http.request('https://api.github.com/graphql', method='POST',
-                               headers={'Content-Type': 'application/json'},
-                               payload=json_body({'query': query, 'variables': variables})) as response:
-            result = json.load(response)
-        expected = {alias: {'clientMutationId': alias} for alias in variables}
-        if result.get('errors') or result.get('data') != expected:
-            raise ValueError('GitHub could not confirm deletion of compiler claims: ' + str(result))
+    def delete_compiler_claim_batch(self, claims, deadline):
+        leases = ['--force-with-lease=' + ref + ':' + oid for ref, oid in claims]
+        command = ['git', '-C', self.root, '-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential',
+                   'push', '--atomic', '--no-follow-tags', *leases, 'https://github.com/' + host.REPO + '.git',
+                   *(':' + ref for ref, _ in claims)]
+        subprocess.run(command, check=True, capture_output=True, text=True, timeout=host.remaining(deadline),
+                       env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
 
     def clear_compiler_claims(self, source=None):
         run = publisher('compiler')
-        for attempt in range(2):
-            nodes = self.compiler_claim_nodes(source, run)
-            try:
-                for start in range(0, len(nodes), 50):
-                    self.delete_compiler_claim_batch(nodes[start:start + 50])
-                return
-            except (host.GitHubCommandError, ValueError):
-                # GraphQL executes mutation aliases serially. A partial result or a lost
-                # response may leave only some refs to delete. Re-list before retrying.
-                if attempt:
-                    raise
+        deleted = 0
+        try:
+            deadline = time.monotonic() + min(CLAIM_GC_SECONDS, host.remaining(self.deadline))
+            claims = self.compiler_claims_for_cleanup(source, run, deadline)
+            count = min(CLAIM_GC_LIMIT, len(claims))
+            for start in range(0, count, CLAIM_GC_BATCH):
+                batch = claims[start:min(count, start + CLAIM_GC_BATCH)]
+                self.delete_compiler_claim_batch(batch, deadline)
+                deleted += len(batch)
+            if count < len(claims):
+                print(f'Compiler claim cleanup deferred {len(claims) - count} refs after deleting {deleted}',
+                      file=sys.stderr)
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            # A failed or unacknowledged push is re-listed by the next publisher.
+            # Keep optional maintenance errors inside this operation.
+            if isinstance(error, subprocess.TimeoutExpired):
+                reason = 'maintenance deadline expired'
+            elif isinstance(error, subprocess.CalledProcessError):
+                reason = (error.stderr or f'command exited {error.returncode}').strip()
+            else:
+                reason = str(error)
+            print(f'Compiler claim cleanup deferred after {deleted} confirmed deletions: {reason[-500:]}',
+                  file=sys.stderr)
 
     def staged_index(self, version):
         if not self.accepts_tag(version) or TAG.fullmatch(version)[3]:

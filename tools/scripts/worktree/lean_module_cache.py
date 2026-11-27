@@ -1063,7 +1063,6 @@ def run():
         result = None
         if durable:
             publisher('compiler')
-            remote.clear_compiler_claims()
             version = VERSION_PREFIX + source
             result = remote.publication_layout(version, COMPILER_PLAN)
             if result is not None and (result.get('kind') != 'compiler' or result.get('source') != source
@@ -1082,6 +1081,8 @@ def run():
                 print('matrix=' + json.dumps({'lane': list(range(len(result['lanes'])))}), file=output)
                 print('has_work=' + str(bool(result['lanes'])).lower(), file=output)
         print(json.dumps({'shards': len(result['shards']), 'lanes': len(result['lanes'])}))
+        if durable:
+            remote.clear_compiler_claims()
     elif args.command == 'finish':
         plan = json.loads(args.plan.read_bytes())
         if compiler.checkout(root) != plan['source']:
