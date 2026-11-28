@@ -80,12 +80,12 @@ internal sealed partial class ProductionCliEnvironment
         var capacityFailure = routed.Result.Gid.ToTarget() switch
         {
             Target.Formal formal => RouteCapacityPreflight.Evaluate(
-                repository.ReadCurrentProjection(static _ => false),
+                repository.ReadCurrentProjection(RegisteredCheckMaterials.IsManifestPath),
                 policy,
                 routed.Result.Stratum,
                 formal),
             Target.Blueprint blueprint => RouteCapacityPreflight.Evaluate(
-                repository.ReadCurrentProjection(static _ => false),
+                repository.ReadCurrentProjection(RegisteredCheckMaterials.IsManifestPath),
                 policy,
                 routed.Result.Stratum,
                 blueprint),

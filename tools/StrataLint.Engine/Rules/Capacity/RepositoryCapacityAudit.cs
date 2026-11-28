@@ -7,9 +7,14 @@ internal static class RepositoryCapacityAudit
     internal static IReadOnlyList<RepositoryCapacityFinding> InspectFiles(
         IEnumerable<(string Path, string Text)> files)
     {
+        var entries = files as IReadOnlyCollection<(string Path, string Text)> ?? files.ToArray();
+        var manifest = entries.FirstOrDefault(entry => entry.Path == RegisteredCheckMaterials.ManifestPath);
+        if (manifest.Text is null)
+            manifest = entries.FirstOrDefault(entry => entry.Path == RegisteredCheckMaterials.ReleaseManifestPath);
+        var roots = manifest.Text is null ? [] : RegisteredCheckMaterials.DirectoryCapacityRoots(manifest.Text, manifest.Path);
         var findings = new List<RepositoryCapacityFinding>();
         var directories = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var (path, text) in files)
+        foreach (var (path, text) in entries)
         {
             if (RepositoryRules.IsCapacityExcluded(path))
             {
@@ -28,7 +33,7 @@ internal static class RepositoryCapacityAudit
                 }
             }
 
-            if (RepositoryRules.IsDirectoryCapacityExcluded(path))
+            if (RepositoryRules.IsDirectoryCapacityExcluded(path, roots))
             {
                 continue;
             }

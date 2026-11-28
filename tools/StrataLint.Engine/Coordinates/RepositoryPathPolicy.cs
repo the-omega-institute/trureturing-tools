@@ -139,7 +139,8 @@ internal static partial class RepositoryPathPolicy
             && entry.Pattern != value)
             return Sl000(value, "root files and agent charters require an exact FILEMAP entry");
 
-        if (value.StartsWith("strict/", StringComparison.Ordinal))
+        if (value.StartsWith("strict/", StringComparison.Ordinal)
+            || value == "OmegaMathlib.lean" || value.StartsWith("OmegaMathlib/", StringComparison.Ordinal))
         {
             return value.EndsWith(".lean", StringComparison.Ordinal)
                 && entry.Kind == FileMapKind.Truth && entry.AdmissionPlane == FileMapAdmissionPlane.Content

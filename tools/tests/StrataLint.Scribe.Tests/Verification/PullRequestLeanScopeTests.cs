@@ -109,6 +109,32 @@ public sealed class PullRequestLeanScopeTests
         Assert.Equal("D5.Consumer", Assert.Single(targets));
     }
 
+    [Theory]
+    [InlineData("OmegaMathlib/Example/Basic.lean")]
+    [InlineData("src/OmegaMathlib/Example/Basic.lean")]
+    public void StrictMathlibAndFacadeChangesSelectConsumers(string changed)
+    {
+        var sources = RawRepositorySnapshot.Create([
+            RawRepositoryEntry.FromText("Meta/ReportProducers/scribe-content.json", """
+                {"schema":"report-producer-scope-v2","registration":"lean-report-inputs.json","scope":"scribe-content","projects":[]}
+                """),
+            RawRepositoryEntry.FromText("lean-report-inputs.json", """
+                {"inspector_sources":{"include":[],"exclude":[]},"producer_scopes":{
+                 "lean-report":{"include":[],"exclude":[]},"scribe-content":{"include":[],"exclude":[]}}}
+                """),
+            RawRepositoryEntry.FromText(EngineeringRegistrationFixture.Path, EngineeringRegistrationFixture.Manifest()),
+            RawRepositoryEntry.FromText("OmegaMathlib/Example/Basic.lean", "module\nprelude\n"),
+            RawRepositoryEntry.FromText("src/OmegaMathlib/Example/Basic.lean", "module\nprelude\n"),
+            RawRepositoryEntry.FromText("src/OmegaMath/Example/Topic.lean", "import OmegaMathlib.Example.Basic\n"),
+            RawRepositoryEntry.FromText("src/OmegaMath.lean", "import OmegaMath.Example.Topic\n"),
+            RawRepositoryEntry.FromText("D5/Consumer.lean", "import OmegaMath\n"),
+        ]);
+        var snapshot = Assert.IsType<SnapshotDecodeOutcome.Decoded>(SnapshotDecoder.Decode(sources)).Snapshot;
+        var plan = PullRequestLeanChecks.CreatePlan(".", snapshot, RawChangeSet.Create([changed]));
+        Assert.Equal(["OmegaMath", "OmegaMath.Example.Topic", "OmegaMathlib.Example.Basic"], plan.Programs.ToArray());
+        Assert.Equal("D5.Consumer", Assert.Single(plan.Targets));
+    }
+
     [Fact]
     public void DeletedModuleReachesSurvivingImportersAndAuditorWithoutSelectingUnrelatedModules()
     {

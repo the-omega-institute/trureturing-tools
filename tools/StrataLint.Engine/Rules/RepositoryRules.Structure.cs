@@ -185,8 +185,9 @@ internal static partial class RepositoryRules
     // membership conveys no resolution status; it is never navigated as a content bucket.
     // Spec line 83: "容量只约束骨骼". This exclusion applies to DIRECTORY occupancy only;
     // dossiers stay bounded by the artifact line limits.
-    internal static bool IsDirectoryCapacityExcluded(string path) =>
-        IsCapacityExcluded(path) || ProblemPoolPaths.IsCanonicalPath(path);
+    internal static bool IsDirectoryCapacityExcluded(string path, string[]? exemptRoots = null) =>
+        IsCapacityExcluded(path) || ProblemPoolPaths.IsCanonicalPath(path)
+        || (exemptRoots is not null && Array.Exists(exemptRoots, root => path.StartsWith(root, StringComparison.Ordinal)));
 
     // Data formats have no line budget: record count and serialization layout do not
     // measure source complexity. This exemption does not change directory occupancy.
@@ -204,12 +205,12 @@ internal static partial class RepositoryRules
         text.Split('\n').Length - (text.EndsWith('\n') ? 1 : 0);
 
     internal static Dictionary<string, HashSet<string>> CapacityPathsByDirectory(
-        IEnumerable<RepoPath> paths)
+        IEnumerable<RepoPath> paths, string[]? exemptRoots = null)
     {
         var directories = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         foreach (var path in paths)
         {
-            if (IsDirectoryCapacityExcluded(path.Value))
+            if (IsDirectoryCapacityExcluded(path.Value, exemptRoots))
             {
                 continue;
             }
@@ -235,8 +236,14 @@ internal static partial class RepositoryRules
     {
         var findings = ImmutableArray.CreateBuilder<RuleFinding>();
         findings.AddRange(LibraryCapacity(current, changes));
-        var directories = CapacityPathsByDirectory(current.Files.Keys);
-        var baselineDirectories = CapacityPathsByDirectory(baseline.Files.Keys);
+        string[] roots;
+        try { roots = RegisteredCheckMaterials.DirectoryCapacityRoots(current); }
+        catch (InvalidDataException exception)
+        {
+            return [new RuleFinding(RegisteredCheckMaterials.PathIn(current), exception.Message)];
+        }
+        var directories = CapacityPathsByDirectory(current.Files.Keys, roots);
+        var baselineDirectories = CapacityPathsByDirectory(baseline.Files.Keys, roots);
 
         // Count the whole candidate but report only touched directories. An overfull
         // bucket blocks exactly when its current membership is not a subset of the

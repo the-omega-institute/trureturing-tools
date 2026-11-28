@@ -11,7 +11,12 @@ internal static partial class RepositoryRules
     {
         var findings = ImmutableArray.CreateBuilder<RuleFinding>();
         string[] materials;
-        try { materials = RegisteredCheckMaterials.Read(current, "SL-003"); }
+        string[] roots;
+        try
+        {
+            materials = RegisteredCheckMaterials.Read(current, "SL-003");
+            roots = RegisteredCheckMaterials.DirectoryCapacityRoots(current);
+        }
         catch (InvalidDataException exception)
         {
             return [new RuleFinding(RegisteredCheckMaterials.PathIn(current), exception.Message)];
@@ -25,7 +30,7 @@ internal static partial class RepositoryRules
             else if (count > ArtifactSoftLineLimit)
                 findings.Add(new(path.Value, $"artifact spans {count} lines (soft limit {ArtifactSoftLineLimit}, hard limit {ArtifactHardLineLimit})", AdmissionEffect.Observe));
         }
-        foreach (var (directory, paths) in CapacityPathsByDirectory(current.Files.Keys))
+        foreach (var (directory, paths) in CapacityPathsByDirectory(current.Files.Keys, roots))
             if (paths.Count > DirectoryToleranceLimit)
                 findings.Add(new(directory, $"directory contains {paths.Count} files (repository tolerance {DirectoryToleranceLimit})"));
         return findings.ToImmutable();

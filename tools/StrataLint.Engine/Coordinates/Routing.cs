@@ -381,9 +381,13 @@ internal static class RouteCapacityPreflight
         ArgumentNullException.ThrowIfNull(repository);
         ArgumentNullException.ThrowIfNull(policy);
 
+        var manifest = repository.Entries.FirstOrDefault(entry => entry.Path == RegisteredCheckMaterials.ManifestPath)
+            ?? repository.Entries.FirstOrDefault(entry => entry.Path == RegisteredCheckMaterials.ReleaseManifestPath);
+        var roots = manifest is null ? [] : RegisteredCheckMaterials.DirectoryCapacityRoots(
+            System.Text.Encoding.UTF8.GetString(manifest.Bytes.AsSpan()), manifest.Path);
         var currentPaths = repository.Entries
             .Select(static entry => entry.Path)
-            .Where(static path => !RepositoryRules.IsDirectoryCapacityExcluded(path))
+            .Where(path => !RepositoryRules.IsDirectoryCapacityExcluded(path, roots))
             .Distinct(StringComparer.Ordinal)
             .ToHashSet(StringComparer.Ordinal);
         var stratumDomains = stratum is { } routeStratum
@@ -393,7 +397,7 @@ internal static class RouteCapacityPreflight
                 .ToArray()
             : [];
         var failures = projectedOutputs
-            .Where(static path => !RepositoryRules.IsDirectoryCapacityExcluded(path))
+            .Where(path => !RepositoryRules.IsDirectoryCapacityExcluded(path, roots))
             .GroupBy(DirectoryOf, StringComparer.Ordinal)
             .Select(group => CapacityFailure(currentPaths, stratumDomains, group.Key, group))
             .Where(static failure => failure is not null)
@@ -435,9 +439,9 @@ internal static class RouteCapacityPreflight
         // bounded artifacts the rule itself exempts would refuse addresses the gate would
         // have admitted, which is a stricter policy invented in the wrong place.
         var currentOccupancy = currentPaths.Count(path =>
-            DirectoryOf(path) == targetDirectory && !RepositoryRules.IsDirectoryCapacityExcluded(path));
+            DirectoryOf(path) == targetDirectory);
         var additions = projectedOutputs.Count(path =>
-            !currentPaths.Contains(path) && !RepositoryRules.IsDirectoryCapacityExcluded(path));
+            !currentPaths.Contains(path));
         var projectedOccupancy = currentOccupancy + additions;
         if (projectedOccupancy <= RepositoryRules.DirectoryFileLimit)
         {
@@ -459,8 +463,7 @@ internal static class RouteCapacityPreflight
             .Distinct(StringComparer.Ordinal)
             .OrderBy(static domain => domain, StringComparer.Ordinal)
             .Select(domain => $"{domain}={currentPaths.Count(path =>
-                DirectoryOf(path) == bucketPrefix + domain
-                && !RepositoryRules.IsDirectoryCapacityExcluded(path))}");
+                DirectoryOf(path) == bucketPrefix + domain)}");
         // Depth is unbounded, so a full bucket has the same exits wherever it sits and the hint no
         // longer branches on how deep the caller already is.
         const string exits =

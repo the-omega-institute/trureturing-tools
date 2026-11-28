@@ -64,6 +64,42 @@ public sealed class RuleEngineCapacityTests
         Assert.Contains(diagnostics, diagnostic => diagnostic.Path == "Unselected" && diagnostic.AdmissionEffect == AdmissionEffect.Block);
     }
 
+    [Fact]
+    public void DirectoryExemptionsRespectPathBoundariesAndKeepFileLengthChecks()
+    {
+        var fixture = new RuleFixture();
+        RegisterCapacityMaterials(fixture, ["**"], directoryRoots: ["OmegaMath", "strict/OmegaMathlib"]);
+        foreach (var directory in new[] { "OmegaMath/Data", "strict/OmegaMathlib", "OmegaMathExtra/Data" })
+            for (var i = 0; i <= RepositoryRules.DirectoryToleranceLimit; i++)
+            {
+                var path = $"{directory}/Item{i}.lean";
+                fixture.Files[path] = "def n := 1\n";
+                fixture.Changes.Add(path);
+            }
+        const string longFile = "OmegaMath/Data/Item0.lean";
+        fixture.Files[longFile] = string.Concat(Enumerable.Repeat("-- pad\n", RepositoryRules.ArtifactHardLineLimit + 1));
+        var diagnostics = RuleCatalog.Default.EvaluateSingle(RuleId.CreateKnown(3), fixture.Build()).Diagnostics;
+        Assert.Contains(diagnostics, item => item.Path == longFile && item.AdmissionEffect == AdmissionEffect.Block);
+        Assert.Contains(diagnostics, item => item.Path == "OmegaMathExtra/Data" && item.AdmissionEffect == AdmissionEffect.Block);
+        Assert.DoesNotContain(diagnostics, item => item.Path is "OmegaMath/Data" or "strict/OmegaMathlib");
+        var audit = RepositoryCapacityAudit.InspectFiles(fixture.Files.Select(row => (row.Key, row.Value)));
+        Assert.Contains(audit, item => item.Path == longFile);
+        Assert.Contains(audit, item => item.Path == "OmegaMathExtra/Data");
+        Assert.DoesNotContain(audit, item => item.Path is "OmegaMath/Data" or "strict/OmegaMathlib");
+    }
+
+    [Theory]
+    [InlineData("..")]
+    [InlineData("OmegaMath/**")]
+    [InlineData("/OmegaMath")]
+    public void DirectoryExemptionsRequireLiteralRelativeRoots(string root)
+    {
+        var fixture = new RuleFixture();
+        RegisterCapacityMaterials(fixture, ["**"], directoryRoots: [root]);
+        var diagnostics = RuleCatalog.Default.EvaluateSingle(RuleId.CreateKnown(3), fixture.Build()).Diagnostics;
+        Assert.Contains(diagnostics, item => item.Path == "Meta/ci-checks.json" && item.AdmissionEffect == AdmissionEffect.Block);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("{")]
@@ -173,11 +209,11 @@ public sealed class RuleEngineCapacityTests
         Assert.Equal(".", Assert.Single(audit).Path);
     }
 
-    private static void RegisterCapacityMaterials(RuleFixture fixture, string[] materials, string[]? excludes = null) =>
+    private static void RegisterCapacityMaterials(RuleFixture fixture, string[] materials, string[]? excludes = null, string[]? directoryRoots = null) =>
         fixture.Files["Meta/ci-checks.json"] = System.Text.Json.JsonSerializer.Serialize(new
         {
             schema = "ci-check-input-registration-v2",
-            checks = new[] { new { id = "SL-003", materials, material_excludes = excludes ?? [] } },
+            checks = new[] { new { id = "SL-003", materials, material_excludes = excludes ?? [], directory_capacity_exempt_roots = directoryRoots ?? [] } },
         });
 
     [Theory]
