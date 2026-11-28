@@ -5,7 +5,6 @@ from collections import defaultdict
 from dataclasses import replace
 from graphlib import TopologicalSorter
 import math
-import os
 import json
 from pathlib import Path
 import sys
@@ -19,7 +18,6 @@ from lean_release_index import safe_path, valid_digest
 
 UNIT_LIMIT = 32
 BASIS = {'OmegaInit', 'OmegaMathlib'}
-QUEUE_HANDOFF_COST = 5
 
 
 def unit_key(mathlib, inputs):
@@ -29,29 +27,6 @@ def unit_key(mathlib, inputs):
 def unit_row(key, members):
     asset = 'compiler-unit-' + key + '.tar.gz'
     return dict(key=asset, asset=asset, fingerprint=key, members=sorted(members), artifact_kind='compiler')
-
-
-def assign_queues(units, count):
-    """List-schedule in module units, charging a transfer between distinct queues."""
-    available = [0] * count
-    finish = {}
-    siblings = defaultdict(set)
-    for key in sorted(units, key=lambda k: (-units[k]['rank'], k)):
-        unit = units[key]
-        def start(queue):
-            ready = available[queue]
-            for dep in unit['deps']:
-                handoff = QUEUE_HANDOFF_COST if units[dep]['queue'] != queue else 0
-                ready = max(ready, finish[dep] + handoff)
-            return ready
-        # Independent children with the same prerequisites can build simultaneously.
-        used = siblings[tuple(unit['deps'])]
-        if len(used) == count:
-            used.clear()
-        begins, _, queue = min((start(q), available[q], q) for q in range(count) if q not in used)
-        used.add(queue)
-        unit['queue'] = queue
-        finish[key] = available[queue] = begins + len(unit['members'])
 
 
 def group_units(graph, cold, basis, workers, cold_edges):
@@ -262,27 +237,60 @@ def prepare(plan, base, remote, workers, prepare_release, modules, root):
     for key in reversed([owner[m[0]] for m in groups]):
         units[key]['next'] = sorted(successors[key])
         units[key]['rank'] = 1 + max((units[k]['rank'] for k in successors[key]), default=0)
-    assign_queues(units, workers)
     plan['compiler_dag'] = dict(seeds=seeds, units=units, names=names,
                                 **module_snapshot(root, modules, targets))
     if catalog['units'] and prepare_release:
         remote.save_compiler_catalog(plan['version'], catalog)
-    # Even one physical shard may have enough independent modules for many runners.
-    jobs = min(workers, max(len(units), len(plan['lanes'])))
-    plan['lanes'].extend([] for _ in range(jobs - len(plan['lanes'])))
 
 
-def compile_units(root, plan, lane, remote, modules, output):
+def checked_receipts(plan, receipts):
+    from lean_module_remote import ACTIONS_CACHE, TAG
+    units = plan['compiler_dag']['units']
+    if not isinstance(receipts, dict) or receipts.keys() - units.keys():
+        raise ValueError('compiler receipts outside the plan')
+    rows = {}
+    for key, row in receipts.items():
+        members = units[key]['members']
+        expected = unit_row(key, members)
+        if (unit_key(plan['mathlib'], {n: plan['targets'][n]['key'] for n in members}) != key
+                or not isinstance(row, dict) or any(row.get(k) != v for k, v in expected.items())
+                or not valid_digest(row.get('sha256')) or type(row.get('bytes')) is not int or row['bytes'] <= 0):
+            raise ValueError('compiler receipt differs from pinned unit: ' + key)
+        version = row.get('version')
+        if version != ACTIONS_CACHE:
+            tag = TAG.fullmatch(version) if isinstance(version, str) else None
+            part = units[key].get('part')
+            if (not tag or tag[2] or not tag[3] or tag[1] != plan['source'] or part is None
+                    or not part <= int(tag[3]) < part + 8):
+                raise ValueError('invalid compiler receipt address: ' + key)
+        rows[key] = dict(expected, version=version, bytes=row['bytes'], sha256=row['sha256'])
+    return rows
+
+
+def assigned_units(root, plan, assignment, receipts, remote, modules, output):
     import lean_module_cache as cache
     from lean_cache_release import has_unsafe_parent
     from lean_module_remote import CompilerCacheMiss
     from lean_module_shards import checked_shard_files, pack_shard, restore_shard
     dag = plan['compiler_dag']
     units = dag['units']
-    run = os.environ.get('GITHUB_RUN_ID')
-    retry = int(os.environ.get('GITHUB_RUN_ATTEMPT', '1')) > 1 or (run and run != plan.get('planner_run', run))
-    owners = dict(dag['seeds']['owners'])
-    rows = dict(dag['seeds']['rows'])
+    if not isinstance(assignment, list) or not all(isinstance(k, str) for k in assignment) or (
+            len(assignment) != len(set(assignment)) or set(assignment) - units.keys()):
+        raise ValueError('invalid compiler unit assignment')
+    received = checked_receipts(plan, receipts)
+    available = set(received)
+    for key in assignment:
+        inputs = {n: plan['targets'][n]['key'] for n in units[key]['members']}
+        if unit_key(plan['mathlib'], inputs) != key:
+            raise ValueError('compiler assignment differs from pinned inputs: ' + key)
+        if set(units[key]['deps']) - available:
+            raise ValueError('compiler assignment lacks prerequisite receipts: ' + key)
+        available.add(key)
+    seeds = dag['seeds']['owners']
+    owners = dict(seeds)
+    rows = {**dag['seeds']['rows'], **received}
+    for key in received:
+        owners.update(dict.fromkeys(units[key]['members'], key))
     installed = set()
     destination = root / cache.inventory.PROJECT_BUILD
     common_prepared = False
@@ -294,14 +302,14 @@ def compile_units(root, plan, lane, remote, modules, output):
         nonlocal common_prepared
         rebuild = set()
         needed = defaultdict(set)
+        if absent := names - owners.keys():
+            raise ValueError('missing compiler receipt for ' + min(absent))
         for n in names - installed:
             needed[owners[n]].add(n)
         with tempfile.TemporaryDirectory(dir=output) as stage:
             path = Path(stage) / 'compiler.tar.gz'
             for key, wanted in needed.items():
                 row = rows[key]
-                if 'public_digest' in row:
-                    row = rows[key] = remote.resolve_checkpoint(row)
                 # A warm physical shard may serve many small DAG units. Install its
                 # other matching members during this download while space permits.
                 if cache.shutil.disk_usage(root).free > 6 * 1024**3:
@@ -338,70 +346,35 @@ def compile_units(root, plan, lane, remote, modules, output):
             installed.update(rebuild)
         return len(rebuild)
 
-    pending = set(units)
-    compiled = 0
-    remaining = {key: len(row['deps']) for key, row in units.items()}
-    ready = {key for key, count in remaining.items() if not count}
-
-    persisted = set()
-
-    def observed(key, row):
-        rows[key] = row
-        owners.update(dict.fromkeys(units[key]['members'], key))
-        seed_members[key].update(units[key]['members'])
-        persisted.add(key)
-        ready.discard(key)
-        # A cached child may come from a different partition; settle the actual plan's parents first.
-        settled = [] if remaining[key] else [key]
-        while settled:
-            finished = settled.pop()
-            pending.remove(finished)
-            for child in units[finished]['next']:
-                remaining[child] -= 1
-                if not remaining[child]:
-                    if child in persisted:
-                        settled.append(child)
-                    else:
-                        ready.add(child)
-
     task_plan = dict(plan, shards=units)
     output.mkdir(parents=True, exist_ok=True)
-    # Within each rank and preferred queue, start different lanes at different
-    # points on the sorted fingerprint ring to spread simultaneous claims.
-    pivot = f'{(lane << 256) // len(plan["lanes"]):064x}'
-    while pending:
-        for key, row in remote.compiler_progress(task_plan, pending - persisted).items():
-            observed(key, row)
-        if not pending:
-            break
-        ordered = sorted(ready, key=lambda k: (-units[k]['rank'], units[k]['queue'] != lane, k < pivot, k))
-        key = remote.claim_compiler_unit(plan, lane, ordered)
-        if key is None:
-            remote.wait_compiler_progress(plan)
+    compiled = 0
+    completed = {}
+    for key in assignment:
+        if key in received:
+            completed[key] = received[key]
             continue
-        if retry or 'part' not in units[key]:
-            saved = remote.retry_checkpoint(task_plan, key)
-            if saved:
-                remote.complete_compiler_unit(plan, lane, key, saved)
-                observed(key, saved)
-                continue
         members = set(units[key]['members'])
         compiled += install(decode_scope(units[key]['restore'], dag['names']))
-        cache.compiler.compile_roots(root, modules, units[key]['roots'])
-        common_prepared = cache.compile_omega_outputs(root, modules, members, common_prepared, prepared_reader=True)
+        compiled += install(members & seeds.keys())
+        missing = members - installed
+        if missing:
+            roots = units[key]['roots'] if missing == members else sorted(missing)
+            cache.compiler.compile_roots(root, modules, roots)
+            common_prepared = cache.compile_omega_outputs(root, modules, missing, common_prepared, prepared_reader=True)
         with tempfile.TemporaryDirectory(dir=output) as stage:
             archive = Path(stage) / 'unit.tar.gz'
             data = pack_shard(root, modules, members, archive, key, kind='compiler', verify_compilers=True)
-            row = dict(units[key], bytes=data['bytes'], sha256=data['sha256'], version=plan['version'])
+            row = dict(unit_row(key, members), bytes=data['bytes'], sha256=data['sha256'], version=plan['version'])
             rows[key] = remote.save(task_plan, key, archive, row)
-        remote.complete_compiler_unit(plan, lane, key, rows[key])
+        completed[key] = rows[key]
+        owners.update(dict.fromkeys(members, key))
+        seed_members[key].update(members)
         installed.update(members)
-        observed(key, rows[key])
-        compiled += len(members)
+        compiled += len(missing)
         if cache.shutil.disk_usage(root).free < 4 * 1024**3:
             for n in installed:
                 for path in cache.inventory.lean_artifact_paths(n, modules[n]):
                     (destination / path).unlink(missing_ok=True)
             installed.clear()
-        cache.write(output / 'worker.json', {'compiled_modules': compiled})
-    return install, installed, compiled
+    return install, installed, compiled, completed

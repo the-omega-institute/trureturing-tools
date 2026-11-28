@@ -605,7 +605,56 @@ def measured_archives(root, modules, name, members, directory, plan):
     return archives
 
 
-def work(root, plan, lane, remote, output, *, compiler_remote=None):
+def compiler_shard_work(plan, remote):
+    # Only the current publication can contain new checkpoints. Inherited, confirmed
+    # addresses were captured in the pinned plan before the workers started.
+    splits = remote.splits(dict(plan, source_only=True)) if plan['shards'] else {}
+    scoped = expanded(dict(plan, source_only=True), splits)
+    complete = recover_partials(scoped, matching(scoped, plan['inherited']), remote)
+    return scoped, splits, complete
+
+
+def pending_compiler_shards(plan, remote, *, resume_plan=None):
+    from lean_module_dag import matching_seeds
+    scoped, splits, complete = compiler_shard_work(plan, remote)
+    dag = plan.get('compiler_dag', {})
+    units = dag.get('units', {})
+    # A previous run can have published physical shards after the pinned plan
+    # was written. Prefer these durable addresses to old cache seeds.
+    recovered = matching_seeds(scoped['targets'], [partial_index(scoped, complete)])
+    warm = recovered['owners'].keys() if resume_plan is not None else set()
+    retained = {k for k, row in units.items() if set(row['members']) - warm}
+    dependencies = {}
+    remaining = {}
+    graph = {k: row['deps'] for k, row in units.items()}
+    for key in TopologicalSorter(graph).static_order():
+        parents = {p for dep in graph[key] for p in dependencies[dep]}
+        if key in retained:
+            remaining[key] = dict(units[key], deps=sorted(parents), next=[])
+            dependencies[key] = {key}
+            for parent in parents:
+                remaining[parent]['next'].append(key)
+        else:
+            dependencies[key] = parents
+    if resume_plan is not None:
+        resumed = plan
+        if 'seeds' in dag:
+            seeds = {field: {**dag['seeds'][field], **recovered[field]} for field in ('rows', 'owners')}
+            resumed = dict(plan, compiler_dag=dict(dag, units=remaining, seeds=seeds))
+        write(resume_plan, resumed)
+    graph = {k: row['deps'] for k, row in remaining.items()}
+    owners = {n: k for k, row in remaining.items() for n in row['members']}
+    lane_units = {}
+    for lane, groups in enumerate(plan['lanes']):
+        missing = [child for group in groups for child in splits.get(group, {group: None}) if child not in complete]
+        if missing:
+            needed = {owners[n] for child in missing for n in scoped['shards'][child]['members'] if n in owners}
+            lane_units[lane] = sorted(inventory.import_closure(graph, needed))
+    return dict(lanes=list(lane_units), units=sorted({k for keys in lane_units.values() for k in keys}),
+                lane_units=lane_units)
+
+
+def work(root, plan, lane, remote, output, *, compiler_remote=None, receipts=None):
     if not 0 <= lane < len(plan['lanes']) or compiler.checkout(root) != plan['source']:
         raise ValueError('worker checkout or lane differs from its plan')
     original = plan
@@ -644,10 +693,8 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
     if 'compiler_dag' in original:
         assigned_rows = {n: plan['shards'][n] for n in original['lanes'][lane]}
         assigned_plan = dict(plan, shards=assigned_rows)
-        splits = remote.splits(assigned_plan) if assigned_rows else {}
+        _, splits, complete = compiler_shard_work(assigned_plan, remote)
         plan = expanded(plan, splits)
-        assigned_plan = expanded(assigned_plan, splits)
-        complete = recover_partials(assigned_plan, matching(assigned_plan, plan['inherited']), remote)
     else:
         complete = recover_partials(plan, matching(plan, plan['inherited']), remote)
     installed = set()
@@ -657,8 +704,8 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
     common_prepared = False
     dag_install = None
     if 'compiler_dag' in plan:
-        from lean_module_dag import compile_units
-        dag_install, installed, compiled = compile_units(root, plan, lane, remote, modules, output)
+        from lean_module_dag import assigned_units
+        dag_install, installed, compiled, _ = assigned_units(root, plan, [], receipts, remote, modules, output)
     assigned = [child for name in original['lanes'][lane] for child in splits.get(name, {name: None})]
     for name in assigned:
         if name in complete:
@@ -977,7 +1024,17 @@ def run():
     plan.add_argument('--capacity', type=int, default=DEFAULT_CAPACITY)
     plan.add_argument('--workers', type=int, default=20)
     plan.add_argument('--output', type=Path, required=True)
+    for name in ('compiler-units', 'compiler-receipts', 'compiler-pending-shards'):
+        command = commands.add_parser(name)
+        command.add_argument('--plan', type=Path, required=True)
+        command.add_argument('--output', type=Path, required=True)
+        if name == 'compiler-pending-shards':
+            command.add_argument('--resume-plan', type=Path)
+        if name == 'compiler-units':
+            command.add_argument('--assignment', type=Path, required=True)
+            command.add_argument('--receipts', type=Path, required=True)
     worker = commands.add_parser('worker')
+    worker.add_argument('--receipts', type=Path)
     worker.add_argument('--plan', type=Path, required=True)
     worker.add_argument('--lane', type=int, required=True)
     worker.add_argument('--output', type=Path, required=True)
@@ -998,12 +1055,30 @@ def run():
     get.add_argument('--destination', type=Path)
     args = parser.parse_args()
     root = args.repository.resolve()
+    from lean_generation_index import read
+    if args.command in ('compiler-units', 'compiler-receipts', 'compiler-pending-shards'):
+        from lean_module_dag import assigned_units, worker_modules
+        plan = read(args.plan)
+        if plan.get('kind') != 'compiler' or compiler.checkout(root) != plan['source']:
+            raise ValueError('compiler checkout differs from plan')
+        remote = Remote(root, kind='compiler')
+        if args.command == 'compiler-units':
+            modules = worker_modules(root, plan['compiler_dag'])
+            _, _, _, result = assigned_units(root, plan, read(args.assignment), read(args.receipts), remote,
+                                              modules, args.output.parent)
+        elif args.command == 'compiler-pending-shards':
+            result = pending_compiler_shards(plan, remote, resume_plan=args.resume_plan)
+        else:
+            result = remote.compiler_receipts(plan)
+        write(args.output, result)
+        return 0
     if args.command == 'worker':
-        plan = json.loads(args.plan.read_bytes())
+        plan = read(args.plan)
         kind = plan['kind']
         remote = Remote(root, lane=args.lane, lanes=len(plan['lanes']), kind=kind)
         print(json.dumps(work(root, plan, args.lane, remote, args.output,
-                              compiler_remote=Remote(root) if kind == 'report' else None)))
+                              compiler_remote=Remote(root) if kind == 'report' else None,
+                              receipts=read(args.receipts) if args.receipts else None)))
         return 0
     if args.command == 'plan':
         from lean_module_remote import COMPILER_PLAN
@@ -1013,7 +1088,6 @@ def run():
         result = None
         if durable:
             publisher('compiler')
-            remote.clear_compiler_claims()
             version = VERSION_PREFIX + source
             result = remote.publication_layout(version, COMPILER_PLAN)
             if result is not None and (result.get('kind') != 'compiler' or result.get('source') != source
@@ -1022,7 +1096,6 @@ def run():
         if result is None:
             result = plan_publication(root, args, remote, source)
             if durable:
-                result['planner_run'] = os.environ.get('GITHUB_RUN_ID')
                 remote.save_publication_layout(version, result, COMPILER_PLAN)
         if args.prepare_release and result['lanes']:
             publisher(args.kind)
@@ -1038,8 +1111,6 @@ def run():
             raise ValueError('publisher checkout differs from plan')
         remote = Remote(root, kind=plan['kind'])
         write(args.output, finish(plan, remote, stage_only=args.stage_only))
-        if 'compiler_dag' in plan:
-            remote.clear_compiler_claims(plan['source'])
     elif args.command == 'promote':
         status = Remote(root, kind=args.kind).promote(args.version)
         print(json.dumps({'version': args.version, 'status': status}))
