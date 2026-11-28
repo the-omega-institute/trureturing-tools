@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 
 
@@ -20,6 +21,8 @@ STANDALONE = (
     "StrataLint.TestEvidence.Tests",
     "Trureturing.Truth.Tests",
 )
+
+PERFORMANCE_GOALS = Path(__file__).with_name("ci-performance.json")
 
 FOURIER_MODULES = ("D5.S3.Fourier.IntegerCharacterCoercivity",
                    "D5.S3.TotalVariation.PrimitiveBridgeCancellation")
@@ -60,8 +63,7 @@ def standalone():
     for suite in ("test_lean_cache_generation.py", "test_lean_generation_*.py", "test_lean_module_*.py"):
         check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/worktree", "-p", suite)
     for name in STANDALONE:
-        check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly",
-              f"tools/tests/{name}/{name}.csproj", "--no-build")
+        test_project(name, "--no-build")
     for proof in ("banned-api-proof", "capability-proof"):
         check("make", "-C", "tools", "compile-proof", f"PROOF={proof}")
     check("bash", "tools/scripts/agent/integration-mirror-test.sh")
@@ -86,6 +88,7 @@ def install_lean():
 def test_project(name, *args):
     check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly",
           f"tools/tests/{name}/{name}.csproj", *args)
+    os.environ["CI_DOTNET_EVIDENCE_PREPARED"] = "1"
 
 
 def contract(shard):
@@ -134,10 +137,47 @@ def contract(shard):
             check(sys.executable, "-m", "unittest", "discover", "-s", "tools/scripts/workflow", "-p", "test_ci_*.py")
 
 
+def performance_key(arguments):
+    if arguments == ["standalone"]:
+        return "standalone"
+    if len(arguments) == 2 and arguments[0] == "contract":
+        return "contract:frozen" if arguments[1] == "frozen" else "contract"
+    return None
+
+
+def report_performance(key, elapsed):
+    goals = json.loads(PERFORMANCE_GOALS.read_text())
+    target = goals["targets"][key]
+    status = "within-target" if elapsed <= target["target_seconds"] else "over-target"
+    if elapsed > target["budget_seconds"]:
+        status = "over-budget"
+    print(
+        "CI_PERFORMANCE "
+        f"name={key} elapsed_seconds={elapsed:.1f} "
+        f"target_seconds={target['target_seconds']} "
+        f"budget_seconds={target['budget_seconds']} status={status}",
+        flush=True,
+    )
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as stream:
+            stream.write("### CI performance\n\n| Suite | Elapsed | Target | Budget | Status |\n")
+            stream.write("| --- | ---: | ---: | ---: | --- |\n")
+            stream.write(
+                f"| `{key}` | {elapsed:.1f}s | {target['target_seconds']}s | "
+                f"{target['budget_seconds']}s | {status} |\n"
+            )
+
+
 if __name__ == "__main__":
-    if sys.argv[1:] == ["standalone"]:
-        standalone()
-    elif len(sys.argv) == 3 and sys.argv[1] == "contract":
-        contract(sys.argv[2])
-    else:
+    key = performance_key(sys.argv[1:])
+    if key is None:
         sys.exit("usage: test-suites.py standalone | contract SHARD")
+    started = time.monotonic()
+    try:
+        if sys.argv[1:] == ["standalone"]:
+            standalone()
+        else:
+            contract(sys.argv[2])
+    finally:
+        report_performance(key, time.monotonic() - started)

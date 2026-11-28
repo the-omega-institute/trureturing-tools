@@ -48,9 +48,12 @@ for argument in "$@"; do
   fi
 done
 
-# The selected test project may not build the evidence validator.
-dotnet build "$ROOT/tools/StrataLint.TestEvidence/StrataLint.TestEvidence.csproj" --configuration Release \
-  ${restore_args[@]+"${restore_args[@]}"} -p:RestoreLockedMode=true -nr:false -nologo --verbosity quiet
+# The selected test project may not build the evidence validator. A caller that
+# already built the complete solution can carry that fact across project runs.
+if [[ "${CI_DOTNET_EVIDENCE_PREPARED:-0}" != 1 ]]; then
+  dotnet build "$ROOT/tools/StrataLint.TestEvidence/StrataLint.TestEvidence.csproj" --configuration Release \
+    ${restore_args[@]+"${restore_args[@]}"} -p:RestoreLockedMode=true -nr:false -nologo --verbosity quiet
+fi
 
 if [[ "$project_identity" == true ]]; then
   # The standalone producer has no consumer engineering-project registry.
