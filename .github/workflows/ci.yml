@@ -33,8 +33,7 @@ jobs:
           path: ~/.elan
           key: tools-lean-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
       - run: make -C tools dotnet
-      - name: Run standalone suites
-        env:
+      - env:
           CI_DOTNET_PREPARED: '1'
           CI_DOTNET_EVIDENCE_PREPARED: '1'
         run: python3 .github/scripts/test-suites.py standalone
