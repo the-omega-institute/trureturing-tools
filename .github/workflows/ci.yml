@@ -55,7 +55,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: the-omega-institute/trureturing
-          ref: ${{ matrix.shard == 'frozen-synthetic' && '25e45b4d5ff0ef4e26d1d29839131c5ad6411ccd' || '02cf78fe654f0af04b98d27b52ff74d153d7ca09' }}
+          ref: 73256f6989e2d833d1e5bf804049a37889b37cf8
           path: fixture
           persist-credentials: false
       - name: Install the candidate archive in the pinned consumer
