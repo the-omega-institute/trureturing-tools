@@ -90,6 +90,18 @@ class CheckTests(unittest.TestCase):
                                                       "--changed-paths-from", "changed"])
             self.assertTrue(execute.call_args.kwargs["delta"])
 
+    def test_scoped_pr_lean_normalizes_protected_surface_exit(self):
+        data, _ = contract.load(ROOT)
+        plan = contract.selection(data, ["D5/Changed.lean"], "pull-request")
+        with tempfile.TemporaryDirectory() as directory:
+            changed = Path(directory) / "changed"
+            changed.write_bytes(b"D5/Changed.lean\0")
+            with patch.object(checks, "execute", return_value=0) as execute:
+                self.assertEqual(
+                    checks.current_phase("pr-lean", data, plan, "a" * 40, changed), 0)
+            self.assertTrue(execute.call_args.kwargs["delta"])
+            self.assertIn("--protected-base", execute.call_args.args[1])
+
     def test_admission_reuses_all_batches_and_runs_without_reports_for_source_changes(self):
         import ci_pr_lean
         cases = [([], [], "push", "", "", 0, 3, 0),
@@ -167,6 +179,15 @@ class CheckTests(unittest.TestCase):
                 record = json.loads(output.getvalue().split("CI_CHECK ")[-1])
                 self.assertEqual(record["raw_exit"], raw)
                 self.assertEqual(code, raw)
+
+    def test_delta_protected_surface_exit_is_normalized(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()) as output:
+            code = checks.with_budget(Path(directory) / "budget", lambda: checks.execute(
+                "delta", ["bash", "-c", "exit 3"], delta=True))
+        record = json.loads(output.getvalue().split("CI_CHECK ")[-1])
+        self.assertEqual(code, 0)
+        self.assertEqual(record["raw_exit"], 3)
+        self.assertEqual(record["status"], "protected-only")
 
     def test_budget_is_not_reset_by_nested_shared_helpers(self):
         with tempfile.TemporaryDirectory() as directory:

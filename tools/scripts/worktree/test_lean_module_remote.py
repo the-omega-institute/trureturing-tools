@@ -24,7 +24,6 @@ class Service:
         self.creates = Counter()
         self.files = {}
         self.ref = None
-        self.claims = {}
         self.patches = []
         self.uploads = 0
         self.reads = []
@@ -61,19 +60,6 @@ class Service:
             assets = next(r['assets'] for r in self.releases.values() if r['id'] == rid)
             page = int(parse_qs(urlsplit(path).query)['page'][0])
             return assets[(page-1)*100:page*100]
-        if path == 'git/tags':
-            return {'sha': hashlib.sha1(body['tag'].encode()).hexdigest()}
-        if path.startswith('git/matching-refs/tags/lean-unit-claims/'):
-            prefix = path.removeprefix('git/matching-refs/')
-            return [row for ref, row in self.claims.items() if ref.startswith(prefix)]
-        if path.startswith('git/ref/tags/lean-unit-claims/'):
-            return self.claims[path.removeprefix('git/ref/')]
-        if path == 'git/refs' and body['ref'].startswith('refs/tags/lean-unit-claims/'):
-            ref = body['ref'].removeprefix('refs/')
-            if ref in self.claims:
-                raise transport.host.GitHubCommandError(1, ['gh'], stderr='HTTP 422: exists')
-            self.claims[ref] = dict(ref=body['ref'], node_id='REF_' + ref, object={'sha': body['sha']})
-            return self.claims[ref]
         if path.startswith('git/matching-refs/tags/'):
             prefix = path.removeprefix('git/matching-refs/tags/')
             return [{'ref': 'refs/tags/' + tag} for tag in self.releases if tag.startswith(prefix)]
@@ -85,18 +71,6 @@ class Service:
         raise ValueError(path)
 
     def request(self, url, *, method='GET', path=None, headers=None, accept=None, authenticate=True, redirect=False, payload=None):
-        if url == 'https://api.github.com/graphql':
-            mutation = json.loads(payload)
-            variables = mutation['variables']
-            assert method == 'POST' and 0 < len(variables) <= 50
-            refs = {entry['node_id']: ref for ref, entry in self.claims.items()}
-            data = {}
-            for alias, inputs in variables.items():
-                assert f'${alias}:DeleteRefInput!' in mutation['query']
-                assert f'{alias}:deleteRef(input:${alias}){{clientMutationId}}' in mutation['query']
-                del self.claims[refs[inputs['refId']]]
-                data[alias] = {'clientMutationId': inputs['clientMutationId']}
-            return io.BytesIO(json.dumps({'data': data}).encode())
         if method == 'HEAD' and '/releases/download/' in url:
             assert not authenticate and redirect
             tag, name = urlsplit(url).path.split('/')[-2:]
@@ -118,9 +92,6 @@ class Service:
             response = io.BytesIO(gzip.compress(body))
             response.headers = {'ETag': etag, 'Content-Encoding': 'gzip'}
             return response
-        if method == 'DELETE' and '/git/refs/tags/' in url:
-            del self.claims[url.split('/git/refs/')[1]]
-            return io.BytesIO(b'')
         if method == 'DELETE':
             asset_id = int(urlsplit(url).path.split('/')[-1])
             for tag, release in self.releases.items():
@@ -204,7 +175,7 @@ class VersionedShards(unittest.TestCase):
         argv = ['lean_module_cache', 'plan', '--kind', 'compiler', '--compiler-dag',
                 '--prepare-release', '--output', str(output)]
         with patch.object(cache.sys, 'argv', argv), patch.object(cache.compiler, 'checkout', return_value=source), \
-                patch.object(transport, 'Remote', return_value=self.remote), patch.object(self.remote, 'clear_compiler_claims'), \
+                patch.object(transport, 'Remote', return_value=self.remote), \
                 patch.object(cache, 'plan_publication', side_effect=[plan, AssertionError('re-analyzed pinned source')]) as analyze:
             self.assertEqual(cache.run(), 0)
             first = output.read_bytes()
@@ -235,104 +206,20 @@ class VersionedShards(unittest.TestCase):
             self.remote.inventory.clear()
         return saved
 
-    def test_per_unit_claims_receipts_and_retry_cleanup(self):
-        plan = self.plan('a' * 40)
-        other = transport.Remote(self.root)
-        other.http = self.service
-        other.cache_entries = lambda kind: {}
-        first, second = 'b' * 64, 'c' * 64
-        plan.update(shards={first: {}, second: {}}, lanes=[[], []])
-        row = dict(sha256='d'*64, bytes=42, version=transport.ACTIONS_CACHE)
-        with patch.object(transport, 'publisher', return_value=dict(run='9', attempt='1')):
-            self.assertEqual(self.remote.claim_compiler_unit(plan, 0, [first]), first)
-            self.assertEqual(other.compiler_progress(plan, {first, second}), {})
-            with patch.object(other, 'compiler_claim', wraps=other.compiler_claim) as writes:
-                self.assertEqual(other.claim_compiler_unit(plan, 7, [first, second]), second)
-                self.assertEqual(writes.call_count, 1)
-            self.assertIsNone(self.remote.claim_compiler_unit(plan, 0, [second]))
-            self.remote.complete_compiler_unit(plan, 0, first, row)
-            with self.assertRaisesRegex(ValueError, 'only the compiler unit owner'):
-                other.complete_compiler_unit(plan, 7, first, row)
-            other.next_progress = 0
-            self.assertEqual(other.compiler_progress(plan, {first, second}), {first: row})
-            self.remote.clear_compiler_claims()
-            self.assertEqual(len(self.service.claims), 3)
-        retry = transport.Remote(self.root)
-        retry.http = self.service
-        with patch.object(transport, 'publisher', return_value=dict(run='9', attempt='2')):
-            self.assertEqual(retry.claim_compiler_unit(plan, 7, [first]), first)
-            retry.clear_compiler_claims()
-            self.assertEqual(len(self.service.claims), 1)
-            retry.clear_compiler_claims(plan['source'])
-            self.assertEqual(self.service.claims, {})
-
-    def test_bulk_claim_inventory_and_cleanup_at_production_plan_size(self):
-        plan = self.plan('a' * 40)
-        prefix = self.remote.claim_prefix(plan['source'])
-        sha = 'd' * 64
-        units = {f'{i:064x}': {} for i in range(1587)}
-        plan.update(shards=units, lanes=[[]]*64)
-        for key in units:
-            for tail, owner in [('unit/' + key, 'b'*40), (f'done/{key}/{sha}-42', plan['source'])]:
-                ref = prefix + tail
-                kind = 'tag' if tail.startswith('unit/') else 'commit'
-                self.service.claims[ref.removeprefix('refs/')] = dict(
-                    ref=ref, node_id='REF_' + ref, object={'sha': owner, 'type': kind})
-        with patch.object(self.service, 'api', wraps=self.service.api) as listed:
-            done = self.remote.compiler_progress(plan, set(units))
-            self.assertEqual(len(done), len(units))
-            self.assertEqual(listed.call_count, 1)
-        with patch.object(self.service, 'request', wraps=self.service.request) as deletes:
-            self.remote.clear_compiler_claims(plan['source'])
-            self.assertEqual(sum(call.args[0] == 'https://api.github.com/graphql'
-                                 for call in deletes.call_args_list), 64)
-            self.assertEqual(self.service.claims, {})
-
-    def test_partial_claim_deletion_relists_remaining_refs_before_retry(self):
-        plan = self.plan('a'*40)
-        key = 'b'*64
-        row = dict(version=transport.ACTIONS_CACHE, sha256='c'*64, bytes=42)
-        self.remote.claim_compiler_unit(plan, 0, [key])
-        self.remote.complete_compiler_unit(plan, 0, key, row)
-        first, remaining = self.service.claims
-        delete = self.service.request
-        def partial(url, **kwargs):
-            if first in self.service.claims:
-                del self.service.claims[first]
-                return io.BytesIO(b'{"data":{"r0":{"clientMutationId":"r0"}}}')
-            variables = json.loads(kwargs['payload'])['variables']
-            self.assertEqual(variables, {'r0': {'refId': 'REF_' + remaining, 'clientMutationId': 'r0'}})
-            return delete(url, **kwargs)
-        with patch.object(self.service, 'request', side_effect=partial), \
-             patch.object(self.service, 'api', wraps=self.service.api) as listings:
-            self.remote.clear_compiler_claims(plan['source'])
-            self.assertEqual(listings.call_count, 2)
-            self.assertFalse(self.service.claims)
-
-    def test_persistent_graphql_error_or_wrong_acknowledgment_fails_cleanup(self):
-        plan = self.plan('a'*40)
-        self.remote.claim_compiler_unit(plan, 0, ['b'*64])
-        for result in ({'errors': [{'message': 'denied'}], 'data': {'r0': {'clientMutationId': 'r0'}}},
-                       {'data': {'r0': {'clientMutationId': 'wrong'}}}):
-            with self.subTest(result=result), patch.object(self.service, 'request',
-                    side_effect=lambda *args, **kwargs: io.BytesIO(json.dumps(result).encode())):
-                with self.assertRaisesRegex(ValueError, 'confirm deletion'):
-                    self.remote.clear_compiler_claims(plan['source'])
-        self.assertEqual(len(self.service.claims), 1)
-
-    def test_failed_attempt_releases_waiters_for_a_fresh_retry(self):
-        with patch.object(self.remote, 'api', return_value={'jobs': [{'conclusion': 'failure'}]}):
-            with self.assertRaisesRegex(RuntimeError, 'available for retry'):
-                self.remote.wait_compiler_progress(self.plan('a'*40))
-
-    def test_claim_ref_is_readable_after_conflict_and_delayed_replication(self):
-        ref = 'refs/tags/lean-unit-claims/a'
-        conflict = transport.host.GitHubCommandError(1, ['POST'], stderr='HTTP 422: reference exists')
-        delayed = transport.host.GitHubCommandError(1, ['GET'], stderr='HTTP 404: missing')
-        with patch.object(self.remote, 'api', side_effect=[conflict, delayed, dict(ref=ref, object={'sha':'other'})]), \
-             patch.object(transport.time, 'sleep') as wait:
-            self.assertEqual(self.remote.compiler_claim(ref, 'mine'), 'other')
-            wait.assert_called_once_with(1)
+    def test_child_workflow_authority_is_scoped_to_compiler_workers(self):
+        from lean_generation_checkpoints import publisher
+        repo = transport.host.REPO
+        env = dict(GITHUB_REPOSITORY=repo, GITHUB_REF='refs/heads/dev', GITHUB_REF_PROTECTED='true',
+                   GITHUB_WORKFLOW_REF=f'{repo}/.github/workflows/ci-lean-generation-compile.yml@refs/heads/dev',
+                   GITHUB_EVENT_NAME='workflow_dispatch', STRATALINT_CACHE_WRITES='true',
+                   GITHUB_RUN_ID='7', GITHUB_RUN_ATTEMPT='1')
+        with patch.dict(transport.os.environ, env):
+            self.assertEqual(publisher('compiler-worker'), dict(run='7', attempt='1'))
+            for kind in ('compiler', 'report'):
+                with self.assertRaises(ValueError):
+                    publisher(kind)
+            with patch.dict(transport.os.environ, GITHUB_EVENT_NAME='push'), self.assertRaises(ValueError):
+                publisher('compiler-worker')
 
     def test_units_and_catalogs_use_only_actions_and_recover_surviving_members(self):
         from lean_module_dag import unit_key, unit_row
@@ -346,7 +233,7 @@ class VersionedShards(unittest.TestCase):
         with path.open('wb') as raw, gzip.GzipFile(fileobj=raw, filename=key, mode='wb', mtime=0) as archive:
             archive.write(b'checkpoint')
         sha = hashlib.sha256(path.read_bytes()).hexdigest()
-        self.assertEqual(self.remote.compiler_progress(plan, {key}), {})
+        self.assertEqual(self.remote.compiler_receipts(dict(plan, compiler_dag={'units':{key:row}})), {})
         done = self.remote.save(plan, key, path, dict(row, sha256=sha, bytes=path.stat().st_size))
         self.assertEqual(done['version'], transport.ACTIONS_CACHE)
         old_row = dict(row, part=transport.UNIT_PART_START)
@@ -358,9 +245,7 @@ class VersionedShards(unittest.TestCase):
                 self.remote.stage(plan['version'], filename, path, sha)
         self.assertEqual(self.service.releases, {})
         self.assertEqual(self.ci, {})
-        self.assertEqual(self.remote.retry_checkpoint(plan, key), done)
-        self.remote.next_progress = 0
-        self.assertEqual(self.remote.compiler_progress(plan, {key}), {key: done})
+        self.assertEqual(self.remote.compiler_receipts(dict(plan, compiler_dag={'units':{key:row}})), {key: done})
         output = self.root / 'copy.gz'
         self.remote.download(done, output)
         self.assertEqual(output.read_bytes(), path.read_bytes())
@@ -413,7 +298,7 @@ class VersionedShards(unittest.TestCase):
             self.service.releases[tag]['assets'].append(asset)
             self.service.files[tag, name] = data
         self.remote.inventory.clear()
-        self.assertEqual(self.remote.retry_checkpoint(plan, key)['version'], part)
+        self.assertEqual(self.remote.compiler_receipts(dict(plan, compiler_dag={'units':{key:row}}))[key]['version'], part)
         recovered = self.remote.compiler_seeds(dict(plan, version=transport.PREFIX + 'b'*40))
         self.assertEqual(set(recovered['targets']), {'Small'})
         output = self.root / 'copy.gz'

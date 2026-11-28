@@ -9,9 +9,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tools-ci-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-24.04
+    timeout-minutes: 7
     steps:
       - uses: actions/checkout@v5
         with:
@@ -20,11 +25,23 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - name: Restore the pinned Lean toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: tools-lean-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
       - run: make -C tools dotnet
-      - run: python3 .github/scripts/test-suites.py standalone
+      - name: Run standalone suites
+        env:
+          CI_DOTNET_PREPARED: '1'
+          CI_DOTNET_EVIDENCE_PREPARED: '1'
+        run: python3 .github/scripts/test-suites.py standalone
   contract:
     name: Consumer fixture ${{ matrix.shard }}
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 16
     strategy:
       fail-fast: false
       matrix:
@@ -50,6 +67,13 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: fixture/global.json
+          cache: true
+          cache-dependency-path: 'fixture/**/packages.lock.json'
+      - name: Restore the pinned Lean toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: tools-lean-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('fixture/lean-toolchain') }}
       - name: Exercise candidate tools against the consumer fixture
         working-directory: fixture
         env:
@@ -59,6 +83,7 @@ jobs:
   package:
     needs: [verify, contract]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
         with:

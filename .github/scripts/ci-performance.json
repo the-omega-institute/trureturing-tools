@@ -1,0 +1,19 @@
+{
+  "schema": "tools-ci-performance-v1",
+  "statistic": "nearest-rank-p90",
+  "sample_size": 12,
+  "targets": {
+    "standalone": {
+      "target_seconds": 300,
+      "budget_seconds": 420
+    },
+    "contract": {
+      "target_seconds": 600,
+      "budget_seconds": 960
+    },
+    "contract:frozen": {
+      "target_seconds": 780,
+      "budget_seconds": 960
+    }
+  }
+}
