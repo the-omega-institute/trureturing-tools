@@ -17,9 +17,12 @@ from lean_generation_remote import GitHub, InvalidIndexBody, MissingCheckpoint
 def publisher(kind=None):
     env = os.environ
     repo = env["GITHUB_REPOSITORY"]
-    if kind not in (None, "compiler", "report"):
+    if kind not in (None, "compiler", "compiler-worker", "report"):
         raise ValueError("unknown publication kind")
     workflow = "report-release-publish" if kind == "report" else "cache-release-publish"
+    if (kind == 'compiler-worker' and env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+            and env.get('GITHUB_WORKFLOW_REF') == f"{repo}/.github/workflows/ci-lean-generation-compile.yml@refs/heads/dev"):
+        workflow = "ci-lean-generation-compile"
     events = {"workflow_dispatch", "schedule"}
     if kind is not None:
         events.add("workflow_run" if kind == "report" else "push")

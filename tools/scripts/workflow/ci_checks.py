@@ -134,7 +134,8 @@ def current_phase(phase, data, plan, base, paths, scope_file=None):
         return execute(phase, [sys.executable, "tools/scripts/workflow/ci_pr_lean.py", str(paths),
                                *(["--base", base] if base and not plan["delta"] else []),
                                *(["--read-plan", str(scope_file)] if scope_file is not None else []),
-                               *(["--protected-base", base] if plan["delta"] else [])])
+                               *(["--protected-base", base] if plan["delta"] else [])],
+                       delta=plan["delta"])
     if phase == "check-delta" and not plan["report"]:
         if not plan["delta"]:
             result(phase, "not-applicable")

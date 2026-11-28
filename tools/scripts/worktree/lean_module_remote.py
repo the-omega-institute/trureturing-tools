@@ -11,7 +11,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 from urllib.parse import quote, urlencode
 
 from lean_cache import publication_mathlib
@@ -32,7 +31,6 @@ CAPACITY = 900
 UNIT_PART_START = 10000000
 ACTIONS_CACHE = 'actions-cache'
 UNIT_ASSET = re.compile(r'compiler-unit-([0-9a-f]{64})\.tar\.gz')
-UNIT_RECEIPT = r'done/([0-9a-f]{64})/([0-9a-f]{64})-([1-9][0-9]{0,15})(?:-part-([1-9][0-9]*))?'
 UNIT_CATALOG = re.compile(r'compiler-units-([0-9a-f]{64})\.json')
 
 
@@ -116,11 +114,6 @@ class Remote:
         self.root = root
         self.deadline = deadline if deadline is not None else host.operation_deadline()
         self.http = GitHubHTTP(self.deadline)
-        self.next_job_check = 0
-        self.progress_interval = 60
-        self.unit_entries = {}
-        self.next_progress = 0
-        self.claims = {}
         self.inventory = {}
         self.release_pages = {}
 
@@ -321,8 +314,9 @@ class Remote:
     def stage(self, version, name, path, digest):
         if UNIT_ASSET.fullmatch(name) or UNIT_CATALOG.fullmatch(name):
             raise ValueError('temporary compiler units belong in Actions cache')
-        publisher(self.kind)
         primary_metadata = name in (INDEX, LAYOUT, PROMOTED, COMPILER_PLAN)
+        worker_asset = self.kind == 'compiler' and self.lane is not None and not primary_metadata
+        publisher('compiler-worker' if worker_asset else self.kind)
         # The planner owns the shared Release. Each worker alone creates its overflow parts.
         first_overflow = 2 + (self.lane or 0)
         parts = chain((1,), range(first_overflow, first_overflow + 9998 * self.lanes, self.lanes))
@@ -455,16 +449,14 @@ class Remote:
     def save(self, plan, name, path, row):
         if not self.accepts_tag(plan['version']) or plan['shards'][name]['fingerprint'] != row['fingerprint']:
             raise ValueError('shard does not belong to its plan')
-        publisher(self.kind)
         if path.stat().st_size != row['bytes'] or host.archive_sha(path, self.deadline) != row['sha256']:
             raise ValueError('local shard differs from its advertised payload')
         if match := UNIT_ASSET.fullmatch(row['asset']):
             if self.kind != 'compiler' or match[1] != name or name != row['fingerprint']:
                 raise ValueError('invalid compiler unit identity')
+            publisher('compiler-worker')
             self.compiler_cache('put', 'unit', name, row['sha256'], str(row['bytes']), path.resolve())
-            saved = dict(row, version=ACTIONS_CACHE)
-            self.unit_entries[name] = dict(version=ACTIONS_CACHE, bytes=row['bytes'], sha256=row['sha256'])
-            return saved
+            return dict(row, version=ACTIONS_CACHE)
         tag, _ = self.stage(plan['version'], row['asset'], path, row['sha256'])
         self.actions('put', row['key'], row['sha256'], path)
         return {**row, 'version': tag}
@@ -510,204 +502,32 @@ class Remote:
             path.write_bytes(data)
             self.compiler_cache('put', 'catalog', sha, sha, str(len(data)), path.resolve())
 
-    def compiler_progress(self, plan, pending):
-        if self.next_progress == 0:
-            # Cross-run checkpoints already exist at startup. This attempt's producers
-            # subsequently advertise their verified exact addresses in their receipts.
-            self.unit_entries.update(self.cache_entries('unit'))
-        if time.monotonic() >= self.next_progress:
-            prefix = self.claim_prefix(plan['source'])
-            for entry in self.api('git/matching-refs/' + prefix.removeprefix('refs/')):
-                ref = entry['ref']
-                if not ref.startswith(prefix):
-                    raise ValueError('unexpected compiler claim ref')
-                target = entry['object']['sha']
-                suffix = ref[len(prefix):]
-                if receipt := re.fullmatch(UNIT_RECEIPT, suffix):
-                    if target != plan['source']:
-                        raise ValueError('invalid compiler completion receipt')
-                    key, sha, size, part = receipt.groups()
-                    address = plan['version'] + '-part-' + part if part else ACTIONS_CACHE
-                    self.unit_entries[key] = dict(version=address, sha256=sha, bytes=int(size))
-                elif re.fullmatch(r'unit/[0-9a-f]{64}', suffix):
-                    self.claims[ref] = target
-            self.progress_interval = max(10, min(120, 2 * len(plan['lanes'])))
-            self.next_progress = time.monotonic() + self.progress_interval
-        return {k: dict(plan['shards'][k], **self.unit_entries[k]) for k in pending & self.unit_entries.keys()}
-
-    def retry_checkpoint(self, plan, key):
-        row = plan['shards'][key]
-        if key in self.unit_entries:
-            return dict(row, **self.unit_entries[key])
-        if 'part' not in row:
-            return None
-        # Old run plans addressed interrupted uploads by their Release part.
-        # A fixed download address can become available before both inventories.
-        # An interrupted name can overflow into a deterministic sibling part.
-        for offset in range(8):
-            tag = f'{plan["version"]}-part-{row["part"] + offset}'
-            url = f'https://github.com/{host.REPO}/releases/download/{tag}/{row["asset"]}'
-            try:
-                with self.http.request(url, method='HEAD', redirect=True, authenticate=False) as response:
-                    if response.status not in (200, 302):
-                        raise ValueError('unexpected compiler checkpoint status')
-            except host.GitHubCommandError as error:
-                if missing(error):
+    def compiler_receipts(self, plan):
+        from lean_module_dag import unit_row
+        units = plan.get('compiler_dag', {}).get('units', {})
+        if not units:
+            return {}
+        entries = self.cache_entries('unit')
+        # Early plans reserved groups of Release parts. Reconcile those addresses
+        # once per coordinator startup, including interrupted-upload overflow.
+        historical = {}
+        for key in units.keys() - entries.keys():
+            unit = units[key]
+            if 'part' in unit:
+                historical.setdefault(unit['part'], {})[unit['asset']] = key
+        if historical:
+            for tag, assets in self.candidates(dict(plan, source_only=True), include_units=True):
+                part = TAG.fullmatch(tag)[3]
+                if part is None:
                     continue
-                raise
-            return self.resolve_checkpoint(dict(row, version=tag))
-        return None
-
-    def resolve_checkpoint(self, row):
-        tag = row['version']
-        catalog = self.catalog(tag)
-        delay = 0
-        while True:
-            asset = catalog[1].get(row['asset']) if catalog else None
-            if asset and asset['state'] == 'uploaded':
-                sha = (asset.get('digest') or '').removeprefix('sha256:')
-                if asset['size'] <= 0 or not valid_digest(sha) or sha != row.get('public_digest', sha):
-                    raise ValueError('compiler progress differs from immutable release metadata')
-                return dict(row, bytes=asset['size'], sha256=sha)
-            # The public directory can announce an asset before the REST read
-            # replica sees the upload. Reconcile within this worker's deadline.
-            if delay:
-                time.sleep(min(delay, host.remaining(self.deadline)))
-            delay = min(30, max(2, delay * 2))
-            catalog = self.catalog(tag, refresh=True)
-
-    @cache
-    def claim_prefix(self, source):
-        run = publisher('compiler')
-        if not re.fullmatch(r'[0-9a-f]{40}', source) or not all(
-                re.fullmatch(r'[0-9]+', run[k]) for k in ('run', 'attempt')):
-            raise ValueError('invalid compiler job identity')
-        return f'refs/tags/lean-unit-claims/{source}/{run["run"]}/{run["attempt"]}/'
-
-    @cache
-    def claim_identity(self, source, lane):
-        # Distinguish a lost successful POST from a competing worker's reservation.
-        tag_name = self.claim_prefix(source).removeprefix('refs/tags/') + str(lane)
-        tag = self.api('git/tags', 'POST', tag=tag_name, message='Compiler unit worker',
-                       object=source, type='commit')
-        return tag['sha']
-
-    def compiler_claim(self, ref, owner):
-        if ref not in self.claims:
-            try:
-                self.api('git/refs', 'POST', ref=ref, sha=owner)
-                self.claims[ref] = owner
-            except host.GitHubCommandError:
-                # A lost successful POST and a competing worker are distinguished
-                # by the target of the exact, immutable ref.
-                for delay in (0, 1, 2, 4, 8):
-                    if delay:
-                        time.sleep(min(delay, host.remaining(self.deadline)))
-                    try:
-                        entry = self.api('git/ref/' + ref.removeprefix('refs/'))
-                    except host.GitHubCommandError as error:
-                        if missing(error) and delay != 8:
-                            continue
-                        raise
-                    if entry['ref'] != ref:
-                        raise ValueError('unexpected compiler claim ref')
-                    self.claims[ref] = entry['object']['sha']
-                    break
-        return self.claims[ref]
-
-    def claim_compiler_unit(self, plan, lane, ordered):
-        if not ordered:
-            return None
-        prefix = self.claim_prefix(plan['source']) + 'unit/'
-        owner = self.claim_identity(plan['source'], lane)
-        collisions = 0
-        for key in ordered:
-            ref = prefix + key
-            if ref in self.claims:
-                if self.claims[ref] == owner:
-                    return key
-                continue
-            if self.compiler_claim(ref, owner) == owner:
-                return key
-            # Concurrent workers may have claimed ready units since the bulk read.
-            # Refresh the attempt inventory before making more contested writes.
-            collisions += 1
-            if collisions == 2:
-                self.next_progress = time.monotonic()
-                break
-        return None
-
-    def complete_compiler_unit(self, plan, lane, key, row):
-        source = plan['source']
-        prefix = self.claim_prefix(source)
-        if self.claims.get(prefix + 'unit/' + key) != self.claim_identity(source, lane):
-            raise ValueError('only the compiler unit owner can record its completion')
-        receipt = f'done/{key}/{row["sha256"]}-{row["bytes"]}'
-        if row['version'] != ACTIONS_CACHE:
-            tag = TAG.fullmatch(row['version'])
-            if not tag or not tag[3] or row['version'] != f'{plan["version"]}-part-{tag[3]}':
-                raise ValueError('invalid historical compiler checkpoint version')
-            receipt += '-part-' + tag[3]
-        if not re.fullmatch(UNIT_RECEIPT, receipt) or self.compiler_claim(prefix + receipt, source) != source:
-            raise ValueError('invalid compiler completion receipt')
-
-    def wait_compiler_progress(self, plan):
-        # A dead runner cannot release its reservation. Failed-job reruns use a fresh attempt.
-        if time.monotonic() >= self.next_job_check:
-            run = publisher('compiler')
-            for page in range(1, 5):
-                jobs = self.api(f'actions/runs/{run["run"]}/attempts/{run["attempt"]}/jobs?per_page=100&page={page}')['jobs']
-                if any(job['conclusion'] in ('cancelled', 'failure', 'timed_out') for job in jobs):
-                    raise RuntimeError('compiler job failed; completed unit checkpoints are available for retry')
-                if len(jobs) < 100:
-                    break
-            self.next_job_check = time.monotonic() + max(300, self.progress_interval * 2)
-        delay = max(0, self.next_progress - time.monotonic())
-        time.sleep(min(delay, host.remaining(self.deadline)))
-
-    def compiler_claim_nodes(self, source, run):
-        prefix = 'refs/tags/lean-unit-claims/' + (source + '/' if source else '')
-        nodes = []
-        for entry in self.api('git/matching-refs/' + prefix.removeprefix('refs/')):
-            ref = entry['ref']
-            match = re.fullmatch(r'refs/tags/lean-unit-claims/([0-9a-f]{40})/([0-9]+)/([0-9]+)/(?:[0-9]+|unit/[0-9a-f]{64}|' + UNIT_RECEIPT + ')', ref)
-            if not ref.startswith(prefix) or not match:
-                raise ValueError('unexpected compiler claim ref')
-            # The exclusive planner preserves the live attempt while collecting terminated runs.
-            if source is None and (match[2], match[3]) == (run['run'], run['attempt']):
-                continue
-            node = entry.get('node_id')
-            if not isinstance(node, str) or not node:
-                raise ValueError('missing compiler claim ref node ID: ' + ref)
-            nodes.append(node)
-        return nodes
-
-    def delete_compiler_claim_batch(self, nodes):
-        variables = {f'r{i}': {'refId': node, 'clientMutationId': f'r{i}'} for i, node in enumerate(nodes)}
-        parameters = ','.join(f'${alias}:DeleteRefInput!' for alias in variables)
-        fields = ' '.join(f'{alias}:deleteRef(input:${alias}){{clientMutationId}}' for alias in variables)
-        query = f'mutation({parameters}){{{fields}}}'
-        with self.http.request('https://api.github.com/graphql', method='POST',
-                               headers={'Content-Type': 'application/json'},
-                               payload=json_body({'query': query, 'variables': variables})) as response:
-            result = json.load(response)
-        expected = {alias: {'clientMutationId': alias} for alias in variables}
-        if result.get('errors') or result.get('data') != expected:
-            raise ValueError('GitHub could not confirm deletion of compiler claims: ' + str(result))
-
-    def clear_compiler_claims(self, source=None):
-        run = publisher('compiler')
-        for attempt in range(2):
-            nodes = self.compiler_claim_nodes(source, run)
-            try:
-                for start in range(0, len(nodes), 50):
-                    self.delete_compiler_claim_batch(nodes[start:start + 50])
-                return
-            except (host.GitHubCommandError, ValueError):
-                # GraphQL executes mutation aliases serially. A partial result or a lost
-                # response may leave only some refs to delete. Re-list before retrying.
-                if attempt:
-                    raise
+                for offset in range(8):
+                    expected = historical.get(int(part) - offset, {})
+                    for name in expected.keys() & assets.keys():
+                        asset = assets[name]
+                        sha = (asset.get('digest') or '').removeprefix('sha256:')
+                        if asset['state'] == 'uploaded' and valid_digest(sha) and asset['size'] > 0:
+                            entries.setdefault(expected[name], dict(version=tag, sha256=sha, bytes=asset['size']))
+        return {key: dict(unit_row(key, units[key]['members']), **entries[key]) for key in units.keys() & entries.keys()}
 
     def staged_index(self, version):
         if not self.accepts_tag(version) or TAG.fullmatch(version)[3]:
