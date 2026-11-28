@@ -78,6 +78,7 @@ LEAN_CLASSES = {
     "scoped": ("LeanReportScopedTests", "InspectorNativeInterfaceTests"),
     "modules": ("InspectorNativeModuleCacheTests", "InspectorNativeInvalidationTests"),
 }
+EVIDENCE_PREPARED = os.environ.get("CI_DOTNET_EVIDENCE_PREPARED") == "1"
 
 
 def install_lean():
@@ -86,9 +87,21 @@ def install_lean():
 
 
 def test_project(name, *args):
-    check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly",
-          f"tools/tests/{name}/{name}.csproj", *args)
-    os.environ["CI_DOTNET_EVIDENCE_PREPARED"] = "1"
+    global EVIDENCE_PREPARED
+    inherited = os.environ.get("CI_DOTNET_EVIDENCE_PREPARED")
+    try:
+        if EVIDENCE_PREPARED:
+            os.environ["CI_DOTNET_EVIDENCE_PREPARED"] = "1"
+        else:
+            os.environ.pop("CI_DOTNET_EVIDENCE_PREPARED", None)
+        check("bash", "tools/scripts/dotnet-test.sh", "--project-assembly",
+              f"tools/tests/{name}/{name}.csproj", *args)
+        EVIDENCE_PREPARED = True
+    finally:
+        if inherited is None:
+            os.environ.pop("CI_DOTNET_EVIDENCE_PREPARED", None)
+        else:
+            os.environ["CI_DOTNET_EVIDENCE_PREPARED"] = inherited
 
 
 def contract(shard):

@@ -11,9 +11,11 @@ if [[ "${1:-}" == "--project-assembly" ]]; then
 fi
 restore_args=()
 [[ "${CI_DOTNET_PREPARED:-0}" != 1 ]] || restore_args=(--no-restore)
+evidence_prepared="${CI_DOTNET_EVIDENCE_PREPARED:-0}"
 # Only this CI entry's projects were restored. Test-created projects retain
 # their own restore behavior and execution/hang budgets.
 unset CI_DOTNET_PREPARED
+unset CI_DOTNET_EVIDENCE_PREPARED
 if [[ -n "${TEST_RESULTS_DIRECTORY:-}" ]]; then
   mkdir -p "$TEST_RESULTS_DIRECTORY"
   RESULTS_DIRECTORY="$(mktemp -d "$TEST_RESULTS_DIRECTORY/invocation.XXXXXXXX")"
@@ -50,7 +52,7 @@ done
 
 # The selected test project may not build the evidence validator. A caller that
 # already built the complete solution can carry that fact across project runs.
-if [[ "${CI_DOTNET_EVIDENCE_PREPARED:-0}" != 1 ]]; then
+if [[ "$evidence_prepared" != 1 ]]; then
   dotnet build "$ROOT/tools/StrataLint.TestEvidence/StrataLint.TestEvidence.csproj" --configuration Release \
     ${restore_args[@]+"${restore_args[@]}"} -p:RestoreLockedMode=true -nr:false -nologo --verbosity quiet
 fi
