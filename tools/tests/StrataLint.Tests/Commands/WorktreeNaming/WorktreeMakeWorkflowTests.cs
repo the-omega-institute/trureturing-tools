@@ -85,13 +85,13 @@ public sealed class WorktreeMakeWorkflowTests
     }
 
     [Fact]
-    public void ReturnMarksStaleWithoutLifecyclePrerequisites()
+    public void StaleMarksTheWorktreeWithoutLifecyclePrerequisites()
     {
         if (OperatingSystem.IsWindows()) return;
         using var fixture = new TemporaryDirectory();
         var marker = PrepareFixture(fixture.Path);
 
-        var result = RunMake(fixture.Path, marker, "worktree-return");
+        var result = RunMake(fixture.Path, marker, "worktree-stale");
 
         Assert.Equal(0, result.ExitCode);
         Assert.True(File.Exists(marker));

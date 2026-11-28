@@ -52,13 +52,12 @@ class PinTests(unittest.TestCase):
             self.assertEqual(path.read_text(), original)
             with patch.object(pin.subprocess, "run", side_effect=download(archive)):
                 pin.pin_release(root, tag)
-            saved = json.loads(path.read_text()) | {"workflow_sha": "1" * 40}
-            path.write_text(json.dumps(saved))
+            saved = path.read_bytes()
             with patch.object(pin.subprocess, "run") as repeated:
                 pin.pin_release(root, tag)
                 repeated.assert_not_called()
-            self.assertEqual(path.read_text(), json.dumps(saved))
-            self.assertEqual(saved, lock | {"previous_pin": baseline, "workflow_sha": "1" * 40})
+            self.assertEqual(path.read_bytes(), saved)
+            self.assertEqual(json.loads(saved), lock | {"previous_pin": baseline})
 
     def test_rollback_is_a_new_generation_and_invalidates_the_stacked_preview(self):
         with tempfile.TemporaryDirectory() as tmp:

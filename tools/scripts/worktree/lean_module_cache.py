@@ -416,7 +416,7 @@ def split_cold_reports(plan, existing, base, remote):
     return plan
 
 
-def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version, legacy=None,
+def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version,
               prepare_release=False, kind=None, compiler_index=None, compiler_dag=False, modules=None, root=None):
     if compiler_dag and kind != 'compiler':
         raise ValueError('dependency scheduling requires a compiler publication')
@@ -456,11 +456,8 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
             if original_base and (not base or base['version'] != original_base):
                 raise ValueError('missing original module publication base')
         capacity = checkpoint['capacity']
-        legacy = checkpoint.get('legacy')
     previous = base['shards'] if base else {}
     sizes = {n: DEFAULT_MODULE_BYTES for n in targets}
-    if legacy:
-        sizes.update({n: row['bytes'] for n, row in legacy['targets'].items() if n in targets})
     for row in previous.values():
         average = max(1, row['bytes'] // len(row['members']))
         for name in row['members']:
@@ -525,7 +522,6 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
             'version': version, 'mathlib_version': mathlib_version, 'base_version': plan['base_version'],
             **({'kind': kind} if kind else {}),
             'capacity': capacity, 'partials': {n: r for n, r in existing.items() if previous.get(n) != r},
-            **({'legacy': legacy} if legacy and missing else {}),
             'fingerprint': shard_fingerprint(mathlib, targets, targets, kind),
             'groups': {name: row['members'] for name, row in planned.items()},
         })
@@ -544,38 +540,12 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
             prepare(plan, base, remote, workers, prepare_release, modules, root)
         else:
             plan['compiler_dag'] = module_snapshot(root, modules, targets)
-    if legacy and lanes:
-        plan['legacy'] = legacy
     return plan
 
 
 def partial_index(plan, rows):
     return {'schema': SCHEMA, **({'kind': plan['kind']} if plan.get('kind') else {}), 'targets': {n: plan['targets'][n] for row in rows.values() for n in row['members']},
             'shards': rows}
-
-
-def legacy_compiler_inputs(root, modules, targets, source):
-    import lean_generation_plan as legacy
-    graph = {n: set(r['deps']) for n, r in targets.items()}
-    criteria = legacy.module_targets(root, modules, graph)
-    domain, _ = legacy.package_inputs(root)
-    remote = legacy.checkpoints.remote_for(root)
-    empty = {'source': source, 'targets': {}, 'volumes': {}}
-    rows, sizes = legacy.verified_inputs(remote, domain, criteria, empty)
-    rows = {name: row for name, row in rows.items()
-            if not modules[name].extra_builds and not modules[name].plugin_input}
-    return dict(empty, targets=rows, volumes={row['volume']: sizes[row['volume']] for row in rows.values()})
-
-
-def restore_legacy(remote, index, names, destination):
-    from lean_cache_generation import restore as restore_frames
-    rows = {n: index['targets'][n] for n in names & index['targets'].keys()}
-    if not rows:
-        return set()
-    subset = {'source': index['source'], 'targets': rows,
-              'volumes': {r['volume']: index['volumes'][r['volume']] for r in rows.values()}}
-    report = restore_frames(remote, subset, subset, rows, destination)
-    return set(rows) if report['restored'] == len(rows) else set()
 
 
 def restore_artifacts(root, modules, targets, index, names, remote, destination, kind, *, restored=None):
@@ -732,10 +702,6 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None, receipts=Non
     produced_reports = 0
     compiled = uploaded = 0
     common_prepared = False
-    legacy = plan.get('legacy')
-    if legacy and 'compiler_dag' not in plan:
-        from lean_generation_checkpoints import remote_for
-        old_remote = remote_for(root)
     dag_install = None
     if 'compiler_dag' in plan:
         from lean_module_dag import assigned_units
@@ -774,15 +740,6 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None, receipts=Non
             for index in (partial_index(plan, complete), base):
                 installed.update(restore_artifacts(root, modules, targets, index, scope - installed,
                                                    remote, destination, 'compiler'))
-            if legacy:
-                try:
-                    candidates = {n for n in scope - installed if not modules[n].extra_builds}
-                    recovered = restore_legacy(old_remote, legacy, candidates, destination)
-                    materialize_shared(destination, modules, recovered)
-                    installed.update(recovered)
-                except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
-                    print(f'Compiler seed unavailable; continuing with Lake: {error}', file=sys.stderr)
-                    legacy = None
             if missing := scope - installed:
                 roots = missing if any(modules[n].extra_builds for n in missing) else compiler.terminal(missing, graph)
                 compiler.compile_roots(root, modules, sorted(roots))
@@ -1047,15 +1004,9 @@ def plan_publication(root, args, remote, source):
         if not compiler_index:
             raise ValueError('report publication requires a published compiler cache for ' + source)
         targets = {n: r for n, r in targets.items() if 'report_inputs' in r}
-    legacy = None
-    if args.kind == 'compiler' and args.legacy_checkpoints and not base:
-        try:
-            legacy = legacy_compiler_inputs(root, modules, targets, source)
-        except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
-            print(f'Compiler checkpoints unavailable; continuing with Lake: {error}', file=sys.stderr)
     mathlib, mathlib_version = publication_mathlib(root)
     return make_plan(source, mathlib, targets, base, remote, args.capacity, args.workers,
-                       mathlib_version=mathlib_version, legacy=legacy, prepare_release=args.prepare_release,
+                       mathlib_version=mathlib_version, prepare_release=args.prepare_release,
                        kind=args.kind, compiler_index=compiler_index, compiler_dag=args.compiler_dag,
                        modules=modules, root=root)
 
@@ -1069,7 +1020,6 @@ def run():
     plan.add_argument('--base', type=Path)
     plan.add_argument('--kind', choices=('compiler', 'report'), default='compiler')
     plan.add_argument('--compiler-dag', action='store_true', help='schedule cold compiler units by dependency')
-    plan.add_argument('--legacy-checkpoints', action='store_true')
     plan.add_argument('--prepare-release', action='store_true', help='create the shared Release before starting its workers')
     plan.add_argument('--capacity', type=int, default=DEFAULT_CAPACITY)
     plan.add_argument('--workers', type=int, default=20)

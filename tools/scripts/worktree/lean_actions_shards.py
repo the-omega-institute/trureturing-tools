@@ -21,8 +21,8 @@ import tempfile
 import time
 
 from lean_actions import (
-    actions_keys, dependency_input_materials, manual_source_is_valid, native_archive_paths, preparation_source_is_valid,
-    output, project_publication, project_work, receipt, resume_spec, write_small_record,
+    actions_keys, dependency_input_materials, manual_source_is_valid, native_archive_paths,
+    output, project_publication, receipt, resume_spec, write_small_record,
 )
 from lean_artifact_inventory import (
     PROJECT_BUILD, build_inventory, retired_report_path, import_closure, lake_configuration, project_imports,
@@ -91,11 +91,11 @@ def index_prefix(identity):
 
 def index_addresses(identity):
     prefix = index_prefix(identity)
-    if "runtime" not in identity:
-        return {"prefix": prefix, "snapshot_prefix": prefix + "snapshot-", "legacy_prefix": None}
-    legacy = {key: value for key, value in identity.items() if key != "runtime"}
-    return {"prefix": prefix, "snapshot_prefix": prefix + "snapshot-" + digest(legacy) + "-",
-            "legacy_prefix": index_prefix(legacy)}
+    snapshot = prefix + "snapshot-"
+    if "runtime" in identity:
+        configuration = {key: value for key, value in identity.items() if key != "runtime"}
+        snapshot += digest(configuration) + "-"
+    return {"prefix": prefix, "snapshot_prefix": snapshot}
 
 
 def source_commit(root):
@@ -262,16 +262,11 @@ def resume_verified(root):
 
 
 def prepare(root, identity, state, previous, anchor, targets=(), available=frozenset(), *,
-            preparation=False, deliver=None):
-    if preparation:
-        if state != "complete" or not preparation_source_is_valid() or project_work(root) is None:
-            raise ValueError("Actions shard preparation requires a validated build at the protected PR runtime")
-    elif state == "complete":
+            deliver=None):
+    if state == "complete":
         allowed, reason, _ = project_publication(root)
         keys = actions_keys(root)
-        native_seed = (os.environ.get("STRATALINT_MIGRATE_NATIVE_PROJECT") == "true"
-                       and os.environ.get("STRATALINT_ACTIONS_CACHE_SEEDED") == "1")
-        migrated = reason == "no-build-work" and (manual_source_is_valid() or resume_verified(root) or native_seed)
+        migrated = reason == "no-build-work" and (manual_source_is_valid() or resume_verified(root))
         if (not (allowed or migrated) or not keys["project_save_allowed"]
                 or os.environ.get("GITHUB_REF_PROTECTED") != "true"):
             raise ValueError("Actions shard publication denied: " + reason)
@@ -415,13 +410,13 @@ def install_continuation(target, unpacked, paths, backup):
         raise
 
 
-def install(root, record, targets=None, *, require_complete=False, preparation=None, payload_directory=None):
+def install(root, record, targets=None, *, require_complete=False, payload_directory=None):
     selected = selected_keys(root, record, targets)
     if not selected:
         return {"available": 0, "missing": [], "requested": 0, "complete": False}
     required = record["required"]
     registrations = native_archive_paths(root, ["project"])["project"]
-    lake = (preparation / "native" if preparation else root) / ".lake"
+    lake = root / ".lake"
     if lake.is_symlink():
         raise ValueError("Actions shards require a private build")
     lake.mkdir(parents=True, exist_ok=True)
@@ -440,17 +435,7 @@ def install(root, record, targets=None, *, require_complete=False, preparation=N
             payload = root / transport_payload(digest_value)
             if payload_directory is not None:
                 payload = payload_directory / payload.name
-            bundled = False
-            if preparation:
-                packed = preparation / "shards" / payload.name
-                if packed.is_file():
-                    payload = packed
-                    bundled = True
-            if not payload.is_file():
-                return digest_value, None
-            if archive_sha(payload, None) != digest_value:
-                if bundled:
-                    raise ValueError(f"bundled preparation shard SHA-256 mismatch: {payload.name}")
+            if not payload.is_file() or archive_sha(payload, None) != digest_value:
                 return digest_value, None
             entries = set()
             extract_payload(payload, unpacked, registrations, entries)
@@ -541,7 +526,6 @@ def main():
     scope.add_argument("--target", action="append")
     scope.add_argument("--targets-file", type=Path)
     parser.add_argument("--require-complete", action="store_true")
-    parser.add_argument("--preparation", type=Path)
     parser.add_argument("--artifact-directory", type=Path)
     parser.add_argument("--previous-attempt", type=int)
     parser.add_argument("--previous-run")
@@ -552,8 +536,6 @@ def main():
     if args.targets_file is not None and args.operation not in {"restore-plan", "install"}:
         parser.error("a target file requires restore-plan or install")
     targets = args.targets_file.read_text(encoding="utf-8").split() if args.targets_file else args.target
-    if args.preparation and (args.state != "complete" or args.operation != "install" or targets is not None):
-        parser.error("preparation requires a complete, unscoped install")
     root = args.repository.resolve()
     identity = binding(root, args.state)
     if args.operation == "identity":
@@ -594,8 +576,7 @@ def main():
     else:
         if args.state == "resume":
             (root / RESUME_RECORD).unlink(missing_ok=True)
-        result = install(root, record, targets, require_complete=args.require_complete,
-                         preparation=args.preparation)
+        result = install(root, record, targets, require_complete=args.require_complete)
         if args.state == "resume" and result["available"]:
             write_small_record(root / RESUME_RECORD, {"binding": identity, "owner": current_owner(root)})
         print(json.dumps(result))

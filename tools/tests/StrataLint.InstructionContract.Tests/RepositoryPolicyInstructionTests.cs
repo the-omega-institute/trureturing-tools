@@ -56,9 +56,8 @@ public sealed class RepositoryPolicyInstructionTests
     {
         var text = File.ReadAllText(Path.Combine(TestRepositoryLayout.FindRoot(), path), Encoding.UTF8);
         Assert.Contains("make worktree-stale", text, StringComparison.Ordinal);
-        Assert.Contains("make worktree-return", text, StringComparison.Ordinal);
         Assert.Contains("worktreeStaleHead", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("make worktree-return PR=", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("make worktree-stale PR=", text, StringComparison.Ordinal);
         Assert.Contains("WORKTREE_PATH=DIR", text, StringComparison.Ordinal);
         Assert.Contains("make worktree-remove", text, StringComparison.Ordinal);
         Assert.DoesNotContain("the task removes the worktrees it created", text, StringComparison.Ordinal);

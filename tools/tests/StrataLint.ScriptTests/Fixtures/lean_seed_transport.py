@@ -92,7 +92,7 @@ exit "${FAKE_BUILD_EXIT:-0}"
             "GITHUB_ACTIONS": "true", "FAKE_DEV_BRANCH": json.dumps(dev),
             "FAKE_DEV_COMPARE": json.dumps({"status": "identical", "merge_base_commit": {"sha": head}}),
             "GITHUB_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": "schedule", "GITHUB_REF": "refs/heads/dev",
-            "STRATALINT_CHECK_SUCCEEDED": "true", "STRATALINT_ACTIONS_CACHE_SEEDED": "", **observed, **extra}
+            "STRATALINT_CHECK_SUCCEEDED": "true", **observed, **extra}
 
     def transport(self, verb, run="123", arguments=(), **extra):
         return subprocess.run(["bash", str(self.publisher), verb, "--repository", str(self.root), *arguments],
@@ -1345,10 +1345,7 @@ pathlib.Path.open, tarfile.copyfileobj = open_path, copy
         self.assertEqual(0, self.transport("fetch").returncode)
         self.assertTrue((self.root / ".lake/build/lib/lean/D5/A.olean").is_file())
 
-    def test_actions_seed_skips_fetch_but_publication_requires_successful_build(self):
-        result = self.transport("fetch", STRATALINT_ACTIONS_CACHE_SEEDED="1")
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("skipped", result.stdout)
+    def test_publication_requires_successful_build(self):
         result = self.transport("publish", FAKE_BUILD_EXIT="19")
         self.assertEqual(19, result.returncode, result.stdout + result.stderr)
         self.assertEqual([], list(self.remote.iterdir()))

@@ -125,58 +125,19 @@ class ReleaseVerificationCases:
         self.save_verification_api()
         self.assertEqual("false", receipt(call("select-base", "--previous-commit-only"))["found"])
 
-    def test_rolling_base_manual_dev_publication_from_protected_integration(self):
-        self.prepare_indexed_candidate(repo="the-omega-institute/trureturing")
-        published = self.transport("publish", arguments=("--indexed",))
-        self.assertEqual(0, published.returncode, published.stdout + published.stderr)
-        tag = next(self.remote.iterdir()).name
-        producer = self.verification_commit
-        repo = self.verification_environment["GITHUB_REPOSITORY"]
-        prefix = f"repos/{repo}"
-        workflow = ".github/workflows/lean-cache-publish.yml"
-        branch = "integration-ci-rolling-tests"
-        ref = "refs/heads/" + branch
-        workflow_sha = "a" * 40
-        run = dict(id=124, run_attempt=1, event="workflow_dispatch", head_sha=workflow_sha,
-                   head_branch=branch, path=workflow, repository={"full_name": repo},
-                   actor={"login": "loning"}, triggering_actor={"login": "loning"})
-        self.verification_api.update({
-            f"{prefix}/actions/runs/123/attempts/1": dict(run, id=123),
-            f"{prefix}/actions/runs/124/attempts/1": run,
-            f"{prefix}/branches/{branch}": {"name": branch, "protected": True, "commit": {"sha": workflow_sha}},
-            f"{prefix}/compare/{workflow_sha}...{workflow_sha}": {
-                "status": "identical", "merge_base_commit": {"sha": workflow_sha}},
-            f"{prefix}/compare/{producer}...{producer}": {
-                "status": "identical", "merge_base_commit": {"sha": producer}},
-        })
-        self.save_verification_api()
-        event = self.root / "dispatch.json"
-        inputs = dict(operation="release", source_ref="refs/heads/dev", source_sha=producer)
-        write(event, json.dumps({"inputs": inputs}))
-        env = dict(self.verification_environment, GITHUB_REF=ref, GITHUB_SHA=workflow_sha,
-                   GITHUB_REF_PROTECTED="true", GITHUB_WORKFLOW_REF=f"{repo}/{workflow}@{ref}",
-                   GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_EVENT_PATH=str(event),
-                   GITHUB_ACTOR="loning", GITHUB_TRIGGERING_ACTOR="loning")
-        def call(command="select-base", *args, **changes):
-            return self.transport(command, run="124", arguments=("--mode", "production", "--source-ref",
-                "refs/heads/dev", "--source-commit", producer, *args), **(env | changes))
-        selected = call()
-        self.assertEqual(0, selected.returncode, selected.stdout + selected.stderr)
-        self.assertIn('"indexed":"true"', selected.stdout)
-        self.assertNotEqual(0, call(GITHUB_TRIGGERING_ACTOR="other").returncode)
-        write(event, json.dumps({"inputs": inputs | {"source_sha": workflow_sha}}))
-        self.assertNotEqual(0, call().returncode)
-        write(event, json.dumps({"inputs": inputs}))
-        prior = self.verification_api[f"{prefix}/actions/runs/123/attempts/1"]
-        prior["triggering_actor"] = {"login": "other"}
-        self.save_verification_api()
-        self.assertIn('"found":"false"', call().stdout)
-        prior["triggering_actor"] = {"login": "loning"}
-        self.save_verification_api()
-        shutil.rmtree(self.root / ".lake/build")
-        installed = call("install-base", "--tag", tag, "--producer", producer)
-        self.assertEqual(0, installed.returncode, installed.stdout + installed.stderr)
-        self.assertEqual("locally-produced-olean", (self.root / ".lake/build/lib/lean/D5/A.olean").read_text())
+    def test_rolling_base_rejects_production_mode(self):
+        repo = "the-omega-institute/trureturing"
+        self.verification_fixture(repo=repo, branch="dev")
+        ref = self.verification_ref
+        env = dict(self.verification_environment, GITHUB_REF_PROTECTED="true",
+                   GITHUB_WORKFLOW_REF=f"{repo}/.github/workflows/lean-cache-publish.yml@{ref}")
+        commands = (("select-base", ()), ("install-base", ("--tag", "snapshot", "--producer", self.verification_commit)))
+        for command, extra in commands:
+            with self.subTest(command=command):
+                result = self.transport(command, arguments=("--mode", "production", "--source-ref", ref,
+                    "--source-commit", self.verification_commit, *extra), **env)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("matching protected Release verification workflow", result.stdout)
 
     def verification_calls(self):
         path = self.root / "gh-calls"
@@ -277,7 +238,7 @@ os.execv({real_git}, [{real_git}, *sys.argv[1:]])
         self.assertFalse(any(call[:2] in (["api", "graphql"], ["release", "list"], ["release", "delete"])
                              for call in self.verification_calls()))
         shutil.rmtree(self.root / ".lake/build")
-        fetched = self.verification("fetch", STRATALINT_ACTIONS_CACHE_SEEDED="true")
+        fetched = self.verification("fetch")
         self.assertEqual(0, fetched.returncode, fetched.stdout + fetched.stderr)
         self.assertIn('"status":"unpacked"', fetched.stdout)
         self.assertIn(tag, fetched.stdout)

@@ -68,12 +68,12 @@ class SourcePrTests(unittest.TestCase):
             source_pr.source_pr(None)
         self.assertEqual([], self.refs)
 
-    def test_workflow_provenance_is_independent_of_release_digest(self):
+    def test_previous_pin_is_independent_of_release_digest(self):
         self.reachable.add(self.base)
-        self.remote_pin = dict(self.pin, workflow_sha="9" * 40, previous_pin="8" * 40)
+        self.remote_pin = dict(self.pin, previous_pin="8" * 40)
         self.assertIn("already in", source_pr.source_pr(None))
-        self.remote_pin["workflow_sha"] = "malformed"
-        with self.assertRaisesRegex(ValueError, "workflow_sha"):
+        self.remote_pin["previous_pin"] = "malformed"
+        with self.assertRaisesRegex(ValueError, "previous_pin"):
             source_pr.source_pr(None)
 
     def test_automatic_preview_checks_full_commit_even_with_matching_prefix(self):

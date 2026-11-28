@@ -364,19 +364,6 @@ class ModuleReleases(unittest.TestCase):
         self.assertTrue(sibling.is_file())
         self.assertEqual(set(cache.finish(plan, self.remote)['targets']), set(plan['targets']))
 
-    def test_dag_adopts_available_first_publication_frames(self):
-        plan = self.dag_plan(workers=1)
-        self.lake('build', '+D5.A:leanArts')
-        plan['legacy'] = {'targets': {'D5.A': {}}}
-        def restore(remote, index, names, destination):
-            return names & index['targets'].keys()
-        with patch('lean_generation_checkpoints.remote_for', return_value=object()), \
-             patch.object(cache, 'restore_legacy', side_effect=restore):
-            result = self.workers(plan)
-        self.assertEqual(sum(r['compiled_modules'] for r in result), 2)
-        self.assertCountEqual([n for call in self.compiled for n in call], ['D5.B', 'D5.C'])
-        self.assertEqual(len(cache.finish(plan, self.remote)['targets']), 3)
-
     def test_checkpoint_rejects_modified_ordinary_olean_before_upload(self):
         plan = self.dag_plan()
         def corrupt(root, modules, names):
@@ -1122,15 +1109,6 @@ def main : IO Unit := do
         self.assertEqual(plan['lanes'], [])
         self.assertEqual(cache.finish(plan, self.remote)['shards']['D5'], historical)
         self.assertEqual(self.remote.saves, [])
-
-    def test_first_plan_uses_verified_compressed_sizes_for_layout(self):
-        _, targets = cache.checkout_targets(self.root)
-        legacy = {'targets': {n: {'bytes': 12} for n in targets}}
-        guessed = self.plan(capacity=40)
-        self.assertEqual(len(guessed['shards']), 3)
-        measured = cache.make_plan(self.source, self.pin, targets, None, self.remote, 40, 2, mathlib_version=self.version, legacy=legacy)
-        self.assertEqual(measured['shards'].keys(), {'D5'})
-        self.assertEqual(measured['legacy'], legacy)
 
     def test_actual_oversize_split_survives_interruption_and_upgrade(self):
         # Start with a cold underestimate so real compressed bytes trigger the split in the worker.

@@ -103,6 +103,10 @@ class ContractTests(unittest.TestCase):
         self.put("Meta/tools-release.json", b'{"version": "v1.0.0"}\n')
         self.assertEqual(self.parity()["hits"], {"current": True, "filemap": True, "omega": True})
 
+    def test_shared_workflow_selects_every_consumer(self):
+        self.put(".github/workflows/ci-current.yml", b"# changed shared workflow\n")
+        self.assertTrue(all(self.parity()["hits"].values()))
+
     def test_shared_compute_owner_selects_every_actual_consumer(self):
         self.put("tools/scripts/workflow/ci_compute.py", b"# changed shared compute owner\n")
         self.assertEqual(self.parity()["hits"], {"current": True, "filemap": True, "omega": False})

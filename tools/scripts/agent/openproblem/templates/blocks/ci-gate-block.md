@@ -7,4 +7,4 @@ CLAUDE.md §8.2 makes local checks early feedback and the remote required check 
   - Report `open` only for a diagnostic outside those fixes.
 - The PR body's Verification section states the gate as current data: the required check `required` at the delivered head, with its run id and conclusion, and the `current` job's conclusion. It names any Observe diagnostics the job printed for this lane's paths (SL-022 on `.scribe.cs`, SL-031 DTR, SL-008 `FROZEN_PIN_CHANGE`) as non-blocking. Record the PR's scoped validation and the local full gate under their actual execution status.
 
-PR and push CI restore caches read-only under CLAUDE.md §8.3. A separate job on protected pushes builds the complete report and publishes the validated project cache.
+PR and push CI restore caches read-only under CLAUDE.md §8.3. Project compiler artifacts are distributed in module releases.

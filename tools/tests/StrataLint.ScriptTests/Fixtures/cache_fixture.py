@@ -48,17 +48,3 @@ class CacheFixture:
             json.loads(line.removeprefix("LEAN_ACTIONS_CACHE "))
             for line in result.stdout.splitlines() if line.startswith("LEAN_ACTIONS_CACHE "))}
         return readiness, receipts
-
-    def dependency_files(self):
-        source = self.root / ".lake/packages"
-        material = {
-            "mathlib/scripts/bench/size/run": (b"#!/bin/sh\nprintf 'size\\n'\n", 0o755),
-            "mathlib/scripts/bench/build/fake-root/bin/lean": (b"#!/bin/sh\nexit 0\n", 0o755),
-            "batteries/README.md": (b"# Batteries\n\x00private bytes\xff\n", 0o640),
-        }
-        for relative, (data, mode) in material.items():
-            path = source / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-            path.chmod(mode)
-        return source, material

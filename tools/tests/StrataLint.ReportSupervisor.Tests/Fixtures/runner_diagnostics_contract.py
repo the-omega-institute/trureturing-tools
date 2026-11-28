@@ -181,26 +181,6 @@ class RunnerDiagnosticsTests(unittest.TestCase):
         self.assertEqual(3.75, sample["memory.pressure"]["some"]["avg300"])
         self.assertEqual(5, sample["memory.pressure"]["full"]["total"])
 
-    def test_dispatch_adds_diagnostics_only_for_literal_true(self):
-        sys.path.insert(0, str(REPO / "tools/scripts/worktree"))
-        self.addCleanup(lambda: sys.path.remove(str(REPO / "tools/scripts/worktree")))
-        import lean_pr_cache as cache
-        identity = dict(repository="owner/repo", target_ref="refs/heads/dev", merge="a" * 40)
-        for setting in ("false", "true", "1", "True"):
-            with mock.patch.object(cache, "source_identity", return_value=identity), \
-                    mock.patch.object(cache, "validate_remote"), \
-                    mock.patch.object(cache.actions, "output"), \
-                    mock.patch.object(cache, "receipt"), \
-                    mock.patch.object(cache, "api", return_value={"workflow_run_id": 123}) as api, \
-                    mock.patch.dict(os.environ, STRATALINT_RUNNER_DIAGNOSTICS=setting):
-                cache.dispatch(REPO)
-            inputs = api.call_args.args[2]["inputs"]
-            expected = dict(operation="pr", source_ref="refs/heads/dev", source_sha="a" * 40,
-                            pr_source=json.dumps(identity, separators=(",", ":")))
-            if setting == "true":
-                expected["runner_diagnostics"] = "true"
-            self.assertEqual(expected, inputs)
-
     def test_console_failure_and_partial_writes_preserve_exit(self):
         program = ("import importlib.util,sys; "
                    "s=importlib.util.spec_from_file_location('d',sys.argv[1]); "

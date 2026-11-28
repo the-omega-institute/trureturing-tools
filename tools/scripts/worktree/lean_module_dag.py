@@ -7,7 +7,6 @@ from graphlib import TopologicalSorter
 import math
 import json
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 import zlib
@@ -295,10 +294,6 @@ def assigned_units(root, plan, assignment, receipts, remote, modules, output):
     installed = set()
     destination = root / cache.inventory.PROJECT_BUILD
     common_prepared = False
-    legacy = plan.get('legacy')
-    if legacy:
-        from lean_generation_checkpoints import remote_for
-        legacy_remote = remote_for(root)
     seed_members = defaultdict(set)
     for n, address in owners.items():
         seed_members[address].add(n)
@@ -363,15 +358,6 @@ def assigned_units(root, plan, assignment, receipts, remote, modules, output):
         compiled += install(decode_scope(units[key]['restore'], dag['names']))
         compiled += install(members & seeds.keys())
         missing = members - installed
-        if legacy and missing:
-            candidates = {n for n in missing if not modules[n].extra_builds}
-            try:
-                recovered = cache.restore_legacy(legacy_remote, legacy, candidates, destination)
-                cache.materialize_shared(destination, modules, recovered)
-                missing -= recovered
-            except (OSError, EOFError, ValueError, subprocess.SubprocessError) as error:
-                print(f'Compiler seed unavailable; continuing with Lake: {error}', file=sys.stderr)
-                legacy = None
         if missing:
             roots = units[key]['roots'] if missing == members else sorted(missing)
             cache.compiler.compile_roots(root, modules, roots)
