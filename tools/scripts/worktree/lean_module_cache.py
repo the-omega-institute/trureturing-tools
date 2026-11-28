@@ -18,7 +18,7 @@ import tomllib
 
 import lean_artifact_inventory as inventory
 import lean_compile_layers as compiler
-from lean_cache import publication_mathlib, seed_partitions
+from lean_cache import binary_platform, publication_mathlib, seed_partitions
 from lean_generation_plan import digest, file_digest, module_config, write
 from lean_module_shards import DEFAULT_CAPACITY, NAME, pack_shard, plan_shards, restore_shard
 
@@ -36,6 +36,7 @@ OMEGA_ROOTS = OMEGA_LIBRARIES | {'OmegaChecks'}
 OMEGA_OVERLAYS = ('omega-strict', 'omega-common')
 OMEGA_CHECKS = Path('src/OmegaChecks')
 OMEGA_CERTIFICATE = 'OmegaChecks.Interface.Equations'
+BACKEND_READER = 'OmegaBuild.Plan'
 
 
 def namespace(name):
@@ -68,6 +69,12 @@ def omega_build_plan(root, modules, graph):
         strict_modules[name] = replace(modules[name], source=source)
     strict_graph = dict(graph)
     strict_graph.update(inventory.project_imports(root, strict_modules, sources=sorted(basis)))
+    plugin = inventory.INIT_PLUGIN
+    plugin_inputs = inventory.import_closure(graph, {plugin}) if plugin in graph else set()
+    if plugin_inputs:
+        for name in basis:
+            if namespace(name) == 'OmegaInit':
+                strict_graph[name] = strict_graph[name] | {plugin}
     # The command is a Lean elaborator. Its import makes selection possible;
     # only the official compiled metadata can say that it was actually invoked.
     command = 'OmegaBuild.Commands'
@@ -75,17 +82,24 @@ def omega_build_plan(root, modules, graph):
     for name in TopologicalSorter(graph).static_order():
         if graph[name] & may_select:
             may_select.add(name)
-    touched = {}
+    strict = set()
     for name in TopologicalSorter(strict_graph).static_order():
-        touched[name] = namespace(name) in OMEGA_LIBRARIES or name == command or any(touched[dep] for dep in strict_graph[name])
-    # The strict check builds all Omega library and check modules. The dual
-    # compilation also builds every downstream consumer and its local imports.
-    consumers = {n for n in strict_graph if touched[n] and namespace(n) not in {'OmegaChecks', 'OmegaBuild'}}
-    strict = inventory.import_closure(strict_graph, consumers | omega_roots(root, modules))
-    clients = {n for n in strict_graph if n.startswith('OmegaChecks.Portable.') and touched[n]}
-    common_roots = basis | clients | ({OMEGA_CERTIFICATE} & graph.keys())
-    common = inventory.import_closure(strict_graph, common_roots) | inventory.import_closure(graph, common_roots)
-    strict.update(common)
+        if namespace(name) == 'OmegaInit' or strict_graph[name] & strict:
+            strict.add(name)
+    clients = {n for n in strict if n.startswith('OmegaChecks.Portable.')}
+    common_roots = (basis | clients | {OMEGA_CERTIFICATE}) & strict
+    common_scope = inventory.import_closure(strict_graph, common_roots) | inventory.import_closure(graph, common_roots)
+    common = strict & common_scope
+    strict_scope = inventory.import_closure(strict_graph, strict)
+    augmented = dict(modules)
+    for name in plugin_inputs:
+        augmented[name] = replace(modules[name], plugin_input=True)
+    for name in (strict_scope | common_scope) - strict:
+        module = modules[name]
+        if module.package in ('trureturing', 'reg', 'leanInspectorInterface'):
+            shared = tuple(omega_build_dir(module, backend) for backend, scope in
+                           zip(OMEGA_OVERLAYS, (strict_scope, common_scope), strict=True) if name in scope)
+            augmented[name] = replace(augmented[name], shared_builds=shared)
 
     # The overlay owns the entire root configuration and, for a Reg request,
     # the actual Reg and interface package configurations. Bind their settings
@@ -106,12 +120,11 @@ def omega_build_plan(root, modules, graph):
     # Follow its own imports even when none of the released modules imports it.
     conditional_modules = (strict & may_select) - {command}
     if conditional_modules:
-        reader = compiler.scoped_imports(root, modules, {'OmegaBuild.Plan'})
+        reader = inventory.import_closure(graph, {BACKEND_READER})
         selection_inputs = digest([
             file_digest(root / OMEGA_CHECKS / 'portable.py'),
             [(name, file_digest(root / modules[name].source)) for name in sorted(reader)],
         ])
-    augmented = dict(modules)
     inputs = {}
     for name in strict:
         module = modules[name]
@@ -127,6 +140,35 @@ def omega_build_plan(root, modules, graph):
         augmented[name] = replace(module, extra_builds=tuple(builds), conditional_backends=conditional)
         inputs[name] = values
     return augmented, {n: graph[n] | (strict_graph[n] if n in strict else set()) for n in graph}, inputs
+
+
+def materialize_shared(build, modules, names):
+    """Give each overlay the verified ordinary outputs of its unchanged prerequisites."""
+    from lean_cache_release import has_unsafe_parent
+    for name in names:
+        module = modules[name]
+        if not module.shared_builds:
+            continue
+        for artifact in inventory.lean_artifact_paths(name, module):
+            source = build / artifact
+            if not source.is_file():
+                continue
+            if source.is_symlink() or has_unsafe_parent(build, artifact):
+                raise ValueError(f'unsafe ordinary compiler output: {artifact}')
+            for overlay in module.shared_builds:
+                relative = overlay / artifact.relative_to(module.build)
+                target = build / relative
+                if target.is_symlink() or has_unsafe_parent(build, relative):
+                    raise ValueError(f'unsafe shared compiler output: {relative}')
+                target.parent.mkdir(parents=True, exist_ok=True)
+                # Replace atomically. An overlay may be left over from an older checkout.
+                with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as staged:
+                    path = Path(staged.name)
+                try:
+                    shutil.copy2(source, path)
+                    os.replace(path, target)
+                finally:
+                    path.unlink(missing_ok=True)
 
 
 def build_omega_targets(root, lake, modules, names):
@@ -155,7 +197,14 @@ def prepare_common_facades(root, modules, strict_lake, portable):
             os.replace(staged.name, target)
 
 
-def compile_omega_outputs(root, modules, names, common_prepared):
+def compile_omega_outputs(root, modules, names, common_prepared, *, prepared_reader=False):
+    native = sorted(n for n in names if modules[n].plugin_input)
+    if native:
+        facets = [f'+{n}:c.o.export' for n in native]
+        if inventory.INIT_PLUGIN in native:
+            facets.append(inventory.INIT_PLUGIN + ':shared')
+        subprocess.run(['lake', 'build', *facets], cwd=root, check=True)
+    materialize_shared(root / inventory.PROJECT_BUILD, modules, names)
     strict = {n for n in names if modules[n].extra_builds}
     if not strict:
         return common_prepared
@@ -172,7 +221,9 @@ def compile_omega_outputs(root, modules, names, common_prepared):
             batch = candidates[offset:offset + 128]
             lake, _ = strict_lake.lake_layout(False, any(modules[n].package != 'trureturing' for n in batch))
             search_path = portable.output(*lake, 'env', 'printenv', 'LEAN_PATH').strip()
-            skipped = portable.backend_plan(search_path, batch)['mathlibOnly']
+            selection = (portable.backend_plan(search_path, batch, prepared=True) if prepared_reader
+                         else portable.backend_plan(search_path, batch))
+            skipped = selection['mathlibOnly']
             for name in skipped:
                 modules[name] = replace(modules[name], extra_builds=())
             strict.difference_update(skipped)
@@ -193,9 +244,18 @@ def compile_omega_outputs(root, modules, names, common_prepared):
     return common_prepared
 
 
+def compiler_environment(root):
+    if any(os.environ.get(name) for name in ('LEAN_PATH', 'LEAN_SRC_PATH', 'LEAN_SYSROOT', 'LEAN_OPTS')):
+        raise ValueError('compiler paths or options overridden outside the Lake project')
+    return [(root / 'lean-toolchain').read_text().strip(), sorted(seed_partitions(root)),
+                   os.environ.get('ELAN_TOOLCHAIN', '')]
+
+
 def checkout_targets(root, *, kind='compiler', requested=None, restore_only=False, scope_roots=None):
     modules = inventory.workspace_modules(root)
     roots = inventory.release_roots(modules) | omega_roots(root, modules)
+    if omega_enabled(root) and BACKEND_READER in modules:
+        roots.add(BACKEND_READER)
     registry = 'LeanInformationAudit.TemplateEnrollment'
     if registry in modules:
         roots.add(registry)
@@ -254,10 +314,7 @@ def checkout_targets(root, *, kind='compiler', requested=None, restore_only=Fals
         configs[package] = config
         manifest = path / 'lake-manifest.json'
         pins[package] = file_digest(manifest) if manifest.is_file() else None
-    if any(os.environ.get(name) for name in ('LEAN_PATH', 'LEAN_SRC_PATH', 'LEAN_SYSROOT', 'LEAN_OPTS')):
-        raise ValueError('compiler paths or options overridden outside the Lake project')
-    environment = [(root / 'lean-toolchain').read_text().strip(), sorted(seed_partitions(root)),
-                   os.environ.get('ELAN_TOOLCHAIN', '')]
+    environment = compiler_environment(root)
 
     targets = {}
     for name in TopologicalSorter(graph).static_order():
@@ -266,6 +323,9 @@ def checkout_targets(root, *, kind='compiler', requested=None, restore_only=Fals
         source = file_digest(root / module.source)
         inputs = [environment, module.package, pins[module.package], str(module.source), str(module.build),
                   module_config(configs[module.package], name), source, [(d, targets[d]['key']) for d in dependencies]]
+        if module.plugin_input:
+            inputs.append(['Lake plugin native outputs', binary_platform(),
+                           sorted(str(p) for p in inventory.plugin_outputs(name, module))])
         if name in omega_inputs:
             inputs.extend(omega_inputs[name])
         key = digest(inputs)
@@ -357,7 +417,9 @@ def split_cold_reports(plan, existing, base, remote):
 
 
 def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, mathlib_version,
-              prepare_release=False, kind=None, compiler_index=None):
+              prepare_release=False, kind=None, compiler_index=None, compiler_dag=False, modules=None, root=None):
+    if compiler_dag and kind != 'compiler':
+        raise ValueError('dependency scheduling requires a compiler publication')
     if workers < 1 or workers > 256:
         raise ValueError('worker count must be within the Actions matrix limit')
     version = VERSION_PREFIX + source + ('-report' if kind == 'report' else '')
@@ -472,6 +534,12 @@ def make_plan(source, mathlib, targets, base, remote, capacity, workers, *, math
         lanes[lane].append(name)
         loads[lane] += sum(sizes[n] for n in planned[name]['members'])
     plan['lanes'] = lanes
+    if compiler_dag:
+        from lean_module_dag import module_snapshot, prepare
+        if missing:
+            prepare(plan, base, remote, workers, prepare_release, modules, root)
+        else:
+            plan['compiler_dag'] = module_snapshot(root, modules, targets)
     return plan
 
 
@@ -509,7 +577,10 @@ def restore_artifacts(root, modules, targets, index, names, remote, destination,
                 if not set(members) <= set(row['members']) or row.get('artifact_kind') != index.get('kind'):
                     raise ValueError('shard content differs from publication index')
                 remote.download(row, archive)
-                restored.update(restore_shard(archive, row, members, modules, destination, root=root, kind=kind))
+                added = restore_shard(archive, row, members, modules, destination, root=root, kind=kind)
+                if kind == 'compiler':
+                    materialize_shared(destination, modules, added)
+                restored.update(added)
     return restored
 
 
@@ -539,20 +610,24 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
         raise ValueError('worker checkout or lane differs from its plan')
     original = plan
     kind = plan.get('kind', 'compiler')
-    splits = {} if kind == 'report' else remote.splits(original)
+    splits = {} if kind == 'report' or 'compiler_dag' in original else remote.splits(original)
     plan = expanded(original, splits)
-    modules, checkout = checkout_targets(root, kind=kind)
-    current = {n: r for n, r in checkout.items() if 'report_inputs' in r} if kind == 'report' else checkout
     targets = plan['targets']
-    if current != {name: {k: v for k, v in row.items() if k != 'shard'} for name, row in targets.items()}:
-        raise ValueError('worker compiler inputs differ from its plan')
-    graph = {n: set(row['deps']) for n, row in checkout.items()}
+    if 'compiler_dag' in plan:
+        from lean_module_dag import worker_modules
+        modules = worker_modules(root, plan['compiler_dag'])
+    else:
+        modules, checkout = checkout_targets(root, kind=kind)
+        current = {n: r for n, r in checkout.items() if 'report_inputs' in r} if kind == 'report' else checkout
+        if current != {name: {k: v for k, v in row.items() if k != 'shard'} for name, row in targets.items()}:
+            raise ValueError('worker compiler inputs differ from its plan')
+        graph = {n: set(row['deps']) for n, row in checkout.items()}
     compiler_index = None
     if kind == 'report':
         compiler_index = compiler_remote.published(plan['compiler_version'])
         if not compiler_index or compiler_index['source'] != plan['source']:
             raise ValueError('published compiler prerequisite unavailable')
-    base = remote.latest(plan['base_version']) if plan['base_version'] else None
+    base = remote.latest(plan['base_version']) if plan['base_version'] and 'compiler_dag' not in plan else None
     combined = None
     if compiler_index and not base:
         if compiler_index.get('kind') is None:
@@ -566,12 +641,24 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
             except REPORT_READ_ERRORS as error:
                 print(f'Historical reports unavailable: {error}', file=sys.stderr)
                 combined = None
-    complete = recover_partials(plan, matching(plan, plan['inherited']), remote)
+    if 'compiler_dag' in original:
+        assigned_rows = {n: plan['shards'][n] for n in original['lanes'][lane]}
+        assigned_plan = dict(plan, shards=assigned_rows)
+        splits = remote.splits(assigned_plan) if assigned_rows else {}
+        plan = expanded(plan, splits)
+        assigned_plan = expanded(assigned_plan, splits)
+        complete = recover_partials(assigned_plan, matching(assigned_plan, plan['inherited']), remote)
+    else:
+        complete = recover_partials(plan, matching(plan, plan['inherited']), remote)
     installed = set()
     restored_reports = set()
     produced_reports = 0
     compiled = uploaded = 0
     common_prepared = False
+    dag_install = None
+    if 'compiler_dag' in plan:
+        from lean_module_dag import compile_units
+        dag_install, installed, compiled = compile_units(root, plan, lane, remote, modules, output)
     assigned = [child for name in original['lanes'][lane] for child in splits.get(name, {name: None})]
     for name in assigned:
         if name in complete:
@@ -599,6 +686,8 @@ def work(root, plan, lane, remote, output, *, compiler_remote=None):
                 materialize(root, sorted(pending), inputs, prebuilt=True)
                 produced_reports += len(pending)
             restored_reports.update(members)
+        elif dag_install:
+            compiled += dag_install(members)
         else:
             scope = inventory.import_closure(graph, members)
             for index in (partial_index(plan, complete), base):
@@ -683,12 +772,17 @@ def finish(plan, remote, *, stage_only=False):
 
 
 def restore(root, index, requested, remote, destination, *, kind=None, report_index=None, report_remote=None,
-            load_reports=None):
+            load_reports=None, snapshot=None):
     roots = set(requested or ())
     report_error = None
     try:
-        modules, targets = checkout_targets(root, kind='compiler' if kind == 'compiler' else 'report',
-                                            requested=requested, restore_only=True, scope_roots=roots)
+        if snapshot is None:
+            modules, targets = checkout_targets(root, kind='compiler' if kind == 'compiler' else 'report',
+                                               requested=requested, restore_only=True, scope_roots=roots)
+        else:
+            from lean_module_dag import worker_modules
+            modules = worker_modules(root, snapshot['compiler_dag'])
+            targets = snapshot['targets']
     except REPORT_READ_ERRORS as error:
         if kind is not None:
             raise
@@ -781,7 +875,24 @@ def restore_published(root, index, names, remote, destination, kind=None, *, exa
             validate_report_pair(reports, paired)
         return reports, reader
 
-    return restore(root, index, names, remote, destination, kind=kind, load_reports=load_reports)
+    snapshot = None
+    if exact and kind == 'compiler' and index.get('kind') == 'compiler':
+        # Callers can request an old version from another checkout, or restore into a dirty tree.
+        try:
+            same_checkout = compiler.checkout(root) == index['source']
+        except ValueError:
+            same_checkout = False
+        if same_checkout:
+            from lean_module_remote import COMPILER_PLAN
+            saved = remote.publication_layout(index['version'], COMPILER_PLAN)
+            if saved is not None:
+                if any(saved.get(k) != index[k] for k in ('schema', 'kind', 'source', 'version', 'mathlib')):
+                    raise ValueError('compiler restore plan differs from publication')
+                dag = saved.get('compiler_dag')
+                if dag and dag['environment'] == compiler_environment(root):
+                    snapshot = saved
+    return restore(root, index, names, remote, destination, kind=kind, load_reports=load_reports,
+                   snapshot=snapshot)
 
 
 def fetch_published(root, names, deadline, *, refresh_stale, version=None):
@@ -836,6 +947,23 @@ def fetch_published(root, names, deadline, *, refresh_stale, version=None):
         return 0
 
 
+def plan_publication(root, args, remote, source):
+    from lean_module_remote import Remote
+    modules, targets = checkout_targets(root, kind=args.kind)
+    base = json.loads(args.base.read_bytes()) if args.base else remote.latest()
+    compiler_index = None
+    if args.kind == 'report':
+        compiler_index = Remote(root).published(VERSION_PREFIX + source)
+        if not compiler_index:
+            raise ValueError('report publication requires a published compiler cache for ' + source)
+        targets = {n: r for n, r in targets.items() if 'report_inputs' in r}
+    mathlib, mathlib_version = publication_mathlib(root)
+    return make_plan(source, mathlib, targets, base, remote, args.capacity, args.workers,
+                       mathlib_version=mathlib_version, prepare_release=args.prepare_release,
+                       kind=args.kind, compiler_index=compiler_index, compiler_dag=args.compiler_dag,
+                       modules=modules, root=root)
+
+
 def run():
     from lean_module_remote import Remote, publisher
     parser = argparse.ArgumentParser(description=__doc__)
@@ -844,6 +972,7 @@ def run():
     plan = commands.add_parser('plan')
     plan.add_argument('--base', type=Path)
     plan.add_argument('--kind', choices=('compiler', 'report'), default='compiler')
+    plan.add_argument('--compiler-dag', action='store_true', help='schedule cold compiler units by dependency')
     plan.add_argument('--prepare-release', action='store_true', help='create the shared Release before starting its workers')
     plan.add_argument('--capacity', type=int, default=DEFAULT_CAPACITY)
     plan.add_argument('--workers', type=int, default=20)
@@ -877,20 +1006,24 @@ def run():
                               compiler_remote=Remote(root) if kind == 'report' else None)))
         return 0
     if args.command == 'plan':
+        from lean_module_remote import COMPILER_PLAN
         remote = Remote(root, kind=args.kind)
-        _, targets = checkout_targets(root, kind=args.kind)
-        base = json.loads(args.base.read_bytes()) if args.base else remote.latest()
         source = compiler.checkout(root)
-        compiler_index = None
-        if args.kind == 'report':
-            compiler_index = Remote(root).published(VERSION_PREFIX + source)
-            if not compiler_index:
-                raise ValueError('report publication requires a published compiler cache for ' + source)
-            targets = {n: r for n, r in targets.items() if 'report_inputs' in r}
-        mathlib, mathlib_version = publication_mathlib(root)
-        result = make_plan(source, mathlib, targets, base, remote, args.capacity, args.workers,
-                           mathlib_version=mathlib_version, prepare_release=args.prepare_release,
-                           kind=args.kind, compiler_index=compiler_index)
+        durable = args.compiler_dag and args.prepare_release and args.kind == 'compiler'
+        result = None
+        if durable:
+            publisher('compiler')
+            remote.clear_compiler_claims()
+            version = VERSION_PREFIX + source
+            result = remote.publication_layout(version, COMPILER_PLAN)
+            if result is not None and (result.get('kind') != 'compiler' or result.get('source') != source
+                                       or result.get('version') != version or result.get('schema') != SCHEMA):
+                raise ValueError('saved compiler plan differs from pinned source')
+        if result is None:
+            result = plan_publication(root, args, remote, source)
+            if durable:
+                result['planner_run'] = os.environ.get('GITHUB_RUN_ID')
+                remote.save_publication_layout(version, result, COMPILER_PLAN)
         if args.prepare_release and result['lanes']:
             publisher(args.kind)
         write(args.output, result)
@@ -903,7 +1036,10 @@ def run():
         plan = json.loads(args.plan.read_bytes())
         if compiler.checkout(root) != plan['source']:
             raise ValueError('publisher checkout differs from plan')
-        write(args.output, finish(plan, Remote(root, kind=plan['kind']), stage_only=args.stage_only))
+        remote = Remote(root, kind=plan['kind'])
+        write(args.output, finish(plan, remote, stage_only=args.stage_only))
+        if 'compiler_dag' in plan:
+            remote.clear_compiler_claims(plan['source'])
     elif args.command == 'promote':
         status = Remote(root, kind=args.kind).promote(args.version)
         print(json.dumps({'version': args.version, 'status': status}))

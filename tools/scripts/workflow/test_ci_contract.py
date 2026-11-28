@@ -107,6 +107,10 @@ class ContractTests(unittest.TestCase):
         self.put(".github/workflows/ci-current.yml", b"# changed shared workflow\n")
         self.assertTrue(all(self.parity()["hits"].values()))
 
+    def test_shared_compute_owner_selects_every_actual_consumer(self):
+        self.put("tools/scripts/workflow/ci_compute.py", b"# changed shared compute owner\n")
+        self.assertEqual(self.parity()["hits"], {"current": True, "filemap": True, "omega": False})
+
     def test_staged_rename_unstaged_deletion_untracked_nul_paths(self):
         self.git("mv", "D5/old name\nsource.lean", "D5/renamed\tfile.lean")
         self.put("D5/renamed\tfile.lean", b"theorem old : True := by trivial\n")

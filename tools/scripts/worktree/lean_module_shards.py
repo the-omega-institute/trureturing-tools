@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 import zipfile
 
-from lean_artifact_inventory import Module, PROJECT_BUILD, compiler_path, compiler_variants, lean_artifact_paths
+from lean_artifact_inventory import Module, PROJECT_BUILD, compiler_path, compiler_variants, lean_artifact_paths, plugin_outputs, plugin_paths
 from lean_cache_release import has_unsafe_parent, install_scoped, report_selection
 from lean_cache_release_io import archive_sha, copy_chunks
 from lean_compile_layers import check_outputs
@@ -155,7 +155,7 @@ def verify_report(root, build, name, module, hashes):
     return build / trace
 
 
-def verify_backend_hashes(root, build, modules, grouped, *, destination=None, reports_only=False):
+def verify_backend_hashes(root, build, modules, grouped, *, destination=None, reports_only=False, all_compilers=False):
     """Check module reports and every compiler variant of paired modules against their Lake traces."""
     hashes = {}
     local_traces = []
@@ -170,10 +170,26 @@ def verify_backend_hashes(root, build, modules, grouped, *, destination=None, re
                 live = destination / trace
                 if not live.is_symlink() and live.is_file():
                     local_traces.append(live)
-        if reports_only or not (module.extra_builds or module.conditional_backends):
+        if module.plugin_input and not reports_only:
+            if not plugin_paths(name, module) <= grouped[name]:
+                raise ValueError('missing native compiler plugin output: ' + name)
+            for output in plugin_outputs(name, module):
+                trace = output.with_name(output.name + '.trace')
+                sidecar = output.with_name(output.name + '.hash')
+                suffix = 'o' if output.name.endswith('.c.o.export') else output.suffix[1:]
+                description = read_trace(build / trace)['outputs']
+                if (not isinstance(description, str)
+                        or not re.fullmatch(r'[0-9a-f]{16}\.' + suffix, description)
+                        or (build / sidecar).read_text() != description[:16]):
+                    raise ValueError('native compiler output differs from its Lake trace: ' + str(output))
+                hashes[build / output] = description[:16]
+                traces.append(str((build / trace).absolute()))
+        if reports_only or not (all_compilers or module.extra_builds or module.conditional_backends):
             continue
         for variant in compiler_variants(module):
             trace = compiler_path(name, variant, 'lib/lean', 'trace')
+            if all_compilers:
+                traces.append(str((build / trace).absolute()))
             outputs = read_trace(build / trace)['outputs']
             descriptors = dict(zip(('olean', 'olean.server', 'olean.private'), outputs['o']))
             descriptors.update(ilean=outputs['i'], c=outputs['c'])
@@ -228,21 +244,10 @@ def traces_match(live, staged):
             and all(current.get(key) == published.get(key) for key in ('schemaVersion', 'depHash', 'outputs')))
 
 
-def pack_shard(root, modules, members, output, fingerprint, *, kind='combined'):
-    if kind not in ('combined', 'compiler', 'report'):
-        raise ValueError('unknown module shard kind: ' + str(kind))
-    if not valid_digest(fingerprint):
-        raise ValueError('invalid module shard fingerprint')
+def checked_shard_files(root, selected, kind, verify_compilers):
     build = root / PROJECT_BUILD
     if build.is_symlink() or build.parent.is_symlink():
         raise ValueError('unsafe build directory')
-    selected = {name: modules[name] for name in members}
-    if not selected:
-        raise ValueError('empty module shard')
-    if kind == 'compiler':
-        selected = {name: replace(module, report=False) for name, module in selected.items()}
-    if kind == 'report' and not all(module.report for module in selected.values()):
-        raise ValueError('report-only archive includes a module without a report')
     grouped = {}
     verified_files = {}
     for name, module in selected.items():
@@ -255,15 +260,35 @@ def pack_shard(root, modules, members, output, fingerprint, *, kind='combined'):
                 raise ValueError('unsafe compiler artifact: ' + str(path))
             if file.is_file():
                 paths.add(path)
-                if module.extra_builds or module.conditional_backends or path in reports:
+                if verify_compilers or module.extra_builds or module.conditional_backends or module.plugin_input or path in reports:
                     verified_files[path.as_posix()] = file_identity(file.stat())
         grouped[name] = paths
     if kind != 'report':
         check_outputs(build, selected, grouped)
-    verify_backend_hashes(root, build, selected, grouped, reports_only=kind == 'report')
+    verify_backend_hashes(root, build, selected, grouped, reports_only=kind == 'report',
+                          all_compilers=verify_compilers)
+    return grouped, verified_files
+
+
+def pack_shard(root, modules, members, output, fingerprint, *, kind='combined', verify_compilers=False):
+    if kind not in ('combined', 'compiler', 'report'):
+        raise ValueError('unknown module shard kind: ' + str(kind))
+    if not valid_digest(fingerprint):
+        raise ValueError('invalid module shard fingerprint')
+    build = root / PROJECT_BUILD
+    selected = {name: modules[name] for name in members}
+    if not selected:
+        raise ValueError('empty module shard')
+    if kind == 'compiler':
+        selected = {name: replace(module, report=False) for name, module in selected.items()}
+    if kind == 'report' and not all(module.report for module in selected.values()):
+        raise ValueError('report-only archive includes a module without a report')
+    grouped, verified_files = checked_shard_files(root, selected, kind, verify_compilers)
     index = {n: {'build': selected[n].build.as_posix(), 'paths': sorted(map(str, grouped[n]))}
              for n in sorted(selected)}
     for name, row in index.items():
+        if kind != 'report' and selected[name].plugin_input:
+            row['plugin_input'] = True
         if selected[name].report:
             row['report'] = True
         if kind != 'report' and selected[name].extra_builds:
@@ -350,7 +375,10 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
                         or (name in wanted and name not in seeds and has_report != modules[name].report)
                         or (kind == 'report' and name in wanted and not has_report)):
                     raise ValueError('module report inventory differs from the checkout: ' + name)
-                module = Module('', Path(), Path(row['build']), extra_builds)
+                plugin = row.get('plugin_input', False)
+                if type(plugin) is not bool or (plugin and archived_kind == 'report'):
+                    raise ValueError('invalid native compiler inventory: ' + name)
+                module = Module('', Path(), Path(row['build']), extra_builds, plugin_input=plugin)
                 if len(set((module.build, *extra_builds))) != 1 + len(extra_builds):
                     raise ValueError('duplicate compiler build path: ' + name)
                 if name in wanted:
@@ -359,14 +387,19 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
                     # the producer read a Mathlib-only marker from the compiled closure.
                     if expected.conditional_backends and not extra_builds:
                         expected = replace(expected, extra_builds=())
-                    if kind != 'report' and (module.build, extra_builds) != (expected.build, expected.extra_builds):
+                    if kind != 'report' and (module.build, extra_builds, plugin) != (expected.build, expected.extra_builds, expected.plugin_input):
                         raise ValueError('module build path differs from the checkout: ' + name)
                     selected[name] = replace(expected, report=False) if name in seeds else expected
+                allowed = lean_artifact_paths(name, module)
+                if plugin and name not in wanted:
+                    # A portable sibling may be requested from a publisher on another platform.
+                    for platform in ('linux', 'darwin', 'win32'):
+                        allowed.update(plugin_paths(name, module, platform))
                 paths = {safe_path(p) for p in row['paths']}
                 reports = set(report_paths(name)) if has_report else set()
                 if (not paths or len(paths) != len(row['paths']) or not reports <= paths
                         or (archived_kind == 'report' and paths != reports)
-                        or not paths <= lean_artifact_paths(name, module) | reports
+                        or not paths <= allowed | reports
                         or owners.keys() & paths):
                     raise ValueError('invalid compiler file inventory: ' + name)
                 if kind == 'report':
@@ -408,7 +441,7 @@ def restore_shard(archive, descriptor, members, modules, destination, *, root=Pa
                     missing.add(path)
                 elif not live.is_file():
                     conflicts.add(path)
-                elif (module.extra_builds or module.conditional_backends or module.report) and path.suffix == '.trace':
+                elif (module.extra_builds or module.conditional_backends or module.plugin_input or module.report) and path.suffix == '.trace':
                     if live in invalid_local or not traces_match(live, stage / path):
                         conflicts.add(path)
                 elif archive_sha(live, None) != archive_sha(stage / path, None):
